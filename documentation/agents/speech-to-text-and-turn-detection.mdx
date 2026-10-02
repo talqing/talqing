@@ -1,0 +1,272 @@
+---
+title: "Speech and turn detection"
+description: "Streaming versus batch transcription, what actually ends a caller's turn, and how to stop an agent cutting people off."
+---
+
+`config.stt` is one provider/model pair from the catalog. It decides two things
+that feel unrelated and are not: how the caller's words are transcribed, and
+**what ends their turn**. Turn detection has no setting of its own — it falls
+out of the speech-to-text model plus [`config.language`](/agents/language).
+
+If your agent talks over people, or leaves long dead air, this is the page.
+
+## The `stt` object
+
+<ParamField path="provider" type="string" default="sarvam">
+  `deepgram`, `openai`, `elevenlabs`, `soniox`, `sarvam`, `raya` or `xai`.
+</ParamField>
+
+<ParamField path="model" type="string" default="saaras:v4">
+  A model that provider offers. It must be in the catalog and support the
+  agent's channel.
+</ParamField>
+
+<ParamField path="fallback" type="object | null">
+  A second provider/model to switch to mid-call. It must match the primary's
+  streaming/batch kind — see [model fallbacks](/agents/model-fallbacks).
+</ParamField>
+
+That is the whole object. There is no `language` here; the agent's single
+`config.language` reaches every model, each in its own spelling.
+
+Voice and video agents need one. Text agents have no `stt` at all, and neither
+does an agent running a speech-to-speech model.
+
+## Streaming versus batch
+
+A **streaming** model holds a socket open and transcribes as the caller speaks,
+emitting interim results and its own end-of-speech signal.
+
+A **batch** model (`streaming: false` in the catalog) transcribes one utterance
+per HTTP request. LiveKit's local voice-activity detector cuts the audio into
+utterances and posts each one.
+
+| | Streaming | Batch |
+| --- | --- | --- |
+| Reply latency | The transcript is already there when the turn ends | Adds a round-trip — roughly half a second before the agent starts |
+| Billing | The open socket bills the whole call | Only the utterances that were posted, so only the caller's share of the conversation |
+| Interim transcripts | Yes | No |
+| Word-count interruption | Works | **Does not work** |
+| What ends the turn | The model's own end-of-speech detector | Silence, or LiveKit's end-of-turn model |
+
+Batch is meaningfully cheaper — `xai/xai-stt-batch` is half the price of the
+streaming variant of the same service — and it is the only pipeline that can
+hear whether a sentence is finished. Streaming is the better default for
+latency.
+
+<Warning>
+  `turn_handling.interruption.min_words` needs interim transcripts, so it does
+  nothing on a batch model. Publishing the combination warns rather than fails:
+  *"word-count interruption needs interim transcripts, which batch speech-to-text
+  models do not produce - the agent will only notice the interruption once the
+  caller stops speaking."* See [turn handling](/agents/turn-handling).
+</Warning>
+
+## What ends a turn
+
+There is no `turn_detection` field. Storing one would let you pick something
+your models cannot do. Which detector runs is derived, and there are exactly
+three outcomes.
+
+<Steps>
+  <Step title="Streaming model → the provider's own detector">
+    The model that produces the transcript also decides when the caller stopped,
+    so the turn can never commit on a half-finished transcript. It can keep
+    listening when it hears the caller is not finished, which means
+    `min_silence_duration` is the window it gets rather than the whole wait, and
+    its transcription round-trip lands on top.
+  </Step>
+  <Step title="Batch model + a language the end-of-turn model knows → meaning">
+    A batch model has no endpointer, so LiveKit's local audio end-of-turn model
+    takes over — but only for the fourteen languages it was trained on. It
+    judges whether the *sentence* sounds finished, so it waits through a caller
+    who pauses mid-thought ("I need to think about that for… a moment"). It runs
+    locally, and costs nothing extra.
+  </Step>
+  <Step title="Batch model + anything else → plain silence">
+    Any other language, and Auto, fall back to the local voice detector alone:
+    the turn ends when the caller has been quiet for `min_silence_duration`,
+    whatever they were in the middle of saying.
+  </Step>
+</Steps>
+
+**The practical lever: a batch model plus one of the fourteen languages is the
+only pipeline that hears meaning rather than silence.** Everything else ends
+turns on a stopwatch.
+
+### The fourteen languages
+
+Arabic, Chinese, Dutch, English, French, German, Hindi, Indonesian, Italian,
+Japanese, Korean, Portuguese, Spanish, Turkish.
+
+The model keys off the primary subtag, so every regional variant counts:
+`en-GB`, `en-IN`, `pt-BR`, `es-419`, `zh-TW`, `fr-CA`, `ar-EG` and `hi-Latn` all
+qualify because `en`, `pt`, `es`, `zh`, `fr`, `ar` and `hi` do.
+
+`GET /v1/catalog` returns this set as `turn_detector_languages`, so you never
+have to hard-code it.
+
+<Note>
+  Speech-to-speech agents are a fourth case, and they are not on this page:
+  the model detects turns inside the provider's own socket. The whole
+  `min_silence_duration` budget is handed to it as its silence window, and
+  `max_silence_duration` never applies.
+</Note>
+
+## Endpointing
+
+Two numbers, under `turn_handling.endpointing`.
+
+<ParamField path="min_silence_duration" type="number" default="0.5">
+  Seconds of silence before the agent takes the turn. Minimum **0.25** — below
+  that the local voice detector could never reach the threshold the session
+  needs, so the write is refused.
+</ParamField>
+
+<ParamField path="max_silence_duration" type="number" default="2.5">
+  How long to wait *instead* when the end-of-turn model judges the caller is
+  mid-thought. Must be at least `min_silence_duration`, or the write is refused:
+  *"maximum silence must be at least the minimum - the agent waits the maximum
+  only when the turn detector judges the caller is mid-thought."*
+</ParamField>
+
+`max_silence_duration` does something on exactly one pipeline — batch model plus
+one of the fourteen languages. On every other pipeline nothing produces the
+"they are not finished" judgement it answers, and the value is ignored. The
+dashboard hides the field entirely unless the agent resolves to that pipeline.
+
+`min_silence_duration` always does something, but *what* depends on the model:
+
+| Model | What `min_silence_duration` is |
+| --- | --- |
+| Batch models | The wait, exactly. It tunes the voice detector that cuts utterances. |
+| `deepgram/nova-3`, `deepgram/nova-3-general`, `xai/xai-stt` | Sent to the provider as its end-of-speech window. |
+| `openai/gpt-live-transcribe` | Sent to the voice detector that commits the audio buffer to OpenAI. |
+| `elevenlabs/scribe_v2_realtime` | Sent to the provider, **clamped to 0.3 – 3.0** — ElevenLabs rejects anything outside that. |
+| `soniox/stt-rt-v5` | Sent to the provider, **clamped to 0.5 – 3.0** — Soniox documents no wider range. |
+| `deepgram/flux-general-en`, `deepgram/flux-general-multi`, `sarvam/saaras:v3`, `sarvam/saaras:v4` | A **floor**. These endpoint on their own schedule and accept no time window. |
+
+The same number also tunes the local voice detector for the whole call, which
+is what makes `interruption.min_speech_duration` measure one turn rather than
+one word.
+
+```json
+{
+  "turn_handling": {
+    "endpointing": {
+      "min_silence_duration": 0.7,
+      "max_silence_duration": 3.0
+    }
+  }
+}
+```
+
+## Fixing an agent that mistimes turns
+
+<CodeGroup>
+```bash cURL
+curl -X PATCH https://api.in.talqing.com/v1/agents/6f1d0a2c-6a0e-4f77-9b1e-6c1a2d3e4f50 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "language": "en",
+      "stt": { "provider": "openai", "model": "gpt-transcribe" },
+      "turn_handling": {
+        "endpointing": { "min_silence_duration": 0.5, "max_silence_duration": 3.0 }
+      }
+    }
+  }'
+```
+
+```typescript TypeScript
+const agentId = "6f1d0a2c-6a0e-4f77-9b1e-6c1a2d3e4f50";
+
+await talqing.agents.update({
+  agent_id: agentId,
+  updateAgentRequest: {
+    config: {
+      language: "en",                                        // one of the fourteen
+      stt: { provider: "openai", model: "gpt-transcribe" }, // batch
+      turn_handling: {
+        endpointing: { min_silence_duration: 0.5, max_silence_duration: 3.0 },
+      },
+    },
+  },
+});
+await talqing.agents.publish({ agent_id: agentId });
+```
+
+```python Python
+agent_id = "6f1d0a2c-6a0e-4f77-9b1e-6c1a2d3e4f50"
+
+talqing.agents.update(
+    agent_id,
+    config={
+        "language": "en",                                         # one of the fourteen
+        "stt": {"provider": "openai", "model": "gpt-transcribe"},  # batch
+        "turn_handling": {
+            "endpointing": {"min_silence_duration": 0.5, "max_silence_duration": 3.0},
+        },
+    },
+)
+talqing.agents.publish(agent_id)
+```
+</CodeGroup>
+
+`turn_handling` merges key by key, so its other settings stay as they are. Nothing
+reaches a caller until you publish.
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| The agent cuts people off mid-sentence | A stopwatch is ending the turn, not a judgement about the sentence | Move to a batch model and set `config.language` to one of the fourteen. If you must stay on streaming, raise `min_silence_duration`. |
+| Still cuts people off on a batch model | The language is Auto, or is not one of the fourteen | Set `config.language` to a covered code. Auto always falls back to plain silence. |
+| It cuts off callers who trail off, but only sometimes | `max_silence_duration` is too close to `min_silence_duration` | Raise `max_silence_duration`. It is the wait when the model thinks they are mid-thought. |
+| Long dead air before every reply | `min_silence_duration` too high, or a batch model's round-trip on top of it | Lower `min_silence_duration`, or move to a streaming model. |
+| Raising `min_silence_duration` changes nothing | On Deepgram Flux or Sarvam Saaras the setting is only a floor | Change the model, or accept the provider's schedule. |
+| The agent replies before the caller has finished a *word* | Not endpointing — interruption or preemptive generation | See [turn handling](/agents/turn-handling). |
+| The agent ignores a caller talking over it | `interruption.min_words` on a batch model | Use `min_speech_duration` instead; word counting needs interim transcripts. |
+| The caller is transcribed in the wrong language or script | The model does not detect, and Auto fell back to its default | See [language](/agents/language). |
+
+## Reference: speech-to-text models
+
+"Auto" is the code the model runs on when `config.language` is `null`.
+
+| Model | Streaming | Languages | On Auto |
+| --- | --- | --- | --- |
+| `xai/xai-stt` | Yes | 25 | Sends `en`, but xAI always auto-detects — the code only switches on number formatting |
+| `xai/xai-stt-batch` | **No** | 25 | Same as above |
+| `sarvam/saaras:v3`, `sarvam/saaras:v4` | Yes | 23 Indian languages | `unknown` — genuine detection |
+| `raya/bakbak-stt` | **No** | 23 Indian languages | `en` — **no detection**, and the code selects the output script |
+| `soniox/stt-rt-v5` | Yes | 60 | Genuine detection across all 60 |
+| `elevenlabs/scribe_v2_realtime` | Yes | 19 | Genuine detection |
+| `elevenlabs/scribe_v2` | **No** | 19 | Genuine detection |
+| `openai/gpt-live-transcribe` | Yes | 57 | Genuine detection |
+| `openai/gpt-transcribe` | **No** | 57 | Genuine detection |
+| `deepgram/nova-3-general` | Yes | 34, plus a multilingual option | `multi` — detects and code-switches |
+| `deepgram/nova-3` | Yes | 34, plus a multilingual option | `en` — **no detection**; a caller speaking anything else is mistranscribed |
+| `deepgram/flux-general-en` | Yes | English only | `en` |
+| `deepgram/flux-general-multi` | Yes | 34, plus a multilingual option | Genuine detection |
+
+Every entry runs on `voice` and `video`. All four batch models are marked
+**No** under Streaming: `xai/xai-stt-batch`, `raya/bakbak-stt`,
+`elevenlabs/scribe_v2` and `openai/gpt-transcribe`.
+
+Prices are per audio second and billed to your own provider key. A streaming
+model bills the whole call; a batch model bills only the speech it was sent.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Language" href="/agents/language">
+    The one setting every model shares, and where Auto is a trap.
+  </Card>
+  <Card title="Turn handling" href="/agents/turn-handling">
+    Interruptions, false-interruption recovery and preemptive generation.
+  </Card>
+  <Card title="Audio processing" href="/agents/audio-processing">
+    Cleaning up a noisy caller before the transcriber hears them.
+  </Card>
+</CardGroup>

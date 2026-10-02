@@ -1,0 +1,284 @@
+---
+title: "Templating and data"
+description: "The six template roots, the difference between tooldata and userdata, and how a value moves from one operation to the next."
+---
+
+Operations read values with `{{root.name}}` tokens. There are six roots, and
+between them they are the whole vocabulary an operation has: what the model
+sent, what earlier operations produced, what the session knows, what the
+platform knows, what the workspace configured, and your credentials.
+
+## The six roots
+
+| Token | Reads | Written by |
+| --- | --- | --- |
+| `{{args.field}}` | The arguments the model sent on this tool call | The model, against your `json_schema` |
+| `{{tooldata.field}}` | This tool run's own scratch space | `publish_fields` and `set_variable`, earlier in this tree |
+| `{{userdata.field}}` | The session's state | The request that started the session, any tool, and the contact record |
+| `{{system_vars.field}}` | What the platform knows about this session | The platform. Read-only |
+| `{{vars.field}}` | What the workspace configured for this session | The agent's declarations plus the starting request. Read-only |
+| `{{secrets.NAME}}` | A [workspace secret](/platform/secrets) | You, in the dashboard or over the API. Never visible to the model |
+
+Every root works **in the URL, in the query, in the body and in headers** — and
+in every other templated string in the tree: a `say`, a `set_variable` value, an
+`if`'s `left` and `right`, a `frontend_rpc` payload.
+
+Three places templates deliberately do not resolve:
+
+- A [`code`](/tools/code) operation's TypeScript. It has no template syntax at
+  all; the same six roots arrive as `input.args`, `input.tooldata` and so on.
+- An `http` operation's `method`, which is a fixed choice of `GET`, `POST`,
+  `PUT`, `PATCH` or `DELETE`.
+- A [`transfer`](/tools/transfer) destination, which is a literal phone number
+  by design.
+
+**A string that is exactly one token keeps the resolved value's type.** `"{{args.quantity}}"`
+sends the number `3`, not the string `"3"`; `"{{tooldata.slots}}"` sends the
+array. Put anything else in the string — a space, a prefix — and the token is
+stringified into the surrounding text. A token that resolves to nothing is `null`
+as the whole value and an empty string inside text; an `http` header or query
+value that is `null` is [left out of the request](/tools/http#headers-and-query).
+
+A token whose root is not one of the six is **an error at save, not text**. A
+bare `{{name}}`, a `{{customer.number}}` pasted from another platform, or a typo
+like `{{userdate.name}}` is refused when the tool is saved, because the
+alternative is sending those braces to your API on every call. There is no
+escape syntax; prose containing `{{anything}}` cannot be saved outside a `code`
+operation.
+
+## The two stores
+
+`tooldata` and `userdata` are the two places an operation can write. Which one
+you pick is not a detail:
+
+**`tooldata` is created empty every time the tool runs and is gone when it
+returns.** Only later operations in the same tree can read it. It is the
+plumbing between two operations.
+
+**`userdata` belongs to the session.** Other tools read it, later turns read it,
+the agent's prompt substitutes it, and it is persisted with the call and merged
+onto the contact record. Write there only what the conversation should still
+know afterwards.
+
+The default is `tooldata`. A booking reference the agent must be able to repeat
+ten turns later belongs in `userdata`; the raw API envelope you unpacked to find
+it does not.
+
+## Moving a value between operations
+
+**An operation's result is not automatically visible to the next one.** `http`,
+`code` and `frontend_rpc` declare `publish_fields`, each entry
+`{path, key?, store}`:
+
+```json
+{
+  "kind": "http",
+  "config": { "method": "GET", "url": "https://api.example.com/orders/{{args.order_id}}" },
+  "publish_fields": [
+    { "path": "order.status", "store": "tooldata" },
+    { "path": "order.tracking.url", "key": "tracking_url", "store": "userdata" },
+    { "path": "order.items.0.name", "key": "first_item", "store": "tooldata" }
+  ]
+}
+```
+
+- **`path`** picks a value out of the result by dotted path. A numeric segment
+  indexes an array, so `order.items.0.name` is the first item's name.
+- **`key`** names it. Left out, it is the last segment of the path — `order.status`
+  publishes as `status`. Set it explicitly whenever the last segment is not the
+  name you want to read back, and always when the path ends in an index.
+- **`store`** is required, and it is the difference between a value that dies
+  with the tool and one the whole session carries.
+
+`set_variable` writes one templated value directly, with the same required
+`store` and no operation to produce it:
+
+```json
+{
+  "kind": "set_variable",
+  "config": { "key": "callback_number", "value": "{{system_vars.human_phone_number}}", "store": "userdata" }
+}
+```
+
+Two failure modes to know:
+
+<Warning>
+**A publish path that is not in the result fails the operation.** If the value
+at `path` is missing, the operation fails with
+`publish field path 'order.status' was not found in operation output`, and
+`on_error` decides what happens next. This is the most common mistake in a
+tool: a path one level too deep, or a field your API only returns sometimes.
+Run the draft against a real response before publishing. A `null` on the path
+is not missing — it publishes `null`, which templates read as nothing.
+</Warning>
+
+A `background_execution` operation never waits for a result, so it cannot
+publish. Setting both is a publish error.
+
+## What is an error, and what is a warning
+
+| You write | Result | Why |
+| --- | --- | --- |
+| `{{tooldata.X}}` that nothing earlier in this tool publishes | **Error** at publish | `tooldata` starts empty on every run, so that read can only ever resolve to nothing |
+| `{{userdata.X}}` that this tool does not publish | **Warning** at publish | `X` has to already be in the session — the API caller, or an earlier tool, must put it there. Say so in the agent's prompt |
+| `{{args.X}}` for an undeclared `X` | **Error** at publish | It is not a parameter the model can fill |
+| `{{secrets.X}}` for a secret that does not exist | **Error** at publish | Nothing would authenticate the request |
+| `{{system_vars.X}}` outside the six keys | **Error** at publish | The key space is closed: an unknown name is a typo, not a value someone might supply later |
+| `{{system_vars.now/date/time}}` on an agent with no `timezone` | **Error** at agent publish | The clock has nothing to resolve against |
+| `{{system_vars.human_phone_number}}` on a text agent | **Warning** at agent publish | It will always be empty |
+| `{{vars.X}}` the calling agent does not declare | **Warning** at agent publish | The key space is open — the starting request may supply it |
+| `{{userdata}}` with no key | **Error** at save | That is the whole bag, not a variable |
+| A `userdata` key starting with `_talqing` | **Error** at save | The prefix is reserved for the platform's own session state |
+| `{{consent.…}}` | **Error** at publish | It carries the spoken recording notice and only an agent's greeting may read it |
+
+Errors block publish; warnings do not. A key published anywhere earlier in the
+tree counts as available, including inside an `if` branch: keys published before
+the branch are readable in both, and keys published inside a branch are readable
+only later in that same branch.
+
+A secret the tool references cannot be deleted afterwards: the delete is
+refused and names the tool. See [secrets](/platform/secrets#deleting-one).
+
+## `system_vars`
+
+Six keys, filled by the platform and writable by nothing.
+
+| Key | Example | Notes |
+| --- | --- | --- |
+| `human_phone_number` | `+919876543210` | The caller inbound, the person you called outbound |
+| `agent_phone_number` | `+912248900123` | Your number on this call |
+| `direction` | `inbound` | `inbound` or `outbound`, lowercase |
+| `now` | `2026-08-19T19:26:59+05:30` | ISO 8601, in the agent's timezone. Send it to an API; do not read it aloud |
+| `date` | `Wednesday, 19 August 2026` | Always in English |
+| `time` | `7:26 PM` | |
+
+So a tool can post the caller's number to a CRM, stamp a record with
+`{{system_vars.now}}`, or branch on the direction, without the agent having to
+ask.
+
+**The three phone keys are empty on web calls, on text conversations and in a
+dashboard test run.** Never make one the only source of a fact the tool needs;
+take it as an argument as well, or read it from `userdata`.
+
+**The clock keys read the moment the *tool* ran**, not the moment the call
+started — which is what makes `{{system_vars.now}}` right in a `created_at` you
+send to an API forty minutes into a call. (In an agent's prompt or greeting the
+same tokens are frozen at the moment the agent started, because re-resolving
+them every turn would throw away the model's prompt cache.) They resolve
+wherever the agent has a `timezone` set, on every channel.
+
+## `vars`
+
+`{{vars.name}}` is the workspace's own configuration for this session: the
+agent's declared defaults, with whatever the request that started the session
+supplied merged over them. Read-only, and nothing inside the session can write
+it. See [variables](/agents/variables) for declaring them.
+
+For a tool this is what removes the copy-per-customer problem:
+
+```json
+{
+  "kind": "http",
+  "config": {
+    "method": "POST",
+    "url": "https://{{vars.api_domain}}/v2/bookings",
+    "headers": { "Authorization": "Bearer {{secrets.PARTNER_API_KEY}}" },
+    "body": { "clinic": "{{vars.clinic_code}}", "slot": "{{args.slot_id}}" }
+  }
+}
+```
+
+One published tool serves every reseller. A tool is a workspace-level object and
+does not know which agent will call it, so the `{{vars.…}}` names it reads are
+checked against declarations **only when an agent that attaches it is
+published** — and an undeclared name is a warning there, never an error.
+
+<Warning>
+`vars` are visible to the model, which can read them aloud or repeat them back.
+A credential belongs in a workspace secret, read as `{{secrets.NAME}}` from a
+tool, where the model never sees it.
+</Warning>
+
+## Do not compare a clock string
+
+`{{system_vars.time}}` is `"7:26 PM"` and `{{system_vars.date}}` is
+`"Wednesday, 19 August 2026"`. Neither is a number, and `gt` / `lt` need two
+numbers — so an `if` comparing `"7:26 PM"` against `"09:00"` **fails the
+operation** rather than quietly taking the `else` branch.
+
+Business-hours logic belongs in a [`code`](/tools/code) operation over
+`new Date(input.system_vars.now)`. See
+[conditionals](/tools/conditionals#why-time-and-date-comparisons-fail).
+
+## A worked example
+
+Look up availability, keep three values with three different lifetimes, and read
+them back in a spoken line.
+
+```json
+[
+  {
+    "kind": "set_variable",
+    "config": { "key": "requested_date", "value": "{{args.date}}", "store": "userdata" }
+  },
+  {
+    "kind": "http",
+    "config": {
+      "method": "GET",
+      "url": "https://{{vars.api_domain}}/v2/availability",
+      "query": { "date": "{{args.date}}", "clinic": "{{vars.clinic_code}}" },
+      "headers": {
+        "Authorization": "Bearer {{secrets.CLINIC_API_KEY}}",
+        "X-Request-Time": "{{system_vars.now}}"
+      },
+      "timeout": 8
+    },
+    "silent": true,
+    "publish_fields": [
+      { "path": "count", "store": "tooldata" },
+      { "path": "slots.0.start", "key": "first_slot", "store": "tooldata" },
+      { "path": "slots.0.id", "key": "held_slot_id", "store": "userdata" }
+    ]
+  },
+  {
+    "kind": "say",
+    "config": {
+      "text": "I have {{tooldata.count}} appointments free on {{userdata.requested_date}}. The earliest is at {{tooldata.first_slot}}."
+    }
+  }
+]
+```
+
+What each store buys:
+
+- `requested_date` and `held_slot_id` go to **`userdata`**, so the next tool —
+  `book_appointment`, called on a later turn — can read
+  `{{userdata.held_slot_id}}` without asking the caller again, and the agent's
+  prompt can refer to the date.
+- `count` and `first_slot` go to **`tooldata`**: they exist to build one
+  sentence and have no business outliving it.
+- The header carries `{{system_vars.now}}` — templating works in headers exactly
+  as it does in the URL.
+- Because the only operation that could return a result is `silent`, the tool is
+  silent and the agent says the `say` line and nothing else.
+
+When you test that tool, seed the state it will really run in: the test run
+takes `userdata`, `vars` and a `timezone` alongside the arguments. See
+[testing and publishing](/tools/testing-and-publishing).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="The HTTP operation" href="/tools/http">
+    Every config field, auth, network rules and worked examples.
+  </Card>
+  <Card title="The code operation" href="/tools/code">
+    The TypeScript sandbox, `input`, and its real limits.
+  </Card>
+  <Card title="Conditionals" href="/tools/conditionals">
+    Branching on a value an earlier operation published.
+  </Card>
+  <Card title="Secrets" href="/platform/secrets">
+    Where `{{secrets.NAME}}` comes from.
+  </Card>
+</CardGroup>

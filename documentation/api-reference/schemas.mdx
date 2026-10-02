@@ -1,0 +1,114 @@
+---
+title: "Schemas"
+description: "Fetching the five large request types by name, and why an AI-facing surface defers to them instead of inlining them."
+---
+
+`GET /v1/schemas/{name}` returns the full JSON Schema of one of five request
+types. If you arrived here because a tool argument told you to
+`describe_schema('AgentConfig')` before writing it, that stub is the whole
+reason this endpoint exists — fetch the document, then write the object.
+
+```bash
+curl https://api.in.talqing.com/v1/schemas/AgentConfig \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```json
+{
+  "name": "AgentConfig",
+  "json_schema": {
+    "type": "object",
+    "properties": {}
+  }
+}
+```
+
+Two fields: the name you asked for, and the schema. Any other name is a `422`.
+
+## The five
+
+| Name | What it describes |
+| --- | --- |
+| `AgentConfig` | A whole agent definition — every field of `config`, which is what `POST /v1/agents` takes. |
+| `AgentOverride` | The same tree with every field optional: an update to an agent, or one call's changes without touching it. |
+| `AgentTeam` | Several agents on one call, defined inline and handing off to each other. |
+| `TaskConfig` | An agent task: its inputs, its output shape and its model stack. |
+| `ToolOperations` | The operation tree a custom tool runs — the eleven kinds and their configs, as an array. |
+
+They compose, so a document you fetch may itself defer to another. Fetching
+`AgentTeam` gives you a 2.3k-character envelope whose members point at
+`AgentConfig` and `AgentOverride` rather than a document with two copies of the
+agent tree inside it.
+
+## Why they are fetched rather than inlined
+
+Five of this API's request types are not fields, they are whole product
+surfaces. An agent's config alone renders as roughly 34,000 characters of JSON
+Schema.
+
+That is fine over HTTP, where a request body is a request body. It is not fine
+for a tool-calling surface. MCP has no way for one tool to share a definition
+with another, so every operation that accepts an agent config would have to
+carry the entire tree inside its own argument schema —
+`create_agent`, `update_agent`, `create_outbound_call`, `calls_token`,
+`create_chat`, `create_call_batch` and the members of a team, each
+with a private copy. That was most of a tool surface that no longer fitted in a
+200k-context client.
+
+So on the agent-facing surface those arguments carry a placeholder — an object
+whose description ends in `describe_schema('AgentConfig')` — and this endpoint
+serves the real thing on demand. You pay for the big document once, in the turn
+that is actually writing an agent, instead of in every turn.
+
+<Note>
+**Only the agent-facing view defers.** The OpenAPI document carries every type
+in full, both generated SDKs carry the full types, and request validation on the
+server is unchanged. A `config` you send is checked against the same model
+whether you read its shape from here, from the SDK, or from the endpoint
+reference.
+</Note>
+
+That is why this page matters mostly to two readers: someone driving the
+[MCP server](/mcp/tools) from a coding agent, and a
+[CoPilot](/agents/copilot) writing a config in the dashboard. If you are writing
+TypeScript or Python, you already have these types.
+
+## Fetching one
+
+<CodeGroup>
+```bash cURL
+curl https://api.in.talqing.com/v1/schemas/ToolOperations \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const { name, json_schema } = await talqing.schemas.get({ name: "ToolOperations" });
+console.log(name, Object.keys(json_schema));
+```
+
+```python Python
+document = talqing.schemas.get("ToolOperations")
+print(document["name"], document["json_schema"].keys())
+```
+</CodeGroup>
+
+The `name` argument is a closed set in both SDKs — a typo is a type error before
+it is a `422`.
+
+## Where each one is accepted
+
+| Document | Accepted as |
+| --- | --- |
+| `AgentConfig` | `config` on `POST /v1/agents`; `agent` on `POST /v1/calls/outbound`, `POST /v1/calls/token`, `POST /v1/chats` and `POST /v1/calls/batches`; `agent` on a team member |
+| `AgentOverride` | `config` on `PATCH /v1/agents/{agent_id}`; `agent_override` on `POST /v1/calls/outbound`, `POST /v1/calls/token`, `POST /v1/chats` and `POST /v1/calls/batches`, and on a team member |
+| `AgentTeam` | `agent_team` on the same four |
+| `TaskConfig` | `config` on `POST /v1/tasks`, and on `PATCH /v1/tasks/{task_id}` with every field optional |
+| `ToolOperations` | `operations` on `POST /v1/tools` and `PATCH /v1/tools/{tool_id}`, and on an inline tool inside an agent config |
+
+For what the fields inside those documents mean, rather than what shape they
+have, read [the agent config](/agents/overview),
+[per-call configuration](/agents/per-call-configuration),
+[agent teams on a call](/teams/agent-teams-on-a-call),
+[task inputs and output](/tasks/inputs-and-output) and
+[the operation tree](/tools/operation-tree). A JSON Schema tells you what will
+be accepted; those pages tell you what to put in it.

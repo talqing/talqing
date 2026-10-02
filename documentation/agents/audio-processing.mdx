@@ -1,0 +1,219 @@
+---
+title: "Audio processing"
+description: "Clean up a noisy caller before the agent hears them, and mix ambient or thinking sounds into what the agent sends back."
+---
+
+Two independent settings, on opposite ends of the call. `noise_cancellation`
+cleans the audio coming **in** from the caller. `background_audio` mixes sound
+into what the agent sends **out**. Both are voice and video only — a text agent
+has neither, and switching a config to `text` clears them.
+
+## Noise cancellation
+
+Speech enhancement applied at the front of the input chain, before anything else
+sees the caller's audio. That means the speech-to-text model, the voice detector
+that ends turns, and the [call recording](/telephony/recording) all get the
+cleaned signal — so the recording is what the agent actually heard.
+
+```json
+{
+  "noise_cancellation": {
+    "enabled": true,
+    "provider": "aicoustics",
+    "model": "quail_vf_s",
+    "enhancement_level": 0.8
+  }
+}
+```
+
+<ParamField path="enabled" type="boolean" default="false">
+  Off unless you ask for it. Enhancement is lossy, and the strength that rescues
+  a call from a noisy street can hurt one from a quiet room, so it is never
+  turned on for an existing agent by anything but an explicit edit.
+</ParamField>
+
+<ParamField path="provider" type="string" default="aicoustics">
+  A `noise_cancellation` provider from `GET /v1/catalog`. `aicoustics` is the
+  only one today.
+</ParamField>
+
+<ParamField path="model" type="string" default="quail_vf_s">
+  One of the three models below. An unknown pair is refused:
+  `unknown noise cancellation model 'aicoustics/quail_xl' - pick from: …`
+</ParamField>
+
+<ParamField path="enhancement_level" type="number" default="0.8">
+  0.0 – 1.0. How hard to suppress everything that is not the caller.
+</ParamField>
+
+| Level | What it does |
+| --- | --- |
+| 0.5 | Conservative. Always preserves the foreground speech. |
+| 0.8 | The default. Gives the best word error rate on difficult audio. |
+| 1.0 | Suppresses interfering speech most aggressively. |
+
+### The models
+
+| Model | Label | What it does |
+| --- | --- | --- |
+| `quail_vf_s` | Quail Voice Focus S | Isolates the one person talking to the agent, suppressing other voices, echo and background noise. |
+| `quail_vf_l` | Quail Voice Focus L | The larger Voice Focus model — same job, significantly more CPU, no documented accuracy gain. |
+| `quail_l` | Quail L | Keeps every voice and removes only noise — a speakerphone, a room, a distant speaker. |
+
+`quail_vf_s` is the default. Reach for `quail_l` when more than one person is
+meant to be heard, and for `quail_vf_l` only if `quail_vf_s` leaves noise you
+cannot live with.
+
+<Warning>
+  Noise cancellation runs on **your own ai-coustics key**. Add one under
+  [provider keys](/get-started/provider-keys) before publishing, or the agent is
+  refused with `no ai-coustics API key for this workspace - add one under BYOK`.
+  ai-coustics bills you directly; nothing about it passes through Talqing, and
+  it does not appear in the per-minute cost estimate.
+
+  The key is only required while `enabled` is `true` — the model and strength
+  stay stored when you switch it off, so the toggle remembers your settings and
+  an agent with it off never demands the key.
+</Warning>
+
+If the licence key is rejected, or the audio stream is one the enhancer cannot
+handle, the enhancer disables itself and the call runs on the raw audio rather
+than failing. Nothing else would say so, so the call's trace carries a
+`noise_cancellation.failed` event — check there when an agent that should be
+hearing clean audio is not. See
+[debugging agents](/observability/debugging-agents).
+
+<CodeGroup>
+```bash cURL
+curl -X PATCH https://api.in.talqing.com/v1/agents/6f1d0a2c-6a0e-4f77-9b1e-6c1a2d3e4f50 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "noise_cancellation": {
+        "enabled": true,
+        "provider": "aicoustics",
+        "model": "quail_vf_s",
+        "enhancement_level": 0.8
+      }
+    }
+  }'
+```
+
+```typescript TypeScript
+const agentId = "6f1d0a2c-6a0e-4f77-9b1e-6c1a2d3e4f50";
+
+await talqing.agents.update({
+  agent_id: agentId,
+  updateAgentRequest: {
+    config: {
+      noise_cancellation: {
+        enabled: true,
+        provider: "aicoustics",
+        model: "quail_vf_s",
+        enhancement_level: 0.8,
+      },
+    },
+  },
+});
+await talqing.agents.publish({ agent_id: agentId });
+```
+
+```python Python
+agent_id = "6f1d0a2c-6a0e-4f77-9b1e-6c1a2d3e4f50"
+talqing.agents.update(
+    agent_id,
+    config={
+        "noise_cancellation": {
+            "enabled": True,
+            "provider": "aicoustics",
+            "model": "quail_vf_s",
+            "enhancement_level": 0.8,
+        }
+    },
+)
+talqing.agents.publish(agent_id)
+```
+</CodeGroup>
+
+## Background audio
+
+Ambient and thinking sounds mixed into the agent's own output track, so a caller
+hears a room rather than a vacuum.
+
+```json
+{
+  "background_audio": {
+    "enabled": true,
+    "ambient": "office",
+    "ambient_volume": 0.4,
+    "thinking": "keyboard",
+    "thinking_volume": 0.6
+  }
+}
+```
+
+<ParamField path="enabled" type="boolean" default="false">
+  Nothing plays unless this is on.
+</ParamField>
+
+<ParamField path="ambient" type="string | null" default="office">
+  A continuous bed under the whole call: `office`, `city`, `forest`, `crowd` or
+  `hold_music`. `null` for none.
+</ParamField>
+
+<ParamField path="ambient_volume" type="number" default="0.4">
+  0.0 – 1.0, against the clip's own level.
+</ParamField>
+
+<ParamField path="thinking" type="string | null" default="keyboard">
+  Played while the agent is working out its reply: `keyboard` or `keyboard2`.
+  `null` for none.
+</ParamField>
+
+<ParamField path="thinking_volume" type="number" default="0.6">
+  0.0 – 1.0.
+</ParamField>
+
+| Option | `ambient` | `thinking` |
+| --- | --- | --- |
+| Office ambience | `office` | — |
+| City ambience | `city` | — |
+| Forest ambience | `forest` | — |
+| Crowded room | `crowd` | — |
+| Hold music | `hold_music` | — |
+| Keyboard typing | — | `keyboard` |
+| Keyboard typing (alternate) | — | `keyboard2` |
+| Nothing | `null` | `null` |
+
+Both set to `null` and nothing starts at all, even with `enabled: true`.
+
+<Note>
+  **Every transfer stops the ambient bed and plays hold music instead.** When the
+  agent [transfers a caller to a person](/tools/transfer), the caller is parked
+  while the other phone rings: the bed stops, hold music takes over, and the
+  caller's audio is switched off in both directions until the transfer lands or
+  they come back to the agent. Silence on a thirty-second hold reads as a
+  dropped call, and none of the other clips mean "wait".
+
+  So `ambient: "hold_music"` does not choose the hold sound — that is fixed. It
+  only sets how loud the hold music is: an agent whose ambient bed already *is*
+  hold music has settled that question with its callers, so its
+  `ambient_volume` carries. Every other agent gets 0.8.
+
+  If the transfer fails and the caller comes back, the ambient bed starts again.
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Speech and turn detection" href="/agents/speech-to-text-and-turn-detection">
+    What the cleaned audio feeds, and what ends a caller's turn.
+  </Card>
+  <Card title="Transfer" href="/tools/transfer">
+    Handing a caller to a person, and what they hear while they wait.
+  </Card>
+  <Card title="Provider keys" href="/get-started/provider-keys">
+    Adding the ai-coustics key noise cancellation needs.
+  </Card>
+</CardGroup>

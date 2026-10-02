@@ -1,0 +1,388 @@
+---
+title: "Python"
+description: "The talqing package: clients, the omit rule, errors, pagination, streams, typing and the timeout that will bite you."
+---
+
+`talqing` is the Python client for the `/v1` API, generated from the same
+OpenAPI document as the TypeScript SDK. It carries every operation under the
+same names, sync and async.
+
+```bash
+pip install talqing
+```
+
+Python 3.10 or newer. `httpx` is the only runtime dependency you will notice.
+The package ships a `py.typed` marker, so a type checker in your project sees
+every TypedDict it declares — no stub package and no `# type: ignore`.
+
+## Creating a client
+
+```python
+import os
+
+from talqing import Talqing
+
+with Talqing(
+    token=os.environ["TALQING_API_KEY"],
+    base_url="https://api.in.talqing.com",
+) as talqing:
+    agents = talqing.agents.list()
+```
+
+```python
+Talqing(
+    token: str | None = None,
+    *,
+    base_url: str | None = None,
+    timeout: float | httpx.Timeout = 30.0,
+    headers: Mapping[str, str] | None = None,
+    transport: httpx.BaseTransport | None = None,
+)
+```
+
+| Argument | What it does |
+| --- | --- |
+| `token` | Your personal access token. **Required** — a missing or blank one raises `ValueError` with instructions, rather than failing later as a `401`. |
+| `base_url` | The region. **Required, with no default.** A client that quietly pointed at localhost would fail in production as a connection error three layers down; one that refuses to start says what is actually wrong. Trailing slashes are trimmed. |
+| `timeout` | Per-request, in seconds. Defaults to **30.0**. Read the warning below before running a task. |
+| `headers` | Sent on every request, merged over the SDK's own `Authorization` and `User-Agent`. |
+| `transport` | An `httpx` transport — a proxy, a retrying transport, a test double. |
+
+A personal access token has **no prefix**. It is an opaque signed string: do not
+parse it and do not assume a shape.
+
+`Talqing.from_env(**overrides)` reads `TALQING_API_KEY` and `TALQING_BASE_URL`,
+and anything you pass wins over the environment:
+
+```bash
+export TALQING_API_KEY="…"
+export TALQING_BASE_URL="https://api.in.talqing.com"
+```
+
+```python
+with Talqing.from_env() as talqing:
+    print(talqing.agents.list())
+```
+
+`AsyncTalqing` has exactly the same shape with every operation a coroutine, and
+takes an `httpx.AsyncBaseTransport`:
+
+```python
+import asyncio
+
+from talqing import AsyncTalqing
+
+
+async def main() -> None:
+    async with AsyncTalqing.from_env() as talqing:
+        await talqing.agents.list()
+
+
+asyncio.run(main())
+```
+
+Both are context managers, which is the shortest way to close the connection
+pool. Outside a `with`, call `talqing.close()` — `await talqing.close()` on the
+async client.
+
+Two properties come with the client: `talqing.base_url`, and `talqing.http`, the
+underlying `httpx.Client` already carrying the base URL and the token.
+
+<Warning>
+**The default `timeout=30.0` is shorter than an agent task's own budget.**
+`POST /v1/tasks/{task_id}/runs` runs the task and waits for the result, and a
+task's `timeout_seconds` defaults to 300 and may be set as high as 600. With the
+default client, a task that takes longer than thirty seconds raises
+`httpx.ReadTimeout` on your side while the run continues on ours — you lose the
+result, not the spend. Raise the timeout past the task's own budget before you
+run one.
+</Warning>
+
+```python
+import httpx
+
+# Comfortably past a 600-second task, with a short connect timeout.
+long_running = Talqing.from_env(timeout=httpx.Timeout(660.0, connect=10.0))
+run = long_running.tasks.runs.create(task_id, vars={"domain": "acme.com"})
+print(run["status"], run["output"])
+```
+
+## The call shape
+
+Operations are reached by resource, exactly as the API names them. **Path
+parameters are positional. Everything else — body fields and query parameters
+alike — is a keyword argument.**
+
+```python
+talqing.agents.list(limit=50)
+talqing.agents.get(agent_id)
+talqing.agents.versions.rollback(agent_id, 3)
+talqing.calls.batches.pause(batch_id)
+talqing.telephony.phone_numbers.assign(number_id, agent_id=agent_id)
+```
+
+### An argument you do not pass is not sent
+
+Every optional argument defaults to a sentinel, `OMIT`, and an argument still at
+`OMIT` is left out of the request entirely. That is what makes an explicit
+`null` sayable — the distinction a `PATCH` needs and a plain `None` default
+would destroy:
+
+```python
+# Clears the label. `null` is sent.
+talqing.telephony.phone_numbers.update(number_id, label=None)
+
+# Changes only can_outbound. The label is not mentioned, so it is left alone.
+talqing.telephony.phone_numbers.update(number_id, can_outbound=False)
+```
+
+`OMIT` is exported from `talqing` if you ever need to pass it deliberately, for
+instance when building arguments in a dict.
+
+### The one renamed method
+
+`telephony.phone_numbers.import_()` — `import` is a Python keyword. Everything
+else carries the API's own name.
+
+## Errors
+
+Every non-2xx raises `TalqingAPIError`. There is one error envelope, so there is
+nothing to branch on.
+
+```python
+from talqing import TalqingAPIError
+
+try:
+    talqing.agents.publish(agent_id)
+except TalqingAPIError as error:
+    print(error.status_code, error)  # 400 config is invalid
+    for problem in error.errors:     # ['llm: unknown model gpt-4.9']
+        print(problem)
+```
+
+| Member | Type | What it holds |
+| --- | --- | --- |
+| `str(error)` | `str` | The envelope's `message`. |
+| `.status_code` | `int` | The HTTP status. |
+| `.errors` | `list[str]` | The per-field problems. Always a list, empty when there was only one problem. |
+| `.detail` | `Any` | The decoded `detail` object. |
+| `.response` | `httpx.Response` | The raw response. |
+
+A failure that never reached the API — a proxy's HTML `502`, a gateway
+timeout — has no envelope to parse. It still raises `TalqingAPIError`, with the
+raw body text as the message and an empty `errors`. A connection error or a
+timeout raises `httpx`'s own exception, unchanged.
+
+## Pagination
+
+```python
+from talqing import paginate
+
+for agent in paginate(talqing.agents.list):
+    print(agent["config"]["name"])
+
+for call in paginate(talqing.calls.list, agent_id=agent_id, type="SIP_INBOUND"):
+    print(call["id"], call["close_reason"])
+```
+
+`paginate(page, *, limit=200, **filters)` takes the bound method itself, not a
+call to it, and passes anything else straight through as a filter. It stops when
+`has_more` is false. `paginate_async` is the awaited form, driven with
+`async for`. See [pagination](/api-reference/pagination).
+
+## Streams
+
+The four event-stream endpoints return a `Stream` — an iterator of decoded
+frames, and a context manager. Opening is not a coroutine on either client, so
+`async for` reads exactly the way `for` does.
+
+```python
+with talqing.conversations.events(conversation_id) as events:
+    for frame in events:
+        if frame["event"] == "assistant.delta":
+            print(frame["text"], end="", flush=True)
+        elif frame["event"] == "turn" and frame["status"] != "running":
+            break
+```
+
+Use the context manager whenever the loop may exit early — leaving it closes the
+connection. Iterating without one also closes at the end of the loop; the
+difference matters on a `break` or an exception.
+
+```python
+async with AsyncTalqing.from_env() as talqing:
+    async for frame in talqing.conversations.events(conversation_id):
+        if frame["event"] == "turn" and frame["status"] != "running":
+            print("turn finished:", frame["status"])
+            break
+```
+
+If the stream fails to open — `404`, `401`, `403` — the client reads the error
+body before anything else and raises `TalqingAPIError` immediately. A finished
+stream cannot be reopened: it raises
+`RuntimeError: this stream is finished; open a new one to watch again`. See
+[streaming](/api-reference/streaming) for every frame each one emits.
+
+## Typing
+
+**Responses come back as decoded JSON, described by TypedDicts. Nothing is
+validated, coerced or renamed on arrival.** A response is a plain `dict` at
+runtime; the TypedDicts exist for your type checker and your editor and cost
+nothing when you run. Two consequences worth knowing:
+
+- Read fields with `response["field"]`, not `response.field`.
+- The SDK can never reject a payload the API considers valid. A field added to a
+  response after your version was generated arrives intact — your type checker
+  will not know about it, and your code still gets it.
+
+Every request and response shape is exported under the API's own name:
+
+```python
+from talqing import AgentConfig, AgentResponse, CallOutcome, OperationRequest, Page
+
+page: Page[AgentResponse] = talqing.agents.list(limit=50)
+page["items"], page["has_more"], page["limit"], page["offset"]
+```
+
+## Escape hatches
+
+```python
+# An endpoint newer than this SDK, with the client's credentials and errors.
+result = talqing.request("POST", "/v1/something/new", body={"field": 1})
+
+# The underlying httpx.Client, already carrying the base URL and the token.
+response = talqing.http.get("/v1/agents")
+
+# The browser redirect that authorizes an integration — not an operation, so
+# nothing generates it.
+url = talqing.oauth_start_url("google_calendar")
+```
+
+`request(method, path, *, query=None, body=None)` applies the same `OMIT`
+filtering and the same error handling as a generated method, and returns the
+decoded body.
+
+## The namespaces
+
+| Namespace | Sub-namespaces |
+| --- | --- |
+| `agents` | `versions` |
+| `tools` | `versions` |
+| `tasks` | `runs` |
+| `calls` | `analysis`, `batches` (with `recipients`), `recording`, `screen_recording` |
+| `conversations` | `items`, `messages`, `sessions` |
+| `telephony` | `accounts`, `phone_numbers`, `providers` |
+| `email` | `batches` (with `recipients`), `senders` |
+| `integrations` | `mcp_tools`, `triggers` |
+| `catalog` | `voices` (with `elevenlabs`), `avatars` |
+| `billing` | `credits` |
+| `copilot` | `agents`, `tools`, `tasks` |
+| `webhooks`, `secrets`, `provider_keys`, `observability`, `schemas` | — |
+| `health()` | A method on the client itself. |
+
+Every method under them is in the **Endpoints** section of the API reference.
+The path here is the operation's id there: `telephony.phone_numbers.assign` is
+`POST /v1/telephony/phone-numbers/{number_id}/assign`.
+
+## Worked examples
+
+### Create and publish an agent
+
+```python
+agent = talqing.agents.create(
+    config={
+        "name": "Support line",
+        "channel": "text",
+        "prompt": "You are the support desk for Acme. Be brief and specific.",
+        "llm": {"provider": "openai", "model": "gpt-5.6-luna"},
+    }
+)
+
+published = talqing.agents.publish(agent["id"])
+print(published["version"], published["warnings"])
+```
+
+`agents.update` takes only the fields you change; an explicit `None` clears one.
+See [updating an agent](/agents/overview#updating-an-agent):
+
+```python
+talqing.agents.update(agent["id"], config={"greeting": None})
+```
+
+### Place an outbound call
+
+```python
+call = talqing.calls.outbound(
+    agent_id=agent["id"],
+    from_phone_number_id=number_id,
+    to="+919876543210",
+    userdata={"name": "Priya", "plan": "pro"},
+)
+print(call["session_id"], call["warnings"])
+```
+
+<Warning>
+This places a live, billable call to a real person. It returns when the call is
+placed, not when it is answered, and there is no idempotency key — a retried
+request dials again. See [outbound calls](/telephony/outbound-calls).
+</Warning>
+
+### Page through calls
+
+```python
+from talqing import paginate
+
+failures = [
+    (call["id"], call["close_reason"])
+    for call in paginate(talqing.calls.list, agent_id=agent["id"], outcome="failure")
+]
+```
+
+### Read the credit balance
+
+```python
+credits = talqing.billing.credits.get()
+print(credits["balance"], credits["currency"], credits["voice_minutes_remaining"])
+
+for entry in paginate(talqing.billing.credits.ledger):
+    print(entry["created_at"], entry["kind"], entry["amount"], entry["balance_after"])
+```
+
+The balance belongs to whichever region this client's `base_url` points at.
+Credits do not move between regions, so label it with the region before you show
+it to anyone. See [pricing and credits](/get-started/pricing-and-credits).
+
+### Chat with a text agent
+
+```python
+from uuid import uuid4
+
+chat = talqing.chats.create(contact_key="user-42", agent_id=agent["id"])
+
+turn = talqing.chats.messages.create(
+    chat["id"],
+    message="Where is my order?",
+    client_message_id=str(uuid4()),
+)
+
+for item in turn["items"]:
+    if item["type"] == "message":
+        print(item["text"])
+
+talqing.chats.end(chat["id"])
+```
+
+The reply comes back on the message request itself. `client_message_id` is your
+own UUID and is the one deduplication key in this API: re-sending with the same
+one returns the same turn rather than posting a second message, so a retry is
+safe. A chat stays open until something ends it — see
+[chats](/channels/text-conversations).
+
+<CardGroup cols={2}>
+  <Card title="Streaming" href="/api-reference/streaming">
+    Every frame the six event streams emit.
+  </Card>
+  <Card title="Errors" href="/api-reference/errors">
+    Every status code and what to retry.
+  </Card>
+</CardGroup>

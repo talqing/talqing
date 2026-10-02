@@ -1,0 +1,11 @@
+# Build context for code-exec/Dockerfile (see backend/.dockerignore).
+
+# isolated-vm is a native module and npm install runs inside the image. A host
+# node_modules copied over it ships a wrong-arch .node binary — on the droplet
+# that surfaces as a segfault with no obvious cause.
+node_modules/
+npm-debug.log*
+
+# secrets / os
+.env
+.DS_Store

@@ -1,0 +1,317 @@
+---
+title: "Custom MCP servers"
+description: "Point an agent at an MCP server you run yourself: the URL, the headers, and what your server has to support."
+---
+
+The eleven named providers in the [catalog](/integrations/catalog) are the whole
+list. Everything else reaches an agent as a **custom MCP server** — a remote
+server you host, at a URL you give us, with headers you control.
+
+From the agent's side nothing is different. The tools appear next to the ones you
+built, approval works the same way, `allowed_tools` and `tools_namespace` behave
+identically, and `GET /v1/integrations/{id}/mcp-tools` lists them the same way.
+See [MCP servers](/integrations/mcp-servers) for all of that. This page is the
+parts that are only true of a server we did not write the client for.
+
+## Connecting one
+
+Two fields, and only two: `url` is required, `headers` is not.
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/integrations \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "display_name": "Northwind CRM",
+    "provider": "custom_mcp",
+    "mcp_config": {
+      "url": "https://mcp.northwind.example.com/mcp",
+      "headers": { "Authorization": "Bearer {{secrets.NORTHWIND_MCP_TOKEN}}" }
+    },
+    "tools_namespace": "crm"
+  }'
+```
+
+```typescript TypeScript
+const integration = await talqing.integrations.create({
+  createIntegrationRequest: {
+    display_name: "Northwind CRM",
+    provider: "custom_mcp",
+    mcp_config: {
+      url: "https://mcp.northwind.example.com/mcp",
+      headers: { Authorization: "Bearer {{secrets.NORTHWIND_MCP_TOKEN}}" },
+    },
+    tools_namespace: "crm",
+  },
+});
+```
+
+```python Python
+integration = talqing.integrations.create(
+    display_name="Northwind CRM",
+    provider="custom_mcp",
+    mcp_config={
+        "url": "https://mcp.northwind.example.com/mcp",
+        "headers": {"Authorization": "Bearer {{secrets.NORTHWIND_MCP_TOKEN}}"},
+    },
+    tools_namespace="crm",
+)
+```
+</CodeGroup>
+
+Anything else under `mcp_config` is refused — `custom_mcp: unknown config field
+'transport'` — rather than accepted and ignored.
+
+<Warning>
+**Headers are not turned into secrets for you.** Every other provider's credential
+field takes a plaintext value and the platform stores it as a workspace secret,
+replacing what you sent with a reference. Header values are stored **exactly as
+you send them**, so a token pasted in literally stays in the integration's config
+in clear and is returned on every read of it.
+
+Write `{{secrets.NAME}}` by hand, and **create the secret first**: the reference is
+checked when the integration is saved, and one pointing at a secret that does not
+exist is refused with `custom_mcp: secret 'NORTHWIND_MCP_TOKEN' does not exist`.
+The same check runs again when you publish an agent that has this integration
+attached. See [secrets](/platform/secrets).
+</Warning>
+
+A token whose root is not `secrets` — a typo, or a spelling borrowed from another
+platform — is refused at save rather than sent to your server as literal braces:
+
+```text
+custom_mcp: reads {{secret.TOKEN}}, which is not a variable - it would be sent
+exactly as written, braces and all. An integration can read {{secrets.…}}
+```
+
+`{{secrets.NAME}}` resolves in the `url` as well as in header values, which is how
+a server whose path carries a tenant token stays out of the config. No other
+template root is available here — there is no `userdata`, no `vars`, and nothing
+per-call. **One integration is one set of credentials**, so a server that needs
+different credentials per caller needs an integration per caller.
+
+There is no OAuth for a custom server. We do not run an authorization flow against
+a URL you supply and we do not perform dynamic client registration; the credential
+is whatever static value your headers carry.
+
+## The URL is checked before we use it
+
+The URL must be `http` or `https` with a host, and its host is resolved and
+checked **before any request is made**. A private, loopback, link-local, reserved,
+multicast or carrier-NAT address is refused, which rules out the metadata
+endpoints cloud providers expose on internal addresses.
+
+That check runs where the server is used, not at create, so this is what a
+customer actually hits — on `GET /v1/integrations/{id}/mcp-tools`:
+
+```
+400  integration 7c2f1a90-…: url rejected (destination 10.0.4.11 is not allowed (private/internal))
+400  integration 7c2f1a90-…: url rejected (could not resolve host 'mcp.internal')
+```
+
+**A server on your own private network is not reachable.** It has to be exposed on
+a public address, behind whatever authentication you put in the headers. The same
+rule governs the `http` tool operation and webhook delivery.
+
+## What your server has to support
+
+We connect with LiveKit's MCP client over HTTP, and **the transport is chosen from
+the URL path**:
+
+| Your URL's path | Transport |
+| --- | --- |
+| ends with `/mcp` | Streamable HTTP |
+| anything else | HTTP with server-sent events |
+
+So `https://mcp.example.com/mcp` speaks Streamable HTTP and
+`https://mcp.example.com/sse` speaks the SSE transport. There is no field to
+override it — the path is the switch. If your server only implements one of the
+two, give us a URL whose path matches it.
+
+Other things about the connection worth designing against:
+
+- **HTTP/2 is offered and negotiated over ALPN.** A server that only speaks
+  HTTP/1.1 gets HTTP/1.1; nothing breaks either way.
+- **Redirects are followed.**
+- **Every request has a five-second budget** — the tool listing at connect and
+  each tool call after it. A caller is waiting out every one of them, so a tool
+  that cannot answer in five seconds should not be a tool.
+- **A server that is down does not fail the call.** The agent starts without your
+  server's tools and the failure is logged. From the model's side the tools are
+  simply not in its list, and it will improvise around a prompt that still talks
+  about them.
+
+## Regex patterns in your schemas are dropped
+
+One transformation happens to your tool schemas on the way to the model, and it
+is worth knowing because it silently weakens them.
+
+**A `pattern` that uses lookahead or lookbehind — `(?=`, `(?!`, `(?<=`, `(?<!` —
+is removed from the schema**, wherever it appears, before the tools are sent.
+OpenAI compiles JSON Schema `pattern` with a regex engine that has no lookaround
+and rejects the *entire request* when it meets one. Tools go up as a single array,
+so one such pattern from one server would kill every turn the agent takes,
+including every other tool in the request.
+
+The keyword is dropped and the tool is kept, because `pattern` only tells the
+model what shape to emit — and the alternative is an agent that answers nothing at
+all. Patterns without lookaround are left alone.
+
+**So do not rely on a `pattern` to validate an argument.** Validate it in your
+server and return a message the model can act on. That is where the check belongs
+regardless: a schema keyword is a hint to a language model, not an input guard.
+
+## Testing it
+
+`GET /v1/integrations/{integration_id}/mcp-tools` connects to your server and
+lists what it exposes. It is a live call, so it is also the connectivity test —
+run it before you attach the integration to anything.
+
+<CodeGroup>
+```bash cURL
+curl "https://api.in.talqing.com/v1/integrations/$INTEGRATION_ID/mcp-tools" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const { tools } = await talqing.integrations.mcpTools.list({ integration_id });
+
+tools.forEach((tool) => console.log(tool.exposed_name, "<-", tool.name));
+```
+
+```python Python
+result = talqing.integrations.mcp_tools.list(integration_id)
+
+for tool in result["tools"]:
+    print(tool["exposed_name"], "<-", tool["name"])
+```
+</CodeGroup>
+
+| What comes back | What it means |
+| --- | --- |
+| A list of tools | Connected. `name` is what `allowed_tools` matches; `exposed_name` is what your prompt must say. |
+| `400 … url rejected (…)` | The address check refused it. See above. |
+| `400 activate or reconnect this integration before listing tools` | The integration is not `active`. |
+| `502 failed to list MCP tools: …` | Reached the check and failed at or after connect — TLS, auth, a protocol error, or a timeout. The underlying failure is in the message. |
+
+## Namespacing: the one default that differs
+
+A hosted provider's tools are prefixed with the provider key —
+`tavily_search`, `asana_create_task`. **A custom server gets no prefix at all**,
+because there is no provider name to derive one from. Its tools reach the model
+under exactly the names your server publishes.
+
+That is often what you want, and it is a real hazard when it is not: a server
+publishing `search`, `get`, `create` puts three of the most generic names in the
+industry into the model's tool list, next to your own tools and anything else
+attached. Set `tools_namespace` on the integration and they become `crm_search`,
+`crm_get`, `crm_create`.
+
+`""` is a real value meaning "the server's own names", not an unset field — so on
+a `PATCH`, omitting the field keeps the current namespace and sending `""` clears
+it. The rules in full are on
+[namespacing](/integrations/mcp-servers#namespacing).
+
+## Defining one inline
+
+An agent config can carry a server definition instead of an integration id:
+
+```json
+{
+  "config": {
+    "name": "Northwind support",
+    "channel": "text",
+    "prompt": "Answer questions about orders. Look the customer up with crm_search before you discuss an order.",
+    "llm": { "provider": "openai", "model": "gpt-5.6-luna" },
+    "mcps": [
+      {
+        "mcp": {
+          "name": "Northwind CRM",
+          "url": "https://mcp.northwind.example.com/mcp",
+          "headers": { "Authorization": "Bearer {{secrets.NORTHWIND_MCP_TOKEN}}" },
+          "tools_namespace": "crm"
+        }
+      }
+    ]
+  }
+}
+```
+
+On an agent write that is **created as a real `custom_mcp` integration** and the
+entry is rewritten to `{"integration_id": "…"}` in the stored config. Read the
+config back and you will find the id. It is a convenience for building an agent
+and its server in one request, not a second kind of attachment: the integration it
+made appears on the Integrations page, which is where its tool approval lives and
+where you go to rotate the credential.
+
+`allowed_tools` and `tools_namespace` may be set inline and carry over to the
+integration. The name must be free — an existing integration with that name is a
+`409` telling you to reference it by id or rename this one.
+
+## A worked example
+
+Your server exposes `search_customers`, `get_order` and `refund_order`. You want
+the agent to look people up and read orders, but never issue a refund on its own.
+
+<Steps>
+  <Step title="Store the credential">
+    Create a workspace secret named `NORTHWIND_MCP_TOKEN` holding the bearer token
+    your server expects. Nothing about the next step creates it for you.
+  </Step>
+
+  <Step title="Create the integration">
+    ```json
+    {
+      "display_name": "Northwind CRM",
+      "provider": "custom_mcp",
+      "mcp_config": {
+        "url": "https://mcp.northwind.example.com/mcp",
+        "headers": { "Authorization": "Bearer {{secrets.NORTHWIND_MCP_TOKEN}}" }
+      },
+      "tools_namespace": "crm"
+    }
+    ```
+  </Step>
+
+  <Step title="Prove the connection and read the names">
+    `GET /v1/integrations/{id}/mcp-tools` should come back with three tools, whose
+    `exposed_name` values are `crm_search_customers`, `crm_get_order` and
+    `crm_refund_order`.
+  </Step>
+
+  <Step title="Approve only two">
+    `PATCH` the integration with the tools' **own** names — approval matches those,
+    not the exposed ones:
+
+    ```json
+    { "allowed_tools": ["search_customers", "get_order"] }
+    ```
+
+    `refund_order` is now not in the model's list at all, on every agent attached
+    to this integration, from their next turn. There is nothing to republish.
+  </Step>
+
+  <Step title="Attach and publish">
+    Add `{"integration_id": "…"}` to the agent's `mcps` and publish. The
+    attachment is config, so it takes a publish; the approval above is not, and
+    narrowing it later is immediate.
+
+    Write the prompt against the **exposed** names: `crm_search_customers`, not
+    `search_customers`.
+  </Step>
+</Steps>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="MCP servers" href="/integrations/mcp-servers">
+    Attaching, approving and namespacing — the rules every integration shares.
+  </Card>
+  <Card title="Secrets" href="/platform/secrets">
+    Where `{{secrets.NAME}}` resolves from, and why headers need one.
+  </Card>
+  <Card title="Tools" href="/tools/overview">
+    Building a tool here instead, when the capability is one HTTP call.
+  </Card>
+</CardGroup>

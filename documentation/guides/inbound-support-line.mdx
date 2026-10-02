@@ -1,0 +1,907 @@
+---
+title: "Inbound support line"
+description: "A voice agent that answers your support number: your policies in its prompt, a tool for the caller's order, and a person when it should."
+---
+
+You will build a voice agent that answers a real phone number, answers policy questions from the policies you give it, looks a caller's order up through your API, and hands the call to a person when it should. By the end the number is live, every call is transcribed and summarized, and you can list the calls that went wrong.
+
+The example company is Northwind Tools, an online shop selling power tools. Substitute your own domain, endpoint and numbers as you go — everything else pastes as written.
+
+## What you need
+
+| | Why |
+| --- | --- |
+| A Talqing workspace with credit | Voice carries a per-minute platform fee. See [pricing and credits](/get-started/pricing-and-credits) |
+| Provider keys for OpenAI and Deepgram | Talqing is strictly bring-your-own-key and an agent will not publish without a key for every provider it names. See [provider keys](/get-started/provider-keys) |
+| A public HTTPS endpoint that returns one order as JSON, and a bearer token for it | Tools cannot reach a private network. See [the HTTP operation](/tools/http) |
+| Your returns, delivery and warranty policies, in a few short paragraphs | They go into the prompt, so the agent answers from them and nothing else |
+| A carrier account at Plivo, Twilio, Vobiz or Exotel, with a number you already own | You buy numbers in the carrier's console, never here |
+| A phone number for escalation, in full international format | The destination is frozen into the published tool |
+| `TALQING_API_KEY` exported | A [personal access token](/get-started/authentication) |
+
+Everything below is against `https://api.in.talqing.com`. Agents, tools, numbers and calls are all [regional](/get-started/regions) — the same token reaches every region, the resources do not cross.
+
+<Steps>
+
+<Step title="Pick the models and the language">
+
+Language is the first decision, not the last: `config.language` is one language shared by every model in the pipeline, and a model that cannot speak it is a save error. Pick the language your callers actually use, then models that cover it.
+
+| Your callers | `language` | Speech-to-text | Text-to-speech |
+| --- | --- | --- | --- |
+| English only | `"en"` | `deepgram/flux-general-en` — one language, its own endpointer, low latency | `deepgram/aura-2` |
+| Hindi, or one other Indic language | `"hi"` | `sarvam/saaras:v3` | `sarvam/bulbul:v3` |
+| A mix, and you cannot predict which | `null` (Auto) | `deepgram/nova-3-general` — it detects and code-switches | `sarvam/bulbul:v3`, which takes the language from the text |
+
+<Warning>
+Two speech-to-text entries detect nothing and transcribe every caller as English on Auto: `deepgram/nova-3` and `raya/bakbak-stt`. Neither reports that it guessed. If your callers are not all English speakers, set `config.language` or pick an entry that detects. See [language](/agents/language).
+</Warning>
+
+This guide uses English. For the language model take `openai/gpt-5.4-mini` and leave `reasoning_effort` unset: the catalog orders each model's efforts fastest first, unset means the first one, and every second of thinking on a live call is silence a caller reads as a dropped line. See [thinking and provider tools](/agents/reasoning-and-builtin-tools).
+
+Confirm the pairs exist before you write them — the catalog is the only source of valid ones:
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/catalog \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+| jq '{stt: [.stt[] | "\(.provider)/\(.model)"], llm: [.llm[] | "\(.provider)/\(.model)"]}'
+```
+
+```typescript TypeScript
+const catalog = await talqing.catalog.get();
+console.log(catalog.stt.map((e) => `${e.provider}/${e.model}`));
+console.log(catalog.llm.map((e) => `${e.provider}/${e.model}`));
+```
+
+```python Python
+catalog = talqing.catalog.get()
+print([f"{e['provider']}/{e['model']}" for e in catalog["stt"]])
+print([f"{e['provider']}/{e['model']}" for e in catalog["llm"]])
+```
+</CodeGroup>
+
+**In the dashboard:** the agent editor's **Models** card has a picker per slot, and each one shows the languages that model speaks beside it.
+
+</Step>
+
+<Step title="Build the order lookup">
+
+The tool needs a credential, and a credential belongs in a [workspace secret](/platform/secrets) where the model never sees it:
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/secrets \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "NORTHWIND_API_KEY", "value": "your-northwind-api-key"}'
+```
+
+```typescript TypeScript
+await talqing.secrets.create({
+  createSecretRequest: {
+    name: "NORTHWIND_API_KEY",
+    value: "your-northwind-api-key",
+  },
+});
+```
+
+```python Python
+talqing.secrets.create(
+    name="NORTHWIND_API_KEY",
+    value="your-northwind-api-key",
+)
+```
+</CodeGroup>
+
+Now the tool. A `say` goes in front of the request because a tool call is silence on the line and silence reads as a dropped call — the tree keeps running while the line plays, so it costs nothing. The request is `silent`, so the raw JSON never reaches the model; what the model gets is the three values `publish_fields` kept, phrased by a `generate_reply`.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/tools \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "check_order",
+    "description": "Look up one customer order by its order number: where it is, whether it has shipped, when it is due, and whether a refund has been processed. Use it as soon as the caller has given you an order number and asked anything about that order. Do not use it for policy questions about returns, delivery times or warranty - answer those from your instructions.",
+    "json_schema": {
+      "type": "object",
+      "properties": {
+        "order_number": {
+          "type": "string",
+          "description": "The order number the caller read out, in the form NW4417029 - the letters N W followed by seven digits. Ask for it and read it back before you call this tool. Never guess it, and never send a phone number here."
+        }
+      },
+      "required": ["order_number"]
+    },
+    "operations": [
+      {
+        "kind": "say",
+        "config": { "text": "Let me pull that order up, one moment." }
+      },
+      {
+        "kind": "http",
+        "config": {
+          "method": "GET",
+          "url": "https://api.northwindtools.example/v1/orders/{{args.order_number}}",
+          "headers": { "Authorization": "Bearer {{secrets.NORTHWIND_API_KEY}}" },
+          "timeout": 8
+        },
+        "silent": true,
+        "publish_fields": [
+          { "path": "status", "key": "order_status", "store": "userdata" },
+          { "path": "estimated_delivery", "key": "order_eta", "store": "userdata" },
+          { "path": "carrier", "key": "order_carrier", "store": "tooldata" }
+        ]
+      },
+      {
+        "kind": "generate_reply",
+        "config": {
+          "instructions": "Tell the caller that order {{args.order_number}} is {{userdata.order_status}}, that it is with {{tooldata.order_carrier}}, and that it is due {{userdata.order_eta}}. Say the date in words, not digits. Then ask whether they need anything else about that order."
+        }
+      }
+    ]
+  }'
+```
+
+```typescript TypeScript
+const lookup = await talqing.tools.create({
+  createToolRequest: {
+    name: "check_order",
+    description:
+      "Look up one customer order by its order number: where it is, whether it has shipped, when it is due, and whether a refund has been processed. Use it as soon as the caller has given you an order number and asked anything about that order. Do not use it for policy questions about returns, delivery times or warranty - answer those from your instructions.",
+    json_schema: {
+      type: "object",
+      properties: {
+        order_number: {
+          type: "string",
+          description:
+            "The order number the caller read out, in the form NW4417029 - the letters N W followed by seven digits. Ask for it and read it back before you call this tool. Never guess it, and never send a phone number here.",
+        },
+      },
+      required: ["order_number"],
+    },
+    operations: [
+      { kind: "say", config: { text: "Let me pull that order up, one moment." } },
+      {
+        kind: "http",
+        config: {
+          method: "GET",
+          url: "https://api.northwindtools.example/v1/orders/{{args.order_number}}",
+          headers: { Authorization: "Bearer {{secrets.NORTHWIND_API_KEY}}" },
+          timeout: 8,
+        },
+        silent: true,
+        publish_fields: [
+          { path: "status", key: "order_status", store: "userdata" },
+          { path: "estimated_delivery", key: "order_eta", store: "userdata" },
+          { path: "carrier", key: "order_carrier", store: "tooldata" },
+        ],
+      },
+      {
+        kind: "generate_reply",
+        config: {
+          instructions:
+            "Tell the caller that order {{args.order_number}} is {{userdata.order_status}}, that it is with {{tooldata.order_carrier}}, and that it is due {{userdata.order_eta}}. Say the date in words, not digits. Then ask whether they need anything else about that order.",
+        },
+      },
+    ],
+  },
+});
+```
+
+```python Python
+lookup = talqing.tools.create(
+    name="check_order",
+    description=(
+        "Look up one customer order by its order number: where it is, whether it has "
+        "shipped, when it is due, and whether a refund has been processed. Use it as soon "
+        "as the caller has given you an order number and asked anything about that order. "
+        "Do not use it for policy questions about returns, delivery times or warranty - "
+        "answer those from your instructions."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "order_number": {
+                "type": "string",
+                "description": (
+                    "The order number the caller read out, in the form NW4417029 - the "
+                    "letters N W followed by seven digits. Ask for it and read it back "
+                    "before you call this tool. Never guess it, and never send a phone "
+                    "number here."
+                ),
+            }
+        },
+        "required": ["order_number"],
+    },
+    operations=[
+        {"kind": "say", "config": {"text": "Let me pull that order up, one moment."}},
+        {
+            "kind": "http",
+            "config": {
+                "method": "GET",
+                "url": "https://api.northwindtools.example/v1/orders/{{args.order_number}}",
+                "headers": {"Authorization": "Bearer {{secrets.NORTHWIND_API_KEY}}"},
+                "timeout": 8,
+            },
+            "silent": True,
+            "publish_fields": [
+                {"path": "status", "key": "order_status", "store": "userdata"},
+                {"path": "estimated_delivery", "key": "order_eta", "store": "userdata"},
+                {"path": "carrier", "key": "order_carrier", "store": "tooldata"},
+            ],
+        },
+        {
+            "kind": "generate_reply",
+            "config": {
+                "instructions": (
+                    "Tell the caller that order {{args.order_number}} is "
+                    "{{userdata.order_status}}, that it is with {{tooldata.order_carrier}}, "
+                    "and that it is due {{userdata.order_eta}}. Say the date in words, not "
+                    "digits. Then ask whether they need anything else about that order."
+                )
+            },
+        },
+    ],
+)
+```
+</CodeGroup>
+
+Three details are load-bearing. `order_status` and `order_eta` go to `userdata`, so the agent can still repeat them ten turns later and they are on the call record afterwards; `order_carrier` goes to `tooldata`, because it exists to build one sentence. Because the only operation that could return a result is `silent`, **the whole tool is silent** — the `generate_reply` is what speaks, and the agent does not improvise a second sentence on top of it. And `publish_fields` fails the operation when a path is missing **or null**, so your endpoint has to answer all three keys on every 200.
+
+<Note>
+An order number that does not exist means a `404`, which fails the operation. The model is told the tool could not be completed and apologises in its own words — the prompt below tells it what to say and when to give up. If you would rather the agent said something specific, answer `200` with a `found` boolean and branch on it with an [`if`](/tools/conditionals).
+</Note>
+
+Then validate and publish. **An unpublished tool cannot be attached to an agent.**
+
+<CodeGroup>
+```bash cURL
+TOOL=7e15b3d0-4c82-49a6-9f31-6b0d5a2e8c47
+
+curl -sS -X POST "https://api.in.talqing.com/v1/tools/$TOOL/validate" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+
+curl -sS -X POST "https://api.in.talqing.com/v1/tools/$TOOL/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"changelog": "Order lookup"}'
+```
+
+```typescript TypeScript
+const check = await talqing.tools.validate({ tool_id: lookup.id });
+if (check.errors.length) throw new Error(check.errors.join("\n"));
+
+await talqing.tools.publish({
+  tool_id: lookup.id,
+  publishToolRequest: { changelog: "Order lookup" },
+});
+```
+
+```python Python
+check = talqing.tools.validate(lookup["id"])
+if check["errors"]:
+    raise SystemExit("\n".join(check["errors"]))
+
+talqing.tools.publish(lookup["id"], changelog="Order lookup")
+```
+</CodeGroup>
+
+**In the dashboard:** **Tools** → **New**, three cards — Configuration, Arguments, Operations — with Save, Validate, Test and Publish across the top.
+
+</Step>
+
+<Step title="Build the escalation">
+
+A transfer tool is two operations and no arguments. What makes it good or bad is its `description`, because for this one kind of tool the description is not a hint about timing — **it is the escalation policy**, and it decides whether a frustrated caller reaches a person or is talked at for another two minutes.
+
+"Transfer to a human" is not a description. It is an invitation to escalate at the first sign of difficulty. Write the conditions instead:
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/tools \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "transfer_to_support_team",
+    "description": "Put the caller through to a person on the Northwind support team. Use it only after you have tried to answer the question yourself, and only when one of these is true: the caller has asked to speak to a person; the order is missing, damaged or more than five days late; the caller is clearly distressed or angry; or you have looked something up and still cannot answer. Do not use it for a question your instructions answer, for an order status you can read out, or because the caller sounds impatient on the first attempt.",
+    "json_schema": {},
+    "disable_interruptions": true,
+    "operations": [
+      {
+        "kind": "say",
+        "config": { "text": "Putting you through to someone on the support team now, one moment." }
+      },
+      {
+        "kind": "transfer",
+        "config": {
+          "destination": "+912248900199",
+          "mode": "cold",
+          "ringing_timeout": 30,
+          "on_failure": "continue"
+        }
+      }
+    ]
+  }'
+```
+
+```typescript TypeScript
+const escalate = await talqing.tools.create({
+  createToolRequest: {
+    name: "transfer_to_support_team",
+    description:
+      "Put the caller through to a person on the Northwind support team. Use it only after you have tried to answer the question yourself, and only when one of these is true: the caller has asked to speak to a person; the order is missing, damaged or more than five days late; the caller is clearly distressed or angry; or you have looked something up and still cannot answer. Do not use it for a question your instructions answer, for an order status you can read out, or because the caller sounds impatient on the first attempt.",
+    json_schema: {},
+    disable_interruptions: true,
+    operations: [
+      {
+        kind: "say",
+        config: { text: "Putting you through to someone on the support team now, one moment." },
+      },
+      {
+        kind: "transfer",
+        config: {
+          destination: "+912248900199",
+          mode: "cold",
+          ringing_timeout: 30,
+          on_failure: "continue",
+        },
+      },
+    ],
+  },
+});
+
+await talqing.tools.publish({
+  tool_id: escalate.id,
+  publishToolRequest: { changelog: "Escalation to the support team" },
+});
+```
+
+```python Python
+escalate = talqing.tools.create(
+    name="transfer_to_support_team",
+    description=(
+        "Put the caller through to a person on the Northwind support team. Use it only "
+        "after you have tried to answer the question yourself, and only when one of these "
+        "is true: the caller has asked to speak to a person; the order is missing, damaged "
+        "or more than five days late; the caller is clearly distressed or angry; or you "
+        "have looked something up and still cannot answer. Do not use it for a question "
+        "your instructions answer, for an order status you can read out, or because the "
+        "caller sounds impatient on the first attempt."
+    ),
+    json_schema={},
+    disable_interruptions=True,
+    operations=[
+        {
+            "kind": "say",
+            "config": {
+                "text": "Putting you through to someone on the support team now, one moment."
+            },
+        },
+        {
+            "kind": "transfer",
+            "config": {
+                "destination": "+912248900199",
+                "mode": "cold",
+                "ringing_timeout": 30,
+                "on_failure": "continue",
+            },
+        },
+    ],
+)
+
+talqing.tools.publish(escalate["id"], changelog="Escalation to the support team")
+```
+</CodeGroup>
+
+`disable_interruptions` is on because the dial runs for up to thirty seconds while the caller hears only ringback, which is exactly long enough that saying "hello?" into the gap is normal — and an interrupted line is the only channel left to tell them what happened. `on_failure: "continue"` means a busy line brings the caller back to the agent with a plain-English reason rather than dropping them. The destination is a literal number frozen into the published version and can never be templated; if you need a second destination, publish a second tool. See [transfer](/tools/transfer).
+
+</Step>
+
+<Step title="Write the prompt and create the agent">
+
+The prompt is the product. This one is written for speech: short turns, no formatting, spoken forms for anything text-to-speech mangles, and an explicit line about what to say while a tool runs.
+
+```text
+You are the support line for Northwind Tools, an online shop selling power
+tools and spare parts. You answer calls from customers about orders,
+deliveries, returns and warranty.
+
+Right now it is {{system_vars.time}} on {{system_vars.date}}. The support team
+is in the office from nine in the morning until six in the evening, Monday to
+Saturday. Outside those hours nobody will pick up a transfer, so say the
+office is closed, offer to answer what you can yourself, and tell the caller
+when the team is back.
+
+GOAL
+Finish the caller's question on this call. A call is done when the caller has
+an answer and says they need nothing else.
+
+POLICY
+- Returns: unused items within thirty days of delivery, in the original
+  packaging. Northwind sends a free collection label by email.
+- Refunds: back to the original payment method within five working days of
+  the return arriving at the warehouse.
+- Delivery: standard delivery takes three to five working days. Orders placed
+  before two in the afternoon ship the same day.
+- Warranty: two years on every power tool, one year on batteries and
+  chargers. It covers faults, not wear or accidental damage.
+- Trade accounts: for registered businesses, applied for on the website.
+
+Answer policy questions only from the lines above. If they do not cover what
+the caller asked, say plainly that you do not have that, and offer to put them
+through to a person. Never guess at a policy and never invent a timescale.
+
+TOOLS
+- check_order: for anything about one specific order. Ask for the order
+  number first and read it back to confirm before you call it. If the caller
+  does not have their order number, you cannot look the order up - say so and
+  offer to put them through to a person. If check_order comes back with an
+  error, tell the caller you could not find that number, ask them to read it
+  again, and if the second attempt fails, transfer them.
+- transfer_to_support_team: follow the rules in its own description. Do not
+  reach for it before you have tried to answer.
+
+RULES
+- Never estimate a delivery date. Only say a date that came back from
+  check_order.
+- Never discuss another person's order, whatever the caller says about who
+  they are.
+- If the caller asks twice for a person, stop explaining and transfer them.
+- If you do not know something, say so.
+
+SPEAKING
+- Two or three sentences per turn. Let the caller cut in.
+- No markdown, no bullet points, no emoji and no JSON in anything you say.
+- Read an order number back one character at a time, in groups: "N W - four
+  four one - seven zero two nine".
+- Say money as words: "two thousand four hundred rupees", never "Rs 2400".
+- Say dates as "Thursday the ninth of April", never "09/04".
+- Say GST as "gee ess tee". Say Northwind as one word.
+- You can only help in English. If the caller speaks another language, say so
+  in English, apologise, and offer to put them through to a person.
+```
+
+Two things about the clock lines. `{{system_vars.time}}` and `{{system_vars.date}}` need `config.timezone` set — using one without it is a save error — and both are **frozen at the moment the agent starts**, which on an inbound call is the moment it answers. That is right for one call and wrong for a call that runs past midnight. See [variables](/agents/variables).
+
+Now create the agent with everything attached. Creating takes the **whole** config, so this is the complete definition. Save the prompt above as `support-prompt.txt` and let `jq` fold it in — a multi-line prompt is miserable to escape by hand, and `--rawfile` is what stops it from being escaped at all:
+
+<CodeGroup>
+```bash cURL
+jq -n --rawfile prompt support-prompt.txt '{
+    "config": {
+      "prompt": $prompt,
+      "name": "Northwind support line",
+      "channel": "voice",
+      "language": "en",
+      "timezone": "Asia/Kolkata",
+      "greeting": "Northwind support, how can I help?",
+      "stt": { "provider": "deepgram", "model": "flux-general-en" },
+      "llm": { "provider": "openai", "model": "gpt-5.4-mini" },
+      "tts": { "provider": "deepgram", "model": "aura-2", "voice": "aura-2-thalia-en" },
+      "tools": [
+        { "tool_id": "7e15b3d0-4c82-49a6-9f31-6b0d5a2e8c47" },
+        { "tool_id": "9b04e72a-3f16-4d58-a0c9-2e7b81d43f60" }
+      ],
+      "conversation": {
+        "context": "summary",
+        "summary_limit": 3,
+        "initialize_userdata": true
+      },
+      "analysis": {
+        "enabled": true,
+        "summary": true,
+        "outcome": {
+          "prompt": "The caller got what they rang for on this call: an order status they can act on, a policy question answered, or a transfer to a person that connected. A call where the agent could not answer and did not offer a person is a failure."
+        },
+        "fields": [
+          {
+            "name": "reason_for_call",
+            "type": "string",
+            "description": "Why the caller rang, in five words or fewer - for example \"where is my order\", \"return a drill\", \"warranty on a battery\". Null if the call ended before they said."
+          },
+          {
+            "name": "order_number",
+            "type": "string",
+            "description": "The order number discussed, exactly as the agent read it back, for example NW4417029. Null if no order number came up."
+          },
+          {
+            "name": "unanswered_question",
+            "type": "boolean",
+            "description": "True only if the agent said it did not have the information the caller asked for. False otherwise, including on calls with no policy question at all."
+          }
+        ]
+      }
+    }
+  }' \
+| curl -sS https://api.in.talqing.com/v1/agents \
+    -H "Authorization: Bearer $TALQING_API_KEY" \
+    -H "Content-Type: application/json" \
+    --data @-
+```
+
+```typescript TypeScript
+import { readFileSync } from "node:fs";
+
+const SUPPORT_PROMPT = readFileSync("support-prompt.txt", "utf8");
+
+const agent = await talqing.agents.create({
+  createAgentRequest: {
+    config: {
+      name: "Northwind support line",
+      channel: "voice",
+      language: "en",
+      timezone: "Asia/Kolkata",
+      prompt: SUPPORT_PROMPT,
+      greeting: "Northwind support, how can I help?",
+      stt: { provider: "deepgram", model: "flux-general-en" },
+      llm: { provider: "openai", model: "gpt-5.4-mini" },
+      tts: { provider: "deepgram", model: "aura-2", voice: "aura-2-thalia-en" },
+      tools: [{ tool_id: lookup.id }, { tool_id: escalate.id }],
+      conversation: { context: "summary", summary_limit: 3, initialize_userdata: true },
+      analysis: {
+        enabled: true,
+        summary: true,
+        outcome: {
+          prompt:
+            "The caller got what they rang for on this call: an order status they can act on, a policy question answered, or a transfer to a person that connected. A call where the agent could not answer and did not offer a person is a failure.",
+        },
+        fields: [
+          {
+            name: "reason_for_call",
+            type: "string",
+            description:
+              'Why the caller rang, in five words or fewer - for example "where is my order", "return a drill", "warranty on a battery". Null if the call ended before they said.',
+          },
+          {
+            name: "order_number",
+            type: "string",
+            description:
+              "The order number discussed, exactly as the agent read it back, for example NW4417029. Null if no order number came up.",
+          },
+          {
+            name: "unanswered_question",
+            type: "boolean",
+            description:
+              "True only if the agent said it did not have the information the caller asked for. False otherwise, including on calls with no policy question at all.",
+          },
+        ],
+      },
+    },
+  },
+});
+```
+
+```python Python
+from pathlib import Path
+
+SUPPORT_PROMPT = Path("support-prompt.txt").read_text()
+
+agent = talqing.agents.create(
+    config={
+        "name": "Northwind support line",
+        "channel": "voice",
+        "language": "en",
+        "timezone": "Asia/Kolkata",
+        "prompt": SUPPORT_PROMPT,
+        "greeting": "Northwind support, how can I help?",
+        "stt": {"provider": "deepgram", "model": "flux-general-en"},
+        "llm": {"provider": "openai", "model": "gpt-5.4-mini"},
+        "tts": {"provider": "deepgram", "model": "aura-2", "voice": "aura-2-thalia-en"},
+        "tools": [{"tool_id": lookup["id"]}, {"tool_id": escalate["id"]}],
+        "conversation": {
+            "context": "summary",
+            "summary_limit": 3,
+            "initialize_userdata": True,
+        },
+        "analysis": {
+            "enabled": True,
+            "summary": True,
+            "outcome": {
+                "prompt": (
+                    "The caller got what they rang for on this call: an order status they "
+                    "can act on, a policy question answered, or a "
+                    "transfer to a person that connected. A call where the agent could not "
+                    "answer and did not offer a person is a failure."
+                )
+            },
+            "fields": [
+                {
+                    "name": "reason_for_call",
+                    "type": "string",
+                    "description": (
+                        'Why the caller rang, in five words or fewer - for example "where is '
+                        'my order", "return a drill", "warranty on a battery". Null if the '
+                        "call ended before they said."
+                    ),
+                },
+                {
+                    "name": "order_number",
+                    "type": "string",
+                    "description": (
+                        "The order number discussed, exactly as the agent read it back, for "
+                        "example NW4417029. Null if no order number came up."
+                    ),
+                },
+                {
+                    "name": "unanswered_question",
+                    "type": "boolean",
+                    "description": (
+                        "True only if the agent said it did not have the information the "
+                        "caller asked for. False otherwise, including on calls with no "
+                        "policy question at all."
+                    ),
+                },
+            ],
+        },
+    }
+)
+```
+</CodeGroup>
+
+`conversation.context: "summary"` is what makes a returning caller recognised: each new call opens with the summaries of that person's three most recent calls, as background the agent is told the caller has not heard. On a phone call the person's identity is the pair of numbers — your number and theirs — so a caller who rings a different one of your numbers, or from a second handset, is a different person as far as this is concerned. `summary` reads the summaries post-call analysis writes, which is why analysis and its summary have to be on; publish refuses the combination otherwise. See [conversation memory](/agents/conversation-memory).
+
+The three analysis fields are chosen for what a weekly report needs and nothing else. Notice what is **not** there: whether the call was escalated. `close_reason` already says `transferred`, and asking a model to re-derive a fact the call record holds is a way of getting a worse copy of it.
+
+**In the dashboard:** the editor's cards map one to one onto this config — Channel, Prompt, Models, Tools, Past conversations, Call analysis.
+
+</Step>
+
+<Step title="Validate and publish">
+
+Validation runs on the server against rules a draft cannot show you: a provider key for every model, the operation trees of every attached tool, the clock variables against `timezone`. Read it before you publish.
+
+<CodeGroup>
+```bash cURL
+AGENT=4a7f0c62-91d5-4b38-8e70-1c6a2f5d9b04
+
+curl -sS -X POST "https://api.in.talqing.com/v1/agents/$AGENT/validate" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+
+curl -sS -X POST "https://api.in.talqing.com/v1/agents/$AGENT/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const check = await talqing.agents.validate({ agent_id: agent.id });
+console.log(check.warnings);
+if (check.errors.length) throw new Error(check.errors.join("\n"));
+
+const published = await talqing.agents.publish({ agent_id: agent.id });
+console.log("live at version", published.version);
+```
+
+```python Python
+check = talqing.agents.validate(agent["id"])
+print(check["warnings"])
+if check["errors"]:
+    raise SystemExit("\n".join(check["errors"]))
+
+published = talqing.agents.publish(agent["id"])
+print("live at version", published["version"])
+```
+</CodeGroup>
+
+Errors block the publish; warnings do not. Publishing pins each attached tool to the version live at that moment — republishing `check_order` later changes nothing on real calls until you publish the agent again. See [versions](/agents/versions).
+
+</Step>
+
+<Step title="Put it on a phone number">
+
+Three things have to line up: a carrier account, a number on it, and a published voice agent assigned to that number.
+
+<CodeGroup>
+```bash cURL
+# 1. The carrier credential, then the carrier-side setup
+ACCOUNT=$(curl -sS https://api.in.talqing.com/v1/telephony/accounts \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "plivo",
+    "display_name": "Plivo production",
+    "account_info": { "auth_id": "MAZDKXNJYWMWJHYZJHZT" },
+    "credentials": { "auth_token": "your-auth-token" }
+  }' | jq -r .id)
+
+curl -sS -X POST "https://api.in.talqing.com/v1/telephony/accounts/$ACCOUNT/provision" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+
+# 2. What the account owns at the carrier, then bring one in
+curl -sS "https://api.in.talqing.com/v1/telephony/accounts/$ACCOUNT/remote-numbers" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+
+curl -sS https://api.in.talqing.com/v1/telephony/phone-numbers/import \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"telephony_account_id\": \"$ACCOUNT\", \"e164s\": [\"+912248900123\"]}"
+
+# 3. Point the published agent at it
+curl -sS https://api.in.talqing.com/v1/telephony/phone-numbers/1f6c9a34-8d07-4b52-9e18-3a5c07d2b4f9/assign \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "4a7f0c62-91d5-4b38-8e70-1c6a2f5d9b04"}'
+```
+
+```typescript TypeScript
+const account = await talqing.telephony.accounts.create({
+  createTelephonyAccountRequest: {
+    provider: "plivo",
+    display_name: "Plivo production",
+    account_info: { auth_id: "MAZDKXNJYWMWJHYZJHZT" },
+    credentials: { auth_token: "your-auth-token" },
+  },
+});
+await talqing.telephony.accounts.provision({ account_id: account.id });
+
+const remote = await talqing.telephony.accounts.remoteNumbers({ account_id: account.id });
+console.log(remote.items.filter((n) => !n.already_imported).map((n) => n.e164));
+
+const imported = await talqing.telephony.phoneNumbers.import({
+  importPhoneNumbersRequest: {
+    telephony_account_id: account.id,
+    e164s: ["+912248900123"],
+  },
+});
+for (const item of imported.items) if (!item.ok) console.error(item.e164, item.error);
+
+const number = await talqing.telephony.phoneNumbers.assign({
+  number_id: imported.items[0].phone_number!.id,
+  assignPhoneNumberRequest: { agent_id: agent.id },
+});
+console.log(number.readiness); // "live"
+```
+
+```python Python
+account = talqing.telephony.accounts.create(
+    provider="plivo",
+    display_name="Plivo production",
+    account_info={"auth_id": "MAZDKXNJYWMWJHYZJHZT"},
+    credentials={"auth_token": "your-auth-token"},
+)
+talqing.telephony.accounts.provision(account["id"])
+
+remote = talqing.telephony.accounts.remote_numbers(account["id"])
+print([n["e164"] for n in remote["items"] if not n["already_imported"]])
+
+imported = talqing.telephony.phone_numbers.import_(
+    telephony_account_id=account["id"],
+    e164s=["+912248900123"],
+)
+for item in imported["items"]:
+    if not item["ok"]:
+        print(item["e164"], item["error"])
+
+number = talqing.telephony.phone_numbers.assign(
+    imported["items"][0]["phone_number"]["id"],
+    agent_id=agent["id"],
+)
+print(number["readiness"])  # "live"
+```
+</CodeGroup>
+
+<Warning>
+Import is per number, not all-or-nothing: a `200` means the request was processed, so read `ok` on every item. And on **Exotel** there is one step you have to do in Exotel's own console before inbound calls arrive at all — the account's `setup_steps` names it, and until you confirm it every number imports with inbound disabled. See [carrier accounts](/telephony/carrier-accounts).
+</Warning>
+
+Only a **published voice agent** can answer a number, and `readiness` is the honest answer to "does this work": `live` means active, inbound-capable, assigned and routed. Republishing the agent updates live routing on its own — you never reassign. See [phone numbers](/telephony/phone-numbers).
+
+**In the dashboard:** **Phone numbers** groups rows by carrier and shows `readiness` per row, with the agent picker in the row itself.
+
+</Step>
+
+</Steps>
+
+## Test it
+
+Work outward: the tool alone, then the agent in a browser, then the real line.
+
+**Run the tool against your real endpoint.** `POST /v1/tools/{tool_id}/run` executes the draft for real — the HTTP operation calls your API with your secret — and reports every step, the resolved request and response, and everything published. Spoken operations are recorded with their resolved text rather than performed.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/tools/7e15b3d0-4c82-49a6-9f31-6b0d5a2e8c47/run \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"arguments": {"order_number": "NW4417029"}, "timezone": "Asia/Kolkata"}'
+```
+
+```typescript TypeScript
+const run = await talqing.tools.run({
+  tool_id: lookup.id,
+  runToolRequest: { arguments: { order_number: "NW4417029" }, timezone: "Asia/Kolkata" },
+});
+
+console.log(run.ok, run.error, run.userdata, run.tooldata);
+run.steps.forEach((step) => console.log(step));
+```
+
+```python Python
+run = talqing.tools.run(
+    lookup["id"],
+    arguments={"order_number": "NW4417029"},
+    timezone="Asia/Kolkata",
+)
+
+print(run["ok"], run["error"], run["userdata"], run["tooldata"])
+for step in run["steps"]:
+    print(step)
+```
+</CodeGroup>
+
+The failure to look for is `publish field path 'estimated_delivery' was not found in operation output` — a field your API only returns sometimes. Fix that before a caller finds it.
+
+**Talk to the agent in the browser.** The agent editor's test panel runs the **latest published version**, so republish after any edit. Ask it a policy question; give it an order number and watch the filler line cover the request.
+
+<Note>
+A web test call cannot exercise the transfer. `transfer` is phone-only, and on a web call the operation fails with *"transfer is only available on phone calls"* — the agent apologises and carries on. The three `{{system_vars}}` phone keys are empty there too. Test the escalation by ringing the number.
+</Note>
+
+**Ring the number.** Check `readiness` is `live` first, then call it from your own phone. Run the whole script: a policy question, an order number, a wrong order number, and "can I speak to someone". Then read the call back:
+
+<CodeGroup>
+```bash cURL
+curl -sS -G https://api.in.talqing.com/v1/calls \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "type=SIP_INBOUND" --data-urlencode "limit=5" | jq '.items[] | {id, close_reason_label, duration_s, summary, outcome}'
+```
+
+```typescript TypeScript
+const page = await talqing.calls.list({ type: "SIP_INBOUND", limit: 5 });
+const call = await talqing.calls.get({ session_id: page.items[0].id });
+
+if (!call.snapshot.ok) console.log(call.snapshot.issues);
+for (const item of call.transcript) {
+  if (item.type === "function_call") console.log("called", item.metadata.data);
+  if (item.type === "function_call_output") console.log("returned", item.metadata.data);
+}
+```
+
+```python Python
+page = talqing.calls.list(type="SIP_INBOUND", limit=5)
+call = talqing.calls.get(page["items"][0]["id"])
+
+if not call["snapshot"]["ok"]:
+    for issue in call["snapshot"]["issues"]:
+        print(issue["message"])
+
+print(call["session"]["userdata"])
+```
+</CodeGroup>
+
+`snapshot.issues` lists every problem found on that call as `{kind, message}`, and it is empty when there were none.
+
+## What to watch in the first week
+
+**Read the first twenty calls end to end.** Not the summaries — the transcripts, with every tool call and what it returned beside the speech. That is where you find the agent reading an order number back wrong, answering a policy question from memory instead of from the prompt, or transferring on the first "hmm". Each fix is a line added to the prompt, not a rewrite. See [calls](/observability/calls) and [debugging agents](/observability/debugging-agents).
+
+**Watch the latency breakdown, not the average.** `snapshot.response_latency` on a call carries `avg_ms`, `p95_ms` and `max_ms`; the p95 is what tells you the agent was *sometimes* slow, which a mean hides. The threshold ships on the response — `slow_response_threshold_ms` is 3500 — and `snapshot.response_stages` beside it says where the time went, as an ordered list of `{kind, ms, label}`. A large `llm` is the language model; a large `endpoint` is [turn handling](/agents/turn-handling); a large `tts` is the text-to-speech provider; `tool` and `llm_step` are a tool the agent called before it said anything. `snapshot.slow_tool_calls_in_silence` is the one tool-latency number that is always a defect — a tool the caller waited on with nothing being said over it.
+
+**Use the outcome to find the calls that went wrong.** `GET /v1/calls?outcome=failure` is the list to read on a Monday morning, and `outcome_rationale` on each one says what in the transcript decided the verdict — which is also how you find out your `outcome.prompt` says something other than what you meant. Read your success rate over `judged_calls` from `GET /v1/calls/stats`, never over every call: analysis deliberately skips a call with fewer than two caller turns, so wrong numbers and hangups on the greeting do not drag it down. The `unanswered_question` field is the other list worth reading — every true is a policy line your prompt is missing. See [call analysis](/observability/call-analysis).
+
+## Where this falls short
+
+**There are no opening hours.** Nothing schedules a number: once assigned, it answers whenever it rings. The prompt above tells the agent the hours and what to say, and that is the whole mechanism — a caller at midnight still reaches the agent, and if the model transfers anyway the dial rings an empty desk for thirty seconds and comes back with "nobody answered". If out-of-hours calls must not be answered at all, unassign the number on a schedule of your own, and expect callers to hear a carrier failure rather than a message. For anything more precise than the frozen clock line, put the hours in a [`code` operation](/tools/code) over `input.system_vars.now` — the clock strings cannot be compared in an `if`.
+
+**A policy the prompt does not state is simply not answered.** The agent knows what the `POLICY` section says and nothing more, so the day your returns policy changes on the website the agent is still quoting the old one until you edit the prompt and publish again.
+
+**The number answers the published version, and only that.** An edit to the prompt or a republished tool changes nothing a caller hears until the agent is published again.
+
+Three smaller things. The person answering a transfer sees **your** number, not the caller's, because the outbound leg is dialled from your own carrier trunk. Nothing detects voicemail on a `cold` transfer, so one that reaches a voicemail greeting is a connected call as far as everything downstream is concerned. And conversation memory is keyed on the pair of phone numbers, so the same customer ringing a second number of yours arrives as a stranger.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Multi-agent triage" href="/guides/multi-agent-triage">
+    When one prompt is carrying three jobs, split it into a front desk and specialists.
+  </Card>
+  <Card title="Appointment booking" href="/guides/appointment-booking">
+    The same shape, with a real calendar behind it.
+  </Card>
+  <Card title="Troubleshooting" href="/telephony/troubleshooting">
+    Number not live, no inbound audio, calls failing at setup.
+  </Card>
+  <Card title="Webhooks" href="/observability/webhooks">
+    Push each finished call, with its outcome and fields, into your own systems.
+  </Card>
+</CardGroup>

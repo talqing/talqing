@@ -1,0 +1,129 @@
+---
+title: "Recipes"
+description: "Prompts that produce a published agent, an FAQ, a live phone line, a campaign and an explanation of why a call failed."
+---
+
+Each recipe is a prompt you type into your client, what the agent does with it, and what to check before you believe it. They assume the server is [set up](/mcp/setup) and that you have [provider keys](/get-started/provider-keys) for the models you want.
+
+Nothing here is a script. Reword them for your own product — the shape is what matters: say what you want, say what not to do, and ask for the result back.
+
+## Build and publish a text agent
+
+> Create a Talqing text agent called "Northwind chat" that answers questions about orders, delivery and returns for an online hardware store. Read the catalog first and pick a model I have a key for. Write the prompt so it asks for an order number before it promises anything. Do not publish it yet — show me the config.
+
+**What it does.** Fetches `describe_schema('AgentConfig')` for the shape, reads `get_catalog` for valid `provider`/`model` pairs and `list_provider_keys` for which providers you have keys for, then calls `create_agent`. A text agent has no `stt`, `tts`, `greeting` or turn handling — those slots do not exist on the channel, and the server normalizes them away if it tries. It should show you the prompt it wrote before doing anything else.
+
+**Then publish and talk to it.**
+
+> Validate it, then publish it, then start a chat with contact key `test-1` and ask it where order 4471 is. Show me its reply, then end the chat.
+
+`validate_agent` runs publish-grade checks on the server — a missing provider key, an unpublished tool, a model that does not support the channel — and returns errors and warnings. Errors block the publish; warnings do not. Then `publish_agent`, `create_chat` and `create_chat_message`, which returns the agent's reply itself, and `end_chat` when you are done — a chat stays open until something ends it.
+
+**What to check.** That the reply is in the transcript, not in the model's summary of what it expects the agent to say. That the config it showed you names a model from `get_catalog`. Text costs $0.0001 per answered message on top of what your own LLM key was charged. See [chats](/channels/text-conversations).
+
+## Give a voice agent a tool that calls your API
+
+> Add a tool called `lookup_order` to the Northwind agent. It takes an order number, calls `GET https://api.northwind.example/orders/{{args.order_number}}` with an Authorization header read from the workspace secret `NORTHWIND_API_KEY`, and tells the agent the status and the delivery date. Run it against order 4471 before you attach it.
+
+**What it does.** Fetches `describe_schema('ToolOperations')`, writes the `json_schema` the model will fill in and the [operation tree](/tools/operation-tree) that runs, then `create_tool`. `run_tool` executes the draft for real — it calls your endpoint with your secret and reports the resolved request, the response and everything published into `tooldata`, with secrets redacted. Then `validate_tool` and `publish_tool`; a tool must be published before an agent can attach it, so it does that without asking.
+
+Attaching is the step to watch. `update_agent` sends only the fields it changes, but `tools` is a list and replaces whole, so it reads the agent's current tools and sends them back with the new one appended. Then `validate_agent` and, when you say so, `publish_agent`.
+
+**What to check.** That every property in the `json_schema` has a `description`: that text is the only instruction the agent's model gets about what to put there. That the secret already exists — creating one is admin-only, and `{{secrets.NAME}}` raises at runtime if the name is wrong rather than substituting an empty string ([secrets](/platform/secrets)). And that the agent was republished: publishing pins each tool to the version live at that moment, so republishing the tool alone changes nothing live ([versions](/agents/versions)).
+
+## Create an FAQ and attach it
+
+> Create an FAQ called "Northwind store FAQ" from `faq.csv` — the columns are `question` and `answer`. Attach it to the Northwind agent, keep whatever FAQs it already has, and validate. Do not publish until I say so.
+
+**What it does.** Reads the file and calls `create_faq` with the name and the entries, up to 500 in one request. Then `get_agent` for the current `faqs`, and `update_agent` with that list plus `{"faq_id": "…"}` appended — `faqs` is a list and replaces whole, like `tools`. `validate_agent` reports an FAQ id that does not exist as an error and an FAQ with no entries as a warning. Attaching is a config change, so it reaches callers at `publish_agent`.
+
+**Then change an answer.**
+
+> In the Northwind store FAQ, change the opening-hours answer to nine to seven, and add a question about parking.
+
+`get_faq` returns every entry with its id; `update_faq_entry` changes the one and `create_faq_entries` appends the other. Neither needs a publish.
+
+**What to check.** That it edited the entry rather than deleting and recreating the FAQ. That the answers are the text from your file — ask it to read `get_faq` back. And that you meant the change to go out now: **FAQ content is live**, so an edit reaches every agent attaching the FAQ from its next session, published or not. A request with a question the FAQ already has is refused whole, and `delete_faq` is refused while an agent or task attaches it. See [FAQs](/agents/faqs).
+
+## Set up a phone number end to end
+
+> I have a Plivo account. Connect it to Talqing, provision the trunk, show me the numbers it owns, import the Bangalore one, and put the Northwind voice agent on it. Stop and tell me if anything needs doing in the Plivo console.
+
+**What it does.** Three things have to line up, in order. `list_telephony_providers` states exactly which credential fields that carrier needs; `create_telephony_account` records them; `provision_telephony_account` builds the SIP trunk and is safe to repeat. `list_remote_numbers` reads live from the carrier — which also proves the credentials work — and marks what Talqing already holds. `import_phone_numbers` brings the rest in and provisions each one. `assign_phone_number` puts a **published** voice agent on it.
+
+**What to check.** Import is per number, not all-or-nothing: `items` carries one result per requested E.164 and every `ok` has to be read rather than trusting the 200. Then `get_phone_number` and look at `readiness` — `live` is the honest answer, and `needs_agent`, `needs_carrier_setup`, `setting_up`, `error` and `disabled` are the others.
+
+<Warning>
+Some carrier work happens in the carrier's own console and no API can confirm it. That is what an account's `setup_steps` are for. A step marked `user_confirmable` is yours to do, and you confirm it with `patch_telephony_account`. **An agent that says inbound calling works while such a step is outstanding is guessing** — ask it to read `setup_steps` back to you. See [carrier accounts](/telephony/carrier-accounts).
+</Warning>
+
+Then call the number yourself. That is the only test that proves the whole path.
+
+## Run a campaign
+
+> Create a call batch for the Northwind agent on our Bangalore number from `leads.csv` — the `phone` column is the number and `first_name` and `plan` go into userdata. Asia/Kolkata, weekdays 10:00 to 18:00, two at a time, two attempts. Do not start it: show me the first five recipients and the total, and wait for me.
+
+**What it does.** Reads the file, builds `recipients[]` — each row is a `to` plus a string map that becomes that call's session state, so `{{userdata.first_name}}` in the prompt or greeting is that person's name — and sets `timezone`, `calling_window`, `max_concurrency` and `max_attempts` on the batch. A number that appears twice is refused with both row numbers. `max_concurrency` is 1 to 10.
+
+<Warning>
+`create_call_batch` is the most expensive operation on the platform: one call to it can place up to 10 000 billable dials. Two things you would otherwise learn from an invoice — **voicemail is answered and billed** unless the agent has `voicemail_detection` on; and **every call runs the agent's current published version**, so republishing mid-batch changes every call placed after that moment.
+</Warning>
+
+**Watching it.**
+
+> How is the batch doing?
+
+`get_call_batch` has the live counts, `next_dial_at` — which is how you tell "waiting for Monday" apart from "stuck" — and `failure_reason` if it stopped itself, which happens after ten consecutive setup failures. `list_calls` with `batch_id` gives the calls themselves. `pause_call_batch` stops new dials and lets live ones finish; `cancel_call_batch` is final. See [batch calling](/telephony/batch-calling).
+
+## Debug a call that went wrong
+
+> Read the last five failed calls on the Northwind agent and tell me why each one ended. Quote the transcript.
+
+**What it does.** `list_calls` filtered by `agent_id` and `status=failed` over the default 30-day window, then `get_call` on each. `get_call` starts with `snapshot`, which answers "did this call go well" on its own: `snapshot.issues` names every problem found and `snapshot.ok` is true when there were none. Below that is the transcript with every tool call and its output, the `userdata` the call ended with, and a per-stage latency breakdown — and `tools`, `starting_prompt` and `greeting` as the frozen version that call actually ran, not the agent's current draft.
+
+**Other questions that work the same way:**
+
+> Which close reasons are most common this week, and how much did we spend per day?
+
+That is `get_observability` for the workspace view and `call_stats` for the totals.
+
+> This call was slow. Which stage?
+
+The latency breakdown on `get_call`, per model stage.
+
+**What to check.** That it read the run before theorizing. The transcript and the final `userdata` usually name the cause, and an agent that explains a failure without quoting either is reasoning about your config instead of your call. `close_reason: insufficient_credits` means the workspace is out of credits — top up in the dashboard. See [debugging agents](/observability/debugging-agents) and [close reasons](/observability/close-reasons).
+
+## Build an agent task and run it
+
+> Create a Talqing agent task called "qualify-lead". Inputs: a company name and a website. It should research the company with the web search builtin tool and return `industry`, `employee_range`, `fit` as good/weak/none, and a two-sentence rationale. Run it once on Northwind Hardware and show me the trace.
+
+**What it does.** Fetches `describe_schema('TaskConfig')`, then `create_task` — which writes a draft, so a half-finished task saves. `vars` are the inputs, read as `{{vars.name}}`; `output` declares the fields the model must produce, and the task is given a generated `submit_result` tool built from them. Then `validate_task` and `publish_task`, and `run_task`, which waits for the result and returns the structured `output`, a `trace` of every tool call, the steps used and what the tokens cost. Pass `version: "draft"` to `run_task` to try an edit before publishing it.
+
+<Warning>
+`run_task` executes for real: the tools call your endpoints with your secrets, MCP servers spend your credits, and the model spends your tokens. A task that books a slot, charges a card or sends a message will do so.
+</Warning>
+
+**What to check.** That `output` carries every field you declared. Output fields are flat scalars only — `string`, `boolean`, `integer` or `number`, with no arrays and no nested objects — and each field's `description` is literally the prompt for that value, so `fit` is held to good, weak or none only because its description says so. Read those descriptions before you trust the field. On failure, `error.type` says whose problem it is. Note that a run records the task's *name* and nothing else about the definition it ran under, so two runs either side of an edit are indistinguishable in `list_task_runs` — keep your own note of what changed. See [agent tasks](/tasks/overview).
+
+## Working practices
+
+Four habits, in the order they save you.
+
+**Ask it to validate before it claims something is ready.** `validate_agent` and `validate_tool` run on the server against rules that cannot be checked by reading a draft: a missing provider key, an unpublished tool, a model that does not support the channel, a required variable an inbound call could never supply. A model can reason its way to the wrong answer about all four. Say *validate it and paste the result*, and treat an answer with no operation call behind it as no answer.
+
+**Ask to see the change before it publishes.** Lists such as `tools`, `mcps`, `faqs` and `handoffs` are sent whole, so a write that adds one entry without the others drops them. *Show me what you are about to send* catches that in one line.
+
+**Never let it publish or dial without saying so.** Publishing changes what live callers hear on the next call. An outbound call rings a real phone and cannot be recalled. The server's instructions tell the model to wait for you on both, and that is a rule a model follows rather than one the system enforces.
+
+**Keep your client's approval prompts on for anything that reaches a person.** Reads are annotated `readOnlyHint` and can be waved through. Calls, messages, email sends, task runs and tool runs should not be. [Permissions](/mcp/permissions) has the list.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Permissions" href="/mcp/permissions">
+    What the server cannot do, and what to approve by hand.
+  </Card>
+  <Card title="Prompting" href="/agents/prompting">
+    Writing the system prompt your agent will be judged on.
+  </Card>
+</CardGroup>

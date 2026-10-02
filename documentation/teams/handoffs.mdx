@@ -1,0 +1,388 @@
+---
+title: "Handoffs"
+description: "The handoffs field: one entry per destination, one tool per entry, and the model routes on the description you write."
+---
+
+`config.handoffs` is where an agent's outgoing edges live. Each entry becomes
+**one tool the model can call**, and the model chooses between them from the
+descriptions you write. A handoff moves the conversation to **another agent**;
+handing the caller to a **person** is a [transfer](/tools/transfer), which is a
+different operation with different rules.
+
+```json
+{
+  "handoffs": [
+    {
+      "name": "Billing",
+      "agent_id": "b41c7a29-6f2b-4c7a-9c1e-1d2a8f0b41c7",
+      "description": "invoices, refunds, payment questions and card details",
+      "context": "summary",
+      "recent_turns": 2,
+      "message": "Let me put you through to billing."
+    }
+  ]
+}
+```
+
+## The fields
+
+| Field | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `name` | string, required | — | This destination's name in **this** agent's mouth. It becomes the tool name, labels the handover in the transcript, and — when `agent_id` is absent — is the team member it resolves to. |
+| `agent_id` | uuid or null | `null` | A stored agent in this workspace, entered at its **latest published version**. Leave it out to resolve `name` against the team defined on the call. |
+| `description` | string, required | — | What the model routes on. Non-empty; an undescribed destination is a coin flip. |
+| `context` | `"transcript"` / `"summary"` / `"none"` | `"transcript"` | What the target starts from. See [context policies](/teams/context-policies). |
+| `recent_turns` | integer 1–10 or null | `null` | How many recent turns cross verbatim. **Rejected** under `transcript`. |
+| `summary_prompt` | string or null | `null` | Replaces the platform's default line for the summary this agent writes. **Rejected** outside `summary`. |
+| `message` | string or null | `null` | Said while the target loads. |
+
+`handoffs` is available on every channel — voice, video and text.
+
+## Handoff or task?
+
+An [agent task](/agents/agent-tasks) is the other way an agent reaches another
+definition, and the difference is the whole point. **A handoff gives the caller away; a
+task borrows the floor and hands it back.**
+
+| | Handoff | Task |
+| --- | --- | --- |
+| Afterwards | The target owns the conversation. There is no return. | The agent picks up where it left off, with the sub-conversation in context. |
+| Result | None. The target simply continues. | A typed value, arriving as the tool's result. |
+| Context | Yours to choose: `transcript`, `summary` or `none`. | Always the conversation so far, minus tool calls. |
+| Target | Another agent, with its own voice and its own channel. | A task, which declares no media and speaks with this agent's voice. |
+| Use it for | "Billing questions go to Billing." | "Take their address, then carry on." |
+
+## `description` is the router
+
+The compiler turns each entry into a tool named `handoff_to_<name>`, and the
+entry's `description` is that tool's description. It is the only thing the model
+has to go on.
+
+Write it as **what belongs there**, not as an instruction:
+
+| Write this | Not this |
+| --- | --- |
+| `invoices, refunds, payment questions and card details` | `Use this tool if the caller needs billing help` |
+| `broken devices, setup problems, error messages, anything that is not working` | `Hand off to technical support when appropriate` |
+| `cancelling or changing an existing subscription` | `Call this for cancellations` |
+
+The generated tool takes **no arguments** — except under `context: "summary"`,
+where it takes exactly one, the summary the model writes as it hands over.
+
+### The tool name
+
+The name is the destination's `name`, lowercased, with every run of
+non-alphanumeric characters replaced by an underscore: `Billing` becomes
+`handoff_to_billing`, `Tier 2 support` becomes `handoff_to_tier_2_support`.
+
+It is derived from the destination's `name` and **not** from the target agent's,
+deliberately: renaming an agent in the dashboard must not change the tool name a
+published prompt was written against. The dashboard shows the resulting tool
+name under each destination as you type.
+
+Three name rules are enforced at save or publish:
+
+- Two destinations on one agent cannot share a `name`.
+- A `name` with no letters or digits in it has nothing to slug into a tool name
+  and is refused.
+- The generated name shares one namespace with attached tools, hook tools and
+  the model's own built-in tools. A collision is an error, not a coin flip:
+
+```text
+two tools on this agent are named 'handoff_to_billing' (an attached tool and the
+handoff to 'Billing') - the model would have no way to tell them apart
+```
+
+## Naming the target
+
+**With `agent_id`**, the target is a stored agent and the call enters it at
+whatever version is **published at that moment**, with the tools that version
+pinned. This is different from `config.tools`, which pins at the source agent's
+publish: republish the target and the very next handoff lands on the new
+version, with nothing to republish on the source. That is usually what you want,
+and it means a target you break is broken for every agent pointing at it.
+
+The target must have a published version. Publish refuses the edge otherwise:
+
+```text
+the handoff to 'Billing': agent 'Billing desk' has no published version -
+publish it before handing calls to it
+```
+
+If the target loses its published version between publish and the call, the
+handoff fails at runtime and the model is handed a sentence to relay: *"I'm
+sorry, that team isn't available right now."* The call carries on with the
+source agent.
+
+**Without `agent_id`**, `name` resolves against the [team defined on the
+call](/teams/agent-teams-on-a-call). A stored agent's team is unknowable at
+publish — it depends on which call the agent ends up running on — so this
+publishes with a **warning** rather than an error:
+
+```text
+the handoff to 'Billing' resolves only when this agent runs in a team that
+defines 'Billing'
+```
+
+On a call that does define it, the name is checked like any other edge, and a
+name nothing defines is refused when the call is created.
+
+## `message` — what the caller hears at the boundary
+
+The line is queued **before** the target is built, which is the whole point of
+it: building the target loads its definition and compiles its prompt, tools and
+voice, and the caller should hear "connecting you to billing" during that rather
+than after it. It always finishes playing before the target's `on_enter` hook
+runs.
+
+- **Voice and video, cascade pipeline:** spoken verbatim.
+- **Voice and video, realtime pipeline:** a speech-to-speech model has no
+  text-to-speech to script, so it is *asked* to say the line and may reword,
+  reorder or trim it. Do not put an exact form of words there on a realtime
+  agent.
+- **Text:** sent as a message from the agent before the target replies.
+
+Leave it out and the handover is silent — which is fine when the target has a
+greeting of its own.
+
+`message`, `description` and `summary_prompt` are all personalized at build time
+with `{{userdata.…}}`, `{{system_vars.…}}` and `{{vars.…}}`, exactly as the
+prompt and greeting are. A token whose root is none of those — a bare
+`{{name}}`, a typo like `{{userdate.name}}` — is a **save error**, not text.
+
+<Warning>
+Nothing validates a delivery tag you write by hand into a `message`. On a voice
+that does not speak that dialect it reaches the caller as the word itself. See
+[expressive delivery](/agents/expressive-delivery).
+</Warning>
+
+## What the target does on arrival
+
+In order:
+
+1. **Its own `on_enter` hook runs, to completion.** The target's hook, not the
+   source's — see [lifecycle hooks](/agents/lifecycle-hooks). Its latency lands
+   before the target's first word, so a hook that fetches something slow should
+   open with a `say`.
+2. **It speaks its own greeting**, if it has one, with `{{userdata.…}}`
+   resolved against the live session bag the hook just wrote to.
+3. **If it has no greeting, it opens with a generated line instead** — the
+   caller has just asked for something and is waiting on an answer. What the
+   target is told depends on what it actually received: under `transcript` it is
+   told it can see everything and to address the most recent message; under
+   `summary`, that it has a summary plus the last few messages; under `none`
+   with no tail, that it has *not* been told what came before and should
+   introduce itself briefly and find out what the caller needs.
+
+Text agents cannot have a greeting at all, so a text handoff target always opens
+with the generated line.
+
+The target's own `conversation.context` is **not** consulted. That field decides
+what a new *call* starts from ([conversation memory](/agents/conversation-memory));
+what a handoff target starts from is the edge's `context`.
+
+## What validation enforces across a team
+
+Every edge is checked at publish, and again at runtime before the switch, because
+a stored target can be republished in between. These are errors:
+
+| Rule | Why |
+| --- | --- |
+| **Same channel.** A `voice` agent cannot hand off to a `text` or `video` agent. | There is no media path from one to the other. |
+| **Same pipeline.** Both sides must be cascade, or both realtime. | Swapping a speech-to-speech socket for an STT/LLM/TTS stack mid-call would mean tearing the media graph down and rebuilding it. |
+| **On `video`, the same avatar.** Same provider, catalog model, `avatar_id` and display name. | The Anam session is opened once, for the call, and cannot be swapped for another face part-way through. |
+| **Out of an expressive agent, the same voice.** Every target of an agent with `tts.expressive` on must use the same provider, the same model and `expressive: true`. | The target inherits a transcript full of delivery tags and is few-shot into writing its own; a voice that cannot speak them reads them out. Handing off **into** an expressive agent is fine — the history it inherits is plain text. |
+| **The target exists and is published.** | See above. |
+| **Unique, sluggable destination names that do not collide with another tool.** | See above. |
+
+The expressive rule is conditioned on the *source*, which makes it transitive: a
+legal target is itself expressive, so its own outgoing edges get the same check.
+One expressive agent puts its whole downstream graph on one voice.
+
+One check is a **warning**, not an error:
+
+```text
+'Billing' has recording on but 'Front desk' has it off - recording cannot start
+part-way through a call, so nothing will be recorded if 'Front desk' is the
+agent that answers. Turn recording on for 'Front desk' too; it pauses by itself
+while an agent with recording off is speaking.
+```
+
+Whether that edge is a problem depends on which agent answered, which no
+per-agent check can know — "Support (on) → Payments (off) → Support (on)" is a
+shape worth building, and its second edge looks exactly like the broken one.
+Recording switching **off** mid-call always works; switching **on** works only if
+something was already recording. See [recording](/telephony/recording).
+
+Run [`validate`](/agents/validation) before publishing to see all of this at once:
+`POST /v1/agents/{agent_id}/validate`.
+
+## Handing back, and loops
+
+A target hands back the same way it hands anywhere: with its own `handoffs`
+entry pointing at the agent it came from, by `agent_id` or — on a team — by
+name. There is nothing special about the return edge. Give the specialist a
+destination named for the front desk with a description like "anything that is
+not a billing question", and set its `context` to `none` with a small
+`recent_turns` so the front desk does not re-read the whole billing detour on
+every turn.
+
+Nothing prevents a routing cycle, and no single edge can detect one. What stops
+it is a per-call cap: **25 handoffs on one call**. The next attempt fails and
+the model is handed a sentence to relay to the caller:
+
+```text
+I'm sorry, I can't pass you to another assistant again on this call.
+```
+
+The count is per call, not per tool, and covers both `handoffs` edges and
+[`handoff` operations](/teams/conditional-handoffs). If you are anywhere near it,
+the routing descriptions are overlapping and two agents are passing the caller
+back and forth.
+
+<Note>
+On text, a handoff lasts for the rest of the chat. The agent that was last handed
+the conversation answers every later message, however long the gap, until the
+chat ends. A new chat starts from its own entry agent.
+See [chats](/channels/text-conversations).
+</Note>
+
+## A worked example
+
+A front desk that routes to two specialists. Send `handoffs` alone — the rest of
+the config is kept, and the list replaces whatever edges were there — then
+validate and publish.
+
+<CodeGroup>
+```bash cURL
+curl -X PATCH https://api.in.talqing.com/v1/agents/3f9a1c72-58b4-4a1e-9f27-6d0c5b8e4a13 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "handoffs": [
+        {
+          "name": "Billing",
+          "agent_id": "b41c7a29-6f2b-4c7a-9c1e-1d2a8f0b41c7",
+          "description": "invoices, refunds, payment questions, card details and anything about what the caller has been charged",
+          "context": "summary",
+          "message": "Let me put you through to billing."
+        },
+        {
+          "name": "Technical support",
+          "agent_id": "7d2e5a04-91c3-4f68-b0aa-2c53e7d19f80",
+          "description": "broken devices, setup problems, error messages, anything that is not working",
+          "context": "summary",
+          "recent_turns": 3,
+          "summary_prompt": "A short summary for the technical desk: which product {{userdata.name}} is calling about, what is going wrong, and what you have already checked.",
+          "message": "One moment, connecting you to technical support."
+        }
+      ]
+    }
+  }'
+
+curl -X POST https://api.in.talqing.com/v1/agents/3f9a1c72-58b4-4a1e-9f27-6d0c5b8e4a13/validate \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+
+curl -X POST https://api.in.talqing.com/v1/agents/3f9a1c72-58b4-4a1e-9f27-6d0c5b8e4a13/publish \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const agent_id = "3f9a1c72-58b4-4a1e-9f27-6d0c5b8e4a13";
+
+await talqing.agents.update({
+  agent_id,
+  updateAgentRequest: {
+    config: {
+      handoffs: [
+        {
+          name: "Billing",
+          agent_id: "b41c7a29-6f2b-4c7a-9c1e-1d2a8f0b41c7",
+          description:
+            "invoices, refunds, payment questions, card details and anything about what the caller has been charged",
+          context: "summary",
+          message: "Let me put you through to billing.",
+        },
+        {
+          name: "Technical support",
+          agent_id: "7d2e5a04-91c3-4f68-b0aa-2c53e7d19f80",
+          description:
+            "broken devices, setup problems, error messages, anything that is not working",
+          context: "summary",
+          recent_turns: 3,
+          summary_prompt:
+            "A short summary for the technical desk: which product {{userdata.name}} is calling about, what is going wrong, and what you have already checked.",
+          message: "One moment, connecting you to technical support.",
+        },
+      ],
+    },
+  },
+});
+
+const check = await talqing.agents.validate({ agent_id });
+if (check.errors.length === 0) {
+  await talqing.agents.publish({ agent_id });
+}
+```
+
+```python Python
+agent_id = "3f9a1c72-58b4-4a1e-9f27-6d0c5b8e4a13"
+
+talqing.agents.update(
+    agent_id,
+    config={
+        "handoffs": [
+            {
+                "name": "Billing",
+                "agent_id": "b41c7a29-6f2b-4c7a-9c1e-1d2a8f0b41c7",
+                "description": (
+                    "invoices, refunds, payment questions, card details and anything "
+                    "about what the caller has been charged"
+                ),
+                "context": "summary",
+                "message": "Let me put you through to billing.",
+            },
+            {
+                "name": "Technical support",
+                "agent_id": "7d2e5a04-91c3-4f68-b0aa-2c53e7d19f80",
+                "description": (
+                    "broken devices, setup problems, error messages, anything that is "
+                    "not working"
+                ),
+                "context": "summary",
+                "recent_turns": 3,
+                "summary_prompt": (
+                    "A short summary for the technical desk: which product "
+                    "{{userdata.name}} is calling about, what is going wrong, and what "
+                    "you have already checked."
+                ),
+                "message": "One moment, connecting you to technical support.",
+            },
+        ],
+    },
+)
+
+check = talqing.agents.validate(agent_id)
+if not check["errors"]:
+    talqing.agents.publish(agent_id)
+```
+</CodeGroup>
+
+The front desk's prompt says what it does *not* answer. That matters more than
+it looks: an agent with a handoff tool and a prompt inviting it to be helpful
+will answer the billing question badly instead of routing it.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Context policies" href="/teams/context-policies">
+    `transcript`, `summary` and `none` — what the target starts from.
+  </Card>
+  <Card title="Patterns" href="/teams/patterns">
+    Front desk to specialists, handing back, and what a hop costs.
+  </Card>
+  <Card title="Conditional handoffs" href="/teams/conditional-handoffs">
+    Routing decided by a tool tree rather than by the model.
+  </Card>
+</CardGroup>

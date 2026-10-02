@@ -1,0 +1,140 @@
+---
+title: "Overview"
+description: "What an agent is made of, every field of its config, and how an update merges into it."
+---
+
+An agent is one object — `config` — plus the things you attach to it: tools, MCP servers, FAQs and handoff destinations. The config decides which channel the agent runs on, which models run it, what it says and what it is allowed to do. Everything else on Talqing points at an agent: a phone number, a web call token, a text conversation, a campaign.
+
+Here is a complete voice agent, exactly as `POST /v1/agents` takes it:
+
+```json
+{
+  "config": {
+    "name": "Northwind support",
+    "channel": "voice",
+    "prompt": "You are the support line for Northwind Tools. Answer questions about orders and returns. Look an order up before you talk about it.",
+    "greeting": "Northwind support, how can I help?",
+    "language": "en",
+    "timezone": "Asia/Kolkata",
+    "stt": { "provider": "deepgram", "model": "nova-3-general" },
+    "llm": { "provider": "openai", "model": "gpt-5.6-luna" },
+    "tts": { "provider": "deepgram", "model": "aura-2", "voice": "aura-2-thalia-en" },
+    "tools": [{ "tool_id": "3f8b0f4c-9a1e-4a7d-9c2b-1d5e6f70a821" }]
+  }
+}
+```
+
+Only `name` is required. Everything else takes a default, and the defaults are a working voice agent on the Sarvam speech stack with OpenAI's `gpt-5.6-luna` reasoning it. Replace the tool id with one from `GET /v1/tools` — an id that does not exist, or a tool that has never been published, is refused.
+
+## The parts of an agent
+
+**Identity and behaviour.** `name`, `channel`, `prompt`, `greeting`. The prompt is where the agent's behaviour lives — see [prompting](/agents/prompting).
+
+**The model stack.** Either the `stt` → `llm` → `tts` cascade, or a single `realtime` speech-to-speech model that replaces all three. Valid provider and model pairs come from the catalog and nowhere else — see [models](/agents/models).
+
+**How it hears and speaks.** `language`, `turn_handling`, `background_audio`, `noise_cancellation`, `vision_input`. Voice and video only.
+
+**What it can do.** `tools`, `mcps`, `handoffs`, and the three lifecycle hooks. Every tool must be published before it can be attached.
+
+**What it answers from.** `faqs` — written question-and-answer pairs the agent quotes instead of improvising. See [FAQs](/agents/faqs).
+
+**Defined inline.** A tool, an MCP server or an FAQ may be written in place of its id. On `POST` and `PATCH /v1/agents` it is created as a stored tool, integration or FAQ in the same request, and the saved config carries the id instead. On a call request it lasts for that call only — see [per-call configuration](/agents/per-call-configuration).
+
+**What it knows about the person.** `vars` and `timezone` feed the templating in the prompt, greeting and tools; `conversation` decides what a new call knows about earlier ones.
+
+**What happens around the call.** `recording` and `analysis`.
+
+## Updating an agent
+
+`POST /v1/agents` takes a whole config. `PATCH /v1/agents/{agent_id}` takes only the fields you change: omitted fields are kept, an explicit `null` clears a field, objects merge key by key (an object that names a different `provider` starts over, since its voice and settings belonged to the old one), and lists replace whole. To add a tool, send the full `tools` list with it appended. An unknown field is refused, not ignored.
+
+<CodeGroup>
+```bash cURL
+AGENT_ID=0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30
+
+curl -s -X PATCH "https://api.in.talqing.com/v1/agents/$AGENT_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"config": {"greeting": "Northwind support, how can I help?"}}'
+```
+
+```typescript TypeScript
+const agent_id = "0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30";
+
+await talqing.agents.update({
+  agent_id,
+  updateAgentRequest: { config: { greeting: "Northwind support, how can I help?" } },
+});
+await talqing.agents.publish({ agent_id });
+```
+
+```python Python
+agent_id = "0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30"
+
+talqing.agents.update(agent_id, config={"greeting": "Northwind support, how can I help?"})
+talqing.agents.publish(agent_id)
+```
+</CodeGroup>
+
+The response of `get`, `create` and `update` is the same shape, so the config you read back is the config to send next time. Some fields are normalized on the way in — switching to `text` clears the speech stack, setting `realtime` clears the cascade — so read the response rather than assuming your input survived unchanged. See [channels](/agents/channels).
+
+## Draft and published
+
+Every write lands on the **draft**. Live traffic runs the last **published** version, an immutable snapshot. Nothing you change reaches a caller until you publish, and publishing pins every attached tool to the version that is live at that moment. Full rules in [versions](/agents/versions); the checks publishing runs are in [validation](/agents/validation).
+
+## In the dashboard
+
+Agents are listed at `https://app.talqing.com/agents`. The editor is at `https://app.talqing.com/agents/detail?id=<agent id>` and is organized the way this reference is: Channel, Prompt, Avatar (on video), Models, Vision, Tools, Handoffs, Integrations, FAQs, Tuning, Past calls, Analysis, and a test call panel. A cost estimate and the [CoPilot](/agents/copilot) sit in a rail beside it.
+
+<Note>
+Agents are **regional**. An agent created against `https://api.in.talqing.com` does not exist in `https://api.us.talqing.com`, and neither do its calls. The same token works in every region — see [regions](/get-started/regions).
+</Note>
+
+## Config reference
+
+Every top-level field of `config`. "Channels" is where the field has an effect; a field outside its channels is cleared or ignored on save.
+
+| Field | Type | Channels | Default | What it does |
+| --- | --- | --- | --- | --- |
+| `name` | string | all | required | Display name, unique in the workspace. |
+| `channel` | `voice` \| `video` \| `text` | all | `voice` | How a person reaches the agent, and which model slots exist. |
+| `prompt` | string | all | `"You are a helpful, concise voice assistant."` | The system prompt. Supports `{{userdata.*}}`, `{{vars.*}}` and `{{system_vars.*}}`. |
+| `greeting` | string \| null | voice, video | `"Hello! How can I help you today?"` | The opening line, spoken on connect and on the way in from a handoff. |
+| `timezone` | string \| null (IANA) | all | `null` | What the clock variables resolve against. Required once one is used. |
+| `vars` | array | all | `[]` | The `{{vars.*}}` this agent reads, each with a description, default and `required` flag. See [variables](/agents/variables). |
+| `language` | string \| null | voice, video | `null` (Auto) | The one language every model in the pipeline speaks. See [language](/agents/language). |
+| `stt` | object \| null | voice, video | `sarvam/saaras:v3` | Speech-to-text, plus its optional `fallback`. Cleared when `realtime` is set. |
+| `llm` | object \| null | all | `openai/gpt-5.6-luna` | The language model, plus `reasoning_effort`, `priority`, `builtin_tools` and its optional `fallback`. Cleared when `realtime` is set. |
+| `tts` | object \| null | voice, video | `sarvam/bulbul:v3`, voice `shubh` | Text-to-speech: voice, `speed`, `expressive`, ElevenLabs voice settings, optional `fallback`. Cleared when `realtime` is set. |
+| `realtime` | object \| null | voice, video | `null` | A speech-to-speech model that replaces `stt`, `llm` and `tts` together. |
+| `turn_handling` | object | voice, video | see [turn handling](/agents/turn-handling) | Endpointing, interruptions and preemptive generation. |
+| `tools` | array | all | `[]` | Published tools the model may call, each `{"tool_id": "…"}` — or a whole tool defined inline. See [tools](/tools/overview). |
+| `mcps` | array | all | `[]` | MCP servers whose tools the agent may call. See [MCP servers](/integrations/mcp-servers). |
+| `faqs` | array | all | `[]` | FAQs the agent answers from, each `{"faq_id": "…"}` — or a whole FAQ defined inline. At most 10. See [FAQs](/agents/faqs). |
+| `handoffs` | array | all | `[]` | Where this agent may pass the conversation next. See [handoffs](/teams/handoffs). |
+| `on_enter` | object \| null | all | `null` | A tool run when the agent takes the conversation. See [lifecycle hooks](/agents/lifecycle-hooks). |
+| `on_exit` | object \| null | all | `null` | A tool run when the agent gives it up. |
+| `on_user_turn_completed` | object \| null | all | `null` | A tool run after each user turn, before the model replies. Rejected on a `realtime` agent. |
+| `background_audio` | object | voice, video | off | Ambient and thinking sounds mixed into the agent's output. See [audio processing](/agents/audio-processing). |
+| `noise_cancellation` | object | voice, video | off, `aicoustics/quail_vf_s`, level `0.8` | Cleans up the caller's audio before the agent hears it. |
+| `vision_input` | object | voice, video (web) | screen share off | What the agent watches live during a call. See [vision and images](/agents/vision-and-images). |
+| `recording` | object | voice, video | `enabled: true`, `consent: "off"` | Whether calls are recorded and what the caller is told. See [recording](/telephony/recording). |
+| `analysis` | object | voice, video | `enabled: true`, summary on | What to work out about a call after it ends. See [call analysis](/observability/call-analysis). |
+| `conversation` | object | all | `context: "none"` | What a new call knows about earlier ones with the same person. See [conversation memory](/agents/conversation-memory). |
+| `avatar` | object \| null | video | `anam/anam` with a default face | The Anam face a video agent wears. See [video avatars](/agents/video-avatars). |
+
+Sub-fields of the model slots are documented in [models](/agents/models), [model fallbacks](/agents/model-fallbacks) and [thinking and provider tools](/agents/reasoning-and-builtin-tools).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Channels" href="/agents/channels">
+    Pick voice, video or text, and see what changes when you switch.
+  </Card>
+  <Card title="Prompting" href="/agents/prompting">
+    Write a system prompt the agent can act on.
+  </Card>
+  <Card title="Models" href="/agents/models">
+    The catalog, the two pipelines, and every model with its flags and price.
+  </Card>
+</CardGroup>

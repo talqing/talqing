@@ -1,0 +1,112 @@
+---
+title: "WhatsApp calls"
+description: "Answer calls to your Twilio WhatsApp number with a published voice agent."
+---
+
+A customer taps **call** in their WhatsApp chat with your number, and one of
+your voice agents answers. The call is an ordinary voice call from then on: it
+is recorded, analysed and billed like a phone call, it can end the call and
+press keypad buttons, and it appears under **Calls** as **WhatsApp**.
+
+Calls work on numbers connected [through Twilio](/channels/whatsapp). Gupshup
+numbers do not offer them yet.
+
+## Before you start
+
+- The number is already a [WhatsApp integration](/channels/whatsapp) on
+  **Twilio**.
+- Your WhatsApp Business Account has a **messaging limit of at least 2,000**.
+  Meta grants it after Business Verification; below it, Twilio refuses to turn
+  calling on.
+- Calling is not already set up on the sender in Twilio. If its **Voice Endpoint
+  Configuration** points at another TwiML app, Talqing will not replace it.
+- A **published voice agent** whose **Past conversations** setting is **Continue
+  the same conversation on every call** (`conversation.context: "transcript"`), and whose `required`
+  [variables](/agents/variables) all have defaults — a call carries no request
+  to supply them.
+
+## Turn calls on
+
+<Steps>
+  <Step title="Enable the calls trigger">
+    In **WhatsApp → Numbers**, pick a published voice agent in the number's
+    **Calls** cell — or over the API:
+
+    ```bash
+    curl -X POST https://api.in.talqing.com/v1/integrations/$INTEGRATION_ID/triggers \
+      -H "Authorization: Bearer $TALQING_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "trigger_type": "whatsapp.call.inbound",
+        "agent_id": "'"$VOICE_AGENT_ID"'",
+        "enabled": true
+      }'
+    ```
+
+    Talqing creates a TwiML app named `Talqing WhatsApp calls +<number>` in your
+    Twilio account and sets it on the sender. Nothing else in Twilio or Meta
+    needs touching.
+  </Step>
+
+  <Step title="Call the number">
+    The call button appears in the chat with your number — reopen the chat's
+    info page if it has not shown up yet. Tap it; the agent greets you.
+  </Step>
+</Steps>
+
+Disabling the trigger clears the sender's voice configuration and deletes the
+app, and the call button disappears. Disabling or deleting the integration does
+the same; enabling the integration again turns calling back on.
+
+## One thread per person
+
+A call and a chat with the same person are **one conversation**. The agent
+answering the call sees the chat so far, and the text agent's next reply sees
+the call. That is why the voice agent must keep the full transcript: with
+`summary` or `none`, a call would start a conversation of its own, and the chat
+would carry on in it without its history.
+
+The voice agent sees the same userdata the chat does, including a
+[batch](/whatsapp/creating-a-batch) row's columns:
+
+| Variable | Value |
+| --- | --- |
+| `{{userdata.whatsapp.phone}}` | The caller's number, E.164 |
+| `{{userdata.whatsapp.profile_name}}` | Their WhatsApp profile name |
+| `{{system_vars.human_phone_number}}` | The caller's number |
+| `{{system_vars.agent_phone_number}}` | Your WhatsApp number |
+
+A caller who hides their number on WhatsApp shows as **WhatsApp user** in
+**Calls**, and has no phone number variables.
+
+## What a WhatsApp call cannot do
+
+**Transfer to a phone number.** Meta does not allow a WhatsApp call to be
+connected to the phone network. A [transfer](/tools/transfer) fails with *calls
+on WhatsApp can't be transferred to a phone number*, and its `on_failure` runs
+as you set it.
+
+## What it costs
+
+| Who | What |
+| --- | --- |
+| Twilio, on your Twilio bill | The WhatsApp leg ($0.005/min) and the SIP leg to Talqing ($0.004/min) |
+| Meta | Nothing for a call the customer starts |
+| Talqing | The voice platform fee, as for any voice call |
+
+Your AI providers bill you for the call as they do for any other.
+
+## When something goes wrong
+
+| What you see | Why |
+| --- | --- |
+| `400` on enable: `WhatsApp calls work only on numbers connected through Twilio` | The integration is on Gupshup. |
+| `400` on enable: `Calling on this number is already set up elsewhere in Twilio. Turn it off there first.` | The sender's Voice Endpoint Configuration points at another app. Clear it in Twilio, then enable again. |
+| `400` on enable: `could not turn on calling in Twilio: …` | Twilio refused the sender update; its message says why. Below the 2,000 messaging limit is the usual cause. |
+| `400` on enable: `an agent answering WhatsApp calls must keep past conversations as the full transcript …` | Set the agent's **Past conversations** to **Continue the same conversation on every call**, and publish. |
+| `400` on enable: `'<name>' is required and has no default …` | Give the variable a default, or make it optional. |
+| `502` on disable: `Calls are off in Talqing, but Twilio refused to turn them off on the number …` | Usually a rotated Auth Token. Clear the sender's Voice Endpoint Configuration in Twilio. |
+| A call listed as *Calls are turned off on this WhatsApp number* | It arrived while the trigger or the integration was off — usually just after turning calls off, before WhatsApp hid the button. |
+| A call listed as *WhatsApp did not say who was calling* | Twilio sent no caller. |
+| A call listed as *This workspace was out of credits* | Top up; the next call connects. |
+| A call listed as *The call rang without ever connecting* | The caller hung up before the call reached the agent. |

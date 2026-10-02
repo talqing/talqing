@@ -1,0 +1,61 @@
+{
+  "name": "@talqing/sdk",
+  "version": "0.9.0",
+  "description": "TypeScript client for the Talqing API — build, publish and operate AI voice, video and text agents.",
+  "license": "MIT",
+  "homepage": "https://talqing.com",
+  "bugs": {
+    "email": "hello@talqing.com"
+  },
+  "keywords": [
+    "talqing",
+    "ai",
+    "agents",
+    "voice",
+    "video",
+    "livekit",
+    "sdk"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node ../../scripts/dist-markers.mjs",
+    "dev": "tsc -w -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "generate": "openapi-ts && openapi-ts -f openapi-ts.control.config.ts && node scripts/api-version.mjs",
+    "generate:check": "npm run generate && git diff --exit-code -- src/gen ../../../../frontend/lib/control/gen",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@hey-api/openapi-ts": "0.99.0",
+    "typescript": "~5.9.3"
+  }
+}

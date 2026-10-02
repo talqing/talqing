@@ -1,0 +1,162 @@
+---
+title: "Glossary"
+description: "Every term these docs use, defined in one line, linked to the page that owns it."
+---
+
+Alphabetical. Each term links to the page that covers it properly.
+
+### Agent
+
+One object, `config`, plus what you attach to it: a prompt, a model stack, tools, FAQs and handoff destinations. It runs on exactly one channel. → [agents overview](/agents/overview)
+
+### Agent task
+
+An agent nobody talks to: it takes named inputs, does the work and returns typed output fields. Same draft/publish lifecycle an agent has, minus every conversational organ. → [tasks overview](/tasks/overview)
+
+### Agent team
+
+Several agent definitions sent on one call request, the first of which answers and the rest of which are reachable by handoff. Built per request rather than stored. → [agent teams on a call](/teams/agent-teams-on-a-call)
+
+### Avatar
+
+A rendered face and voice for a `video` agent, supplied by Anam. Billed by wall-clock minute, idle time included. → [video avatars](/agents/video-avatars)
+
+### Batch
+
+A list of recipients worked through on a policy: calling windows, concurrency, retries, and pause, resume and cancel. Call batches dial; email batches draft and send. → [batch calling](/telephony/batch-calling)
+
+### BYOK
+
+Bring your own key. Talqing holds no provider credentials of its own — every model runs on your account, on your key, billed to you by that provider. → [provider keys](/get-started/provider-keys)
+
+### Call
+
+One voice or video session: an inbound phone call, an outbound one, or a call in a browser. The record you read a transcript, latency breakdown and cost from. → [calls](/observability/calls)
+
+### Cascade
+
+The three-stage voice pipeline: speech-to-text, then a language model, then text-to-speech. Three swappable parts, as opposed to one realtime model. → [models](/agents/models)
+
+### Channel
+
+`voice`, `video` or `text`. An agent has exactly one, and it decides which model slots exist. → [channels](/agents/channels)
+
+### Chat
+
+One text session with an agent, from its first message until the agent's `end_call` or `POST /v1/chats/{id}/end` ends it. To text what a call is to voice. → [chats](/channels/text-conversations)
+
+### Close reason
+
+The specific string saying how a call or chat ended — the caller hung up, the agent ended it, it timed out, it crashed. Some reasons waive the platform fee. → [close reasons](/observability/close-reasons)
+
+### Contact
+
+The person, across every conversation you have had with them, and the `userdata` accumulated about them. → [userdata](/agents/userdata)
+
+### Contact key
+
+Your own stable string identifying a contact, unique in the workspace. Send the same key again and you reach the same contact and the same accumulated state. → [chats](/channels/text-conversations)
+
+### Conversation
+
+The thread with one person on one surface — a web chat, a Telegram thread, a single phone call. It can contain several sessions. → [conversations](/observability/conversations)
+
+### Credits
+
+A prepaid USD balance, **one per region**, that the platform fee is debited from. Nothing else is charged against it. → [pricing and credits](/get-started/pricing-and-credits)
+
+### Draft
+
+The version of an agent or tool every write lands on. Drafts run nothing and reach nobody until you publish. → [versions](/agents/versions)
+
+### Endpointing
+
+Deciding that a caller has finished speaking, so the agent may answer. The window is tunable and is the main lever on how interruptible an agent feels. → [speech-to-text and turn detection](/agents/speech-to-text-and-turn-detection)
+
+### FAQ
+
+A named list of question-and-answer pairs you wrote, attached to an agent or task through `faqs`. The questions go in the prompt and the agent fetches the written answers with a generated `get_faq_answers` tool. Content is live, with no versions. → [FAQs](/agents/faqs)
+
+### Handoff
+
+Passing a conversation from one agent to another **on Talqing**, with the platform still running it. Each entry in `handoffs` becomes a tool the model can call. Not a transfer. → [handoffs](/teams/handoffs)
+
+### Integration
+
+A connection to an outside service: an MCP server whose tools an agent may call, or a channel such as Telegram that an agent answers on. → [integrations overview](/integrations/overview)
+
+### Item
+
+One entry in a conversation: a message from either side, a tool call, or a tool result. What a transcript is made of. → [conversations](/observability/conversations)
+
+### MCP
+
+Model Context Protocol. Two directions: an MCP **server you attach** so your agent can call its tools, and **Talqing's own MCP server**, which gives a coding agent one tool per API endpoint. → [MCP servers](/integrations/mcp-servers) and [our MCP server](/mcp/overview)
+
+### Operation
+
+One step in a tool's ordered tree — call an API, run TypeScript, branch, speak, hand off, transfer, end the call. Eleven kinds. Never called a step or a node. → [operation tree](/tools/operation-tree)
+
+### Personal access token
+
+Talqing's own credential for the API, sent as `Authorization: Bearer <token>`. It authenticates as its creator, carries their live role, and has **no prefix**. → [authentication](/get-started/authentication)
+
+### Platform fee
+
+The only money Talqing charges: $0.0035 per minute of voice, $0.01 per minute of video, $0.0001 per answered message on text. Waived on a failed call. → [pricing and credits](/get-started/pricing-and-credits)
+
+### Priority lane
+
+`llm.priority`, a premium lower-latency lane some models offer, billed at that provider's higher priority rates. → [priority lane](/agents/priority-lane)
+
+### Provider key
+
+*Your* OpenAI, Deepgram, ElevenLabs or Anam key, stored write-only in the workspace and used to run your agents. Not a Talqing credential. → [provider keys](/get-started/provider-keys)
+
+### Published
+
+The immutable snapshot live traffic runs. Publishing freezes the current draft as the next version and pins every attached tool to the version live at that moment. → [versions](/agents/versions)
+
+### Realtime
+
+One speech-to-speech model in place of the cascade's three stages. Lower latency, less control: scripted lines become instructions the model may reword. → [realtime](/agents/realtime)
+
+### Region
+
+Where a workspace's resources physically live, chosen purely by base URL — `https://api.in.talqing.com` or `https://api.us.talqing.com`. No field in the API carries one. → [regions](/get-started/regions)
+
+### Secret
+
+A workspace credential stored write-only and read as `{{secrets.NAME}}` by tools and integrations. The model never sees the value. → [secrets](/platform/secrets)
+
+### Session
+
+One agent's participation in a conversation — one phone call, or one chat. Usage, cost, latency and the close reason are per session. → [conversations](/observability/conversations)
+
+### System variable
+
+`{{system_vars.…}}`: six read-only keys the platform supplies — `human_phone_number`, `agent_phone_number`, `direction`, `now`, `date` and `time`. A closed set. → [variables](/agents/variables)
+
+### Tool
+
+One capability the model can call mid-conversation: a name, a description, a `json_schema` of arguments, and an ordered tree of operations. Published separately from the agent. → [tools overview](/tools/overview)
+
+### Transfer
+
+Handing a phone call to a **human being** on a real number, after which Talqing steps out. The destination is a literal number fixed at publish. Not a handoff. → [transfer](/tools/transfer)
+
+### Trigger
+
+A binding from an inbound event on an integration — a Telegram message, say — to the text agent that should answer it. → [triggers](/integrations/triggers)
+
+### Userdata
+
+`{{userdata.field}}`: what you know about the **person**. Seeded when a session starts, writable by any tool, and merged onto the contact record so it is there next time. Visible to the model. → [userdata](/agents/userdata)
+
+### Variable (`vars`)
+
+`{{vars.name}}`: configuration of the **session**, declared on the agent with a description and a default, supplied by the request that starts the session. Nothing inside the session can write it. Visible to the model — never put a credential here. → [variables](/agents/variables)
+
+### Workspace
+
+The boundary everything belongs to: agents, tools, keys, numbers, calls and the people who can see them. Members hold `ADMIN`, `EDITOR` or `VIEWER`. Called an organization in the dashboard. → [workspaces and roles](/get-started/workspaces-and-roles)

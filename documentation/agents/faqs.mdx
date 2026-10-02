@@ -1,0 +1,332 @@
+---
+title: "FAQs"
+description: "Give an agent a list of written question-and-answer pairs it answers from word for word, and edit them without republishing."
+---
+
+An FAQ is a named list of question-and-answer pairs your business wrote. Attach one to an agent or an [agent task](/tasks/overview) and its questions go into the prompt, while the answers are fetched only when one is asked — so what the agent says is your text, not the model's recollection of it.
+
+Use one for stable facts people ask often and that you want answered exactly: opening hours, refund policy, delivery areas, pricing.
+
+| The content is | Put it in |
+| --- | --- |
+| A fact asked often, with one approved answer | An FAQ |
+| Behaviour, tone, what to do next | The [prompt](/agents/prompting) |
+| Different per caller, or needs a live lookup | A [tool](/tools/overview) |
+
+An FAQ holds answers you typed. There is no document upload, no site crawl and no retrieval over files.
+
+## Create an FAQ
+
+In the dashboard, open **Build → FAQs** and choose **New FAQ**. Give it a name, then **Add question** for each pair. FAQs are regional, like everything else a workspace owns.
+
+Over the API, `POST /v1/faqs` takes a `name` and, optionally, the first `entries`:
+
+<CodeGroup>
+```bash cURL
+curl -sS -X POST https://api.in.talqing.com/v1/faqs \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Store FAQ",
+    "entries": [
+      { "question": "What are your opening hours?", "answer": "We are open nine to six, Monday to Saturday." },
+      { "question": "Do you deliver on Sundays?", "answer": "No. Orders placed on Saturday go out on Monday." }
+    ]
+  }'
+```
+
+```typescript TypeScript
+const faq = await talqing.faqs.create({
+  faqDefinition: {
+    name: "Store FAQ",
+    entries: [
+      { question: "What are your opening hours?", answer: "We are open nine to six, Monday to Saturday." },
+      { question: "Do you deliver on Sundays?", answer: "No. Orders placed on Saturday go out on Monday." },
+    ],
+  },
+});
+```
+
+```python Python
+faq = talqing.faqs.create(
+    name="Store FAQ",
+    entries=[
+        {"question": "What are your opening hours?", "answer": "We are open nine to six, Monday to Saturday."},
+        {"question": "Do you deliver on Sundays?", "answer": "No. Orders placed on Saturday go out on Monday."},
+    ],
+)
+```
+</CodeGroup>
+
+The response is the FAQ with every entry, each carrying its own `id`:
+
+```json
+{
+  "id": "7d1c9e52-3b4a-4f86-a0d7-5e8c2b6f9a13",
+  "name": "Store FAQ",
+  "entry_count": 2,
+  "created_by": "b2f4a6c8-1e3d-4a5b-9c7e-0f2a4c6e8b1d",
+  "created_at": "2026-10-02T09:14:07.120Z",
+  "updated_at": "2026-10-02T09:14:07.120Z",
+  "entries": [
+    {
+      "id": "c41e7a90-6d2b-4b35-8f1a-9e0d3c5b7a24",
+      "question": "What are your opening hours?",
+      "answer": "We are open nine to six, Monday to Saturday.",
+      "created_at": "2026-10-02T09:14:07.120Z",
+      "updated_at": "2026-10-02T09:14:07.120Z"
+    },
+    {
+      "id": "e58f2b01-7c3d-4c46-9a2b-0f1e4d6c8b35",
+      "question": "Do you deliver on Sundays?",
+      "answer": "No. Orders placed on Saturday go out on Monday.",
+      "created_at": "2026-10-02T09:14:07.120Z",
+      "updated_at": "2026-10-02T09:14:07.120Z"
+    }
+  ]
+}
+```
+
+With the [MCP server](/mcp/overview), the same thing is a prompt — see the [recipe](/mcp/recipes#create-an-faq-and-attach-it).
+
+### Writing entries the agent can use
+
+- **Phrase each question the way a caller would ask it**: "Do you deliver on Sundays?", not "Sunday delivery policy". The model matches what was asked against the question text, so paraphrases need no entries of their own.
+- **Keep answers short and speakable on a voice agent**: one or two sentences, no lists, links or markdown. The agent says it aloud.
+- **Do not also paste the answers into the prompt.** That puts back the cost and the paraphrasing the FAQ exists to remove.
+
+### Editing entries
+
+Entries are written one at a time or appended in bulk, never replaced as a list, so fixing one answer does not resend the rest.
+
+<CodeGroup>
+```bash cURL
+FAQ_ID=7d1c9e52-3b4a-4f86-a0d7-5e8c2b6f9a13
+ENTRY_ID=c41e7a90-6d2b-4b35-8f1a-9e0d3c5b7a24
+
+# Append entries
+curl -sS -X POST "https://api.in.talqing.com/v1/faqs/$FAQ_ID/entries" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"entries": [{"question": "Is there parking?", "answer": "Yes, free parking behind the store."}]}'
+
+# Change one answer
+curl -sS -X PATCH "https://api.in.talqing.com/v1/faqs/$FAQ_ID/entries/$ENTRY_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"answer": "We are open nine to seven, Monday to Saturday."}'
+```
+
+```typescript TypeScript
+const faq_id = "7d1c9e52-3b4a-4f86-a0d7-5e8c2b6f9a13";
+const entry_id = "c41e7a90-6d2b-4b35-8f1a-9e0d3c5b7a24";
+
+await talqing.faqs.entries.create({
+  faq_id,
+  createFaqEntriesRequest: {
+    entries: [{ question: "Is there parking?", answer: "Yes, free parking behind the store." }],
+  },
+});
+
+await talqing.faqs.entries.update({
+  faq_id,
+  entry_id,
+  updateFaqEntryRequest: { answer: "We are open nine to seven, Monday to Saturday." },
+});
+```
+
+```python Python
+faq_id = "7d1c9e52-3b4a-4f86-a0d7-5e8c2b6f9a13"
+entry_id = "c41e7a90-6d2b-4b35-8f1a-9e0d3c5b7a24"
+
+talqing.faqs.entries.create(
+    faq_id,
+    entries=[{"question": "Is there parking?", "answer": "Yes, free parking behind the store."}],
+)
+
+talqing.faqs.entries.update(
+    faq_id,
+    entry_id,
+    answer="We are open nine to seven, Monday to Saturday.",
+)
+```
+</CodeGroup>
+
+`POST /v1/faqs/{faq_id}/entries` is **all or nothing**: one entry that cannot be added refuses the whole request, and nothing is written.
+
+### Import a CSV
+
+On an FAQ's page in the dashboard, **Import CSV** takes a file whose header row is exactly `question,answer` and appends its rows to the FAQ. The file is read in your browser and sent as one append, so the same rules apply: a file with a question the FAQ already has, or with more than 500 rows, adds nothing and the dialog says why.
+
+CSV import is dashboard-only. The API has no import route — read the file yourself and send the rows to `POST /v1/faqs/{faq_id}/entries`, up to 500 per request.
+
+## Attach it to an agent
+
+`faqs` on an agent's or a task's config lists what it answers from, each entry naming a stored FAQ by id:
+
+```json
+{ "config": { "faqs": [{ "faq_id": "7d1c9e52-3b4a-4f86-a0d7-5e8c2b6f9a13" }] } }
+```
+
+<CodeGroup>
+```bash cURL
+AGENT_ID=0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30
+
+curl -sS -X PATCH "https://api.in.talqing.com/v1/agents/$AGENT_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"config": {"faqs": [{"faq_id": "7d1c9e52-3b4a-4f86-a0d7-5e8c2b6f9a13"}]}}'
+
+curl -sS -X POST "https://api.in.talqing.com/v1/agents/$AGENT_ID/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const agent_id = "0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30";
+
+await talqing.agents.update({
+  agent_id,
+  updateAgentRequest: {
+    config: { faqs: [{ faq_id: "7d1c9e52-3b4a-4f86-a0d7-5e8c2b6f9a13" }] },
+  },
+});
+await talqing.agents.publish({ agent_id });
+```
+
+```python Python
+agent_id = "0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30"
+
+talqing.agents.update(
+    agent_id,
+    config={"faqs": [{"faq_id": "7d1c9e52-3b4a-4f86-a0d7-5e8c2b6f9a13"}]},
+)
+talqing.agents.publish(agent_id)
+```
+</CodeGroup>
+
+`faqs` is a list, and a `PATCH` replaces a list whole: send every FAQ the agent should keep. Attaching or detaching is a config change, so it reaches callers only after a publish.
+
+In the dashboard, the agent editor and the task editor each have an **FAQs** section where you tick the FAQs to attach.
+
+### Defining one inline
+
+An entry may carry a whole FAQ in place of an id. It needs at least one entry, and one `faqs` item carries either `faq_id` or `faq`, never both.
+
+```json
+{
+  "faqs": [
+    {
+      "faq": {
+        "name": "Store FAQ",
+        "entries": [
+          { "question": "What are your opening hours?", "answer": "We are open nine to six, Monday to Saturday." }
+        ]
+      }
+    }
+  ]
+}
+```
+
+What happens to it depends on where you send it:
+
+| Sent on | What happens |
+| --- | --- |
+| Creating or updating an agent or a task | The FAQ is **created as a stored FAQ** in the same request, and the saved config carries `{"faq_id": "…"}` in its place. A name already taken is a `409`: `an FAQ named 'Store FAQ' already exists — reference it as {"faq_id": "…"}, or rename this one`. |
+| A call request — an inline `agent`, an `agent_override`, an `agent_team`, a call batch, a chat | The FAQ is used **for that call only** and never stored. See [per-call configuration](/agents/per-call-configuration). |
+
+<Note>
+A call batch stores its plan on every call it places, so an inline FAQ on a batch is stored once per recipient. Attach it by `faq_id` there.
+</Note>
+
+## How the agent uses it
+
+At the start of a session, the questions of every attached FAQ are appended to the system prompt under a `## FAQ` heading, each with a short id — `q1`, `q2`, and so on across all attached FAQs. The agent also gets one generated tool, `get_faq_answers`, which takes `{"ids": ["q3"]}` and returns the written answers for those ids.
+
+When the caller asks one of the questions, or the same thing in other words, the model calls the tool and answers from what comes back. A few consequences worth knowing:
+
+- **A long FAQ costs its questions on every turn, not its answers.** Only the answers that are asked for reach the model.
+- **On voice and video, the agent says it is checking** in the same turn as the tool call, so the caller does not hear silence. On text, and on a task run on its own, it does not — there is no silence to cover.
+- **FAQ text is never templated.** A `{{userdata.name}}` written into an answer is read out as written. Per-caller content belongs in the prompt or a tool.
+- **The agent is not told to refuse what the FAQ lacks.** A question that matches nothing is answered from the prompt and tools as usual. If you want a refusal, write it in the prompt.
+- `get_faq_answers` is a [reserved tool name](/tools/schema-and-description#name). The call and its output appear in the transcript like any other tool call.
+
+## Edits are live
+
+An FAQ has no draft and no versions. Adding, changing or deleting an entry reaches every agent and task that attaches the FAQ **from its next session**, with no publish. A session already running keeps the answers it loaded when it started.
+
+Publishing an agent freezes *which* FAQs are attached, not what they say. That differs from a tool, whose version is pinned at publish — see [versions](/agents/versions#publishing-an-agent-pins-its-tools).
+
+<Warning>
+Because edits skip the publish step, a wrong answer saved to an FAQ is what the next caller hears. Reads are open to every member; creating, editing and deleting need the editor role.
+</Warning>
+
+## Deleting
+
+`DELETE /v1/faqs/{faq_id}` removes the FAQ and its entries. It is refused with a `409` while any agent's or task's draft or current published version attaches it, and the message names them:
+
+```json
+{
+  "detail": {
+    "message": "this FAQ is attached to agent 'Northwind support' — detach it there before deleting it",
+    "errors": []
+  }
+}
+```
+
+Detach it from each one — and publish, where the published version attaches it — then delete. Older versions in an agent's history do not block a delete, so a version you published long ago may name an FAQ that no longer exists.
+
+## Limits and errors
+
+| Limit | Value |
+| --- | --- |
+| FAQ `name` | 1–80 characters, unique in the workspace (case-insensitive) |
+| `question` | 1–300 characters |
+| `answer` | 1–2,000 characters |
+| Entries per FAQ | 500 |
+| Entries per append request | 1–500 |
+| FAQs attached to one agent or task | 10 |
+| The same question twice in one FAQ | Refused. Compared case-insensitively, ignoring surrounding spaces |
+
+Names, questions and answers are trimmed of surrounding whitespace before they are measured and stored.
+
+| Cause | Status | Message |
+| --- | --- | --- |
+| A name another FAQ already has, on create or rename | `409` | `an FAQ named 'Store FAQ' already exists` |
+| A question repeated inside one request | `422` | A line ending `duplicate question: 'Is there parking?'` |
+| A question the FAQ already has | `422` | `this FAQ already has the question 'Is there parking?'` |
+| An append that would pass 500 entries | `422` | `an FAQ holds at most 500 questions - this one has 498, and this would add 5` |
+| An `faq_id` that does not exist, on any agent or task write | `400` | `FAQ 7d1c9e52-… not found` |
+| The same FAQ attached twice | `400` | `FAQ 'Store FAQ' is attached twice` |
+| An attached FAQ with no entries, at validate and publish | warning | `FAQ 'Store FAQ' has no questions yet` |
+| Deleting an FAQ still attached | `409` | `this FAQ is attached to … — detach it there before deleting it` |
+
+Every refusal uses the one [error envelope](/api-reference/errors).
+
+## Endpoint reference
+
+| Endpoint | What it does |
+| --- | --- |
+| [`GET /v1/faqs`](/api-reference/faqs/list-faqs) | List FAQs by name, each with its `entry_count` |
+| [`POST /v1/faqs`](/api-reference/faqs/create-faq) | Create an FAQ, optionally with its first entries |
+| [`GET /v1/faqs/{faq_id}`](/api-reference/faqs/get-faq) | One FAQ with every entry, in the order they were added |
+| [`PATCH /v1/faqs/{faq_id}`](/api-reference/faqs/update-faq) | Rename it. Entries are edited through the routes below |
+| [`DELETE /v1/faqs/{faq_id}`](/api-reference/faqs/delete-faq) | Delete it and its entries |
+| [`POST /v1/faqs/{faq_id}/entries`](/api-reference/faqs/create-faq-entries) | Append 1–500 entries, all or nothing |
+| [`PATCH /v1/faqs/{faq_id}/entries/{entry_id}`](/api-reference/faqs/update-faq-entry) | Change one entry's `question`, `answer` or both |
+| [`DELETE /v1/faqs/{faq_id}/entries/{entry_id}`](/api-reference/faqs/delete-faq-entry) | Delete one entry |
+
+In the SDKs these are `faqs.list`, `faqs.create`, `faqs.get`, `faqs.update`, `faqs.delete`, and `faqs.entries.create`, `faqs.entries.update`, `faqs.entries.delete`.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Prompting" href="/agents/prompting">
+    What belongs in the prompt once the facts have moved out of it.
+  </Card>
+  <Card title="Versions" href="/agents/versions">
+    What a publish freezes, and what stays live.
+  </Card>
+  <Card title="Tools" href="/tools/overview">
+    For answers that depend on who is asking.
+  </Card>
+</CardGroup>

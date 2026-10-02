@@ -1,0 +1,283 @@
+---
+title: "Userdata"
+description: "Session state about the person: seeding it, reading it, tools writing it, and how it reaches their next conversation."
+---
+
+`userdata` is what the agent knows about the person it is talking to. You seed it
+on the request that starts the session, the agent reads it as `{{userdata.field}}`,
+tools write to it mid-call, and it is merged onto that person's contact record when
+the session ends — so their next conversation can start from it.
+
+It is one bag per session, shared by every agent on that session. If you want
+per-session *configuration* rather than facts about a person, that is
+[`vars`](/agents/variables).
+
+## Seeding it
+
+| Surface | Where `userdata` goes |
+| --- | --- |
+| `POST /v1/calls/token` | Web voice or video call |
+| `POST /v1/calls/outbound` | One outbound phone call |
+| `POST /v1/calls/batches` | Per recipient, in `recipients[].userdata` |
+| `POST /v1/chats` | A chat |
+
+On the call token, the outbound call and the chat, `userdata` is a JSON
+object and values may be any JSON type. On a batch recipient, values are strings.
+
+An **inbound phone call carries no request of yours**, so nothing seeds it there.
+What an inbound agent starts with is whatever it already learned about that caller
+— see [conversation memory](/agents/conversation-memory).
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/calls/outbound \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+    "from_phone_number_id": "0b9d5b32-5f2f-4a35-b2b8-3d6c9f0e1a44",
+    "to": "+919876543210",
+    "userdata": {
+      "name": "Priya",
+      "tier": "gold",
+      "account_id": "ACC-10482",
+      "last_invoice": "INV-2291"
+    }
+  }'
+```
+
+```typescript TypeScript
+const call = await talqing.calls.outbound({
+  outboundCallRequest: {
+    agent_id: "6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+    from_phone_number_id: "0b9d5b32-5f2f-4a35-b2b8-3d6c9f0e1a44",
+    to: "+919876543210",
+    userdata: {
+      name: "Priya",
+      tier: "gold",
+      account_id: "ACC-10482",
+      last_invoice: "INV-2291",
+    },
+  },
+});
+```
+
+```python Python
+call = talqing.calls.outbound(
+    agent_id="6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+    from_phone_number_id="0b9d5b32-5f2f-4a35-b2b8-3d6c9f0e1a44",
+    to="+919876543210",
+    userdata={
+        "name": "Priya",
+        "tier": "gold",
+        "account_id": "ACC-10482",
+        "last_invoice": "INV-2291",
+    },
+)
+```
+</CodeGroup>
+
+<Warning>
+Keys beginning with `_talqing` are reserved for the runtime's own session
+bookkeeping and are refused with a 400. They are also stripped from everything the
+platform stores or hands back, so you will never see one.
+</Warning>
+
+## Reading it
+
+`{{userdata.field}}` is substituted in the prompt, the greeting and every tool
+operation. A field that is not in the bag resolves to nothing — so write the prompt
+so it still reads when one is absent:
+
+```text
+You are speaking with {{userdata.name}}, a {{userdata.tier}} customer.
+Their most recent invoice is {{userdata.last_invoice}}.
+Do not mention any field that comes through blank.
+```
+
+The prompt and greeting resolve **once**, when the agent is built — before it
+answers, or the moment a handoff target takes over. A tool resolves per run, so a
+tool always sees the current bag including whatever an earlier tool on the same
+call wrote.
+
+<Warning>
+A greeting is spoken exactly as it resolves. Runs of leftover whitespace are
+collapsed, but punctuation is not fixed up.
+`"Hi {{userdata.name}}, thanks for calling"` becomes `"Hi , thanks for calling"`
+when there is no name. Only put a field in the greeting when the request that starts
+the session always supplies it. A prompt is safer: you can tell the model to work
+around a blank.
+</Warning>
+
+Reading a `userdata` key that no operation in the same tool publishes first is a
+**warning** at publish, not an error, because the session may well already hold it:
+
+```text
+tool 'book_appointment' / operations[0] / http: reads userdata.account_id before
+this tool publishes it; ensure session userdata contains 'account_id' before this
+tool is called
+```
+
+## Tools writing it
+
+Two operations write into `userdata`, both taking `store: "userdata"`:
+
+- `publish_fields` on an operation that returns something — pull a value out of the
+  response and keep it.
+- The `set_variable` operation — write a value you supply.
+
+```json
+{
+  "kind": "http",
+  "config": {
+    "method": "GET",
+    "url": "https://crm.example.com/customers/{{args.account_id}}",
+    "headers": { "Authorization": "Bearer {{secrets.CRM_TOKEN}}" }
+  },
+  "publish_fields": [
+    { "path": "customer.name", "key": "name", "store": "userdata" },
+    { "path": "customer.plan", "key": "tier", "store": "userdata" }
+  ]
+}
+```
+
+`store: "tooldata"` is the other choice and it is not the same thing: `tooldata`
+lives for one tool run and is gone afterwards. The full rules are on
+[templating and data](/tools/templating-and-data).
+
+On a web voice or video call, your own page can also read and patch `userdata`
+mid-call over the browser SDK — see [web call features](/channels/web-call-features).
+
+## One bag, every agent
+
+Everything on the session shares one `userdata`: the entry agent, every team
+member, and any handoff target. A field written by a tool on the first agent is
+readable by the third. This is true regardless of a handoff's `context` policy —
+`summary` narrows what the target model is shown of the conversation, and does
+nothing to `userdata`.
+
+## What happens when the session ends
+
+Two writes, in one transaction:
+
+- The call's final `userdata` is stored on the call itself. `GET /v1/calls/{id}`
+  returns it as `userdata` — what *this* call ended holding.
+- The same bag replaces the **contact record**: what the platform knows about this
+  person across all their conversations. `GET /v1/calls/{id}` returns that as
+  `contact_userdata`.
+
+The contact record is written on every call, whatever the agent's
+`conversation.context` is. Reading it back at the start of a call is a choice
+(`conversation.initialize_userdata`); keeping it current is not.
+
+<Warning>
+The contact record is **replaced**, not merged: the bag the call ended with is what
+the contact record then holds afterwards.
+
+That is invisible while the call also started from it — the default
+`conversation.context: "none"` does not load it, so on that setting each call
+overwrites the contact record with only what that call held. If you rely on a
+person's record accumulating across calls, set `conversation.context` to `summary`
+or `transcript` and leave `initialize_userdata` on, so every call starts from the
+record it is about to replace.
+</Warning>
+
+When a call does read it back, the request's own `userdata` is layered on top: what
+you send wins over what was remembered.
+
+## contact_key
+
+`contact_key` is your stable id for the person, and it is what makes a contact
+record a *person's* record rather than a call's.
+
+| Surface | The key |
+| --- | --- |
+| Web call | `contact_key` on `POST /v1/calls/token`. Omit it and Talqing mints a single-use one, so the call has no history to continue. |
+| Chat | `contact_key` on `POST /v1/chats`. Omit it and Talqing mints a single-use one, as on a web call. |
+| Phone call | Built by Talqing from the two numbers: `sip:<your DID>:<their number>`. |
+
+The same key always reaches the same identity, so `userdata` written on one call is
+there on the next. `GET /v1/calls?contact_key=...` filters a customer's whole
+history. See [conversations](/observability/conversations).
+
+## A worked example: one agent, personalized per call
+
+One published agent. Nothing about it changes per call; only the bag does.
+
+The prompt:
+
+```text
+You are the support line for Acme. You are speaking with {{userdata.name}}, on the
+{{userdata.tier}} plan, account {{userdata.account_id}}.
+
+If the caller asks about a recent order, call look_up_order. Do not ask for the
+account id - you already have it.
+```
+
+The greeting:
+
+```text
+Hi {{userdata.name}}, thanks for calling Acme. What can I do for you?
+```
+
+Placing the call:
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/calls/outbound \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+    "from_phone_number_id": "0b9d5b32-5f2f-4a35-b2b8-3d6c9f0e1a44",
+    "to": "+919876543210",
+    "userdata": { "name": "Priya", "tier": "gold", "account_id": "ACC-10482" }
+  }'
+```
+
+```typescript TypeScript
+await talqing.calls.outbound({
+  outboundCallRequest: {
+    agent_id: "6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+    from_phone_number_id: "0b9d5b32-5f2f-4a35-b2b8-3d6c9f0e1a44",
+    to: "+919876543210",
+    userdata: { name: "Priya", tier: "gold", account_id: "ACC-10482" },
+  },
+});
+```
+
+```python Python
+talqing.calls.outbound(
+    agent_id="6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+    from_phone_number_id="0b9d5b32-5f2f-4a35-b2b8-3d6c9f0e1a44",
+    to="+919876543210",
+    userdata={"name": "Priya", "tier": "gold", "account_id": "ACC-10482"},
+)
+```
+</CodeGroup>
+
+During the call, `look_up_order` publishes `last_order_id` and `last_order_status`
+into `userdata`. When the call ends, all five fields are on Priya's contact record.
+An agent whose `conversation.context` is `summary` or `transcript`, with
+`initialize_userdata` left on, starts her next call already knowing them, without
+you sending anything.
+
+## Where to see it
+
+The call detail view shows the final `userdata` for the call and the contact record
+beside it — see [calls](/observability/calls). `GET /v1/calls/{session_id}` returns
+both: `userdata` for this call, `contact_userdata` for the person.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Conversation memory" href="/agents/conversation-memory">
+    What a new call knows about earlier ones, and `initialize_userdata`.
+  </Card>
+  <Card title="Variables" href="/agents/variables">
+    `vars`, `system_vars`, and every templating rule.
+  </Card>
+  <Card title="Templating and data" href="/tools/templating-and-data">
+    `publish_fields`, `set_variable`, and `tooldata` versus `userdata`.
+  </Card>
+</CardGroup>

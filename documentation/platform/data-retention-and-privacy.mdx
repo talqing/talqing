@@ -1,0 +1,134 @@
+---
+title: "Data retention and privacy"
+description: "How long call content is kept, exactly what a purge deletes, what survives it, and what BYOK means for who processes your data."
+---
+
+Talqing keeps everything forever by default. One workspace setting changes that, and when the deadline passes the *content* of a call is deleted while the *record* of it stays — because an invoice has to keep resolving.
+
+## The retention policy
+
+`retention_days` is a single setting on the workspace: **Settings → General** in the dashboard, or `PATCH /v1/org`.
+
+| | |
+| --- | --- |
+| Values | `1`–`3650` days, or `null` |
+| Default | **`null` — keep everything forever** |
+| Who can change it | **ADMIN only** |
+| Who can read it | Every member |
+| Scope | The whole workspace. There is no per-agent or per-number setting |
+
+Saying that plainly: **unless you set a policy, nothing is ever deleted automatically.** No recording ages out, no transcript expires, and no bucket lifecycle rule quietly removes an object behind the database's back. A recording is gone only because something deleted it and stamped the record.
+
+Setting a policy is the deliberate act. See [workspaces and roles](/get-started/workspaces-and-roles) for who can perform it.
+
+## What a purge deletes
+
+When a call's deadline arrives, its content is deleted. This is not an audio feature — a transcript is personal data in exactly the way the audio is, and sharper: it is indexed, machine-readable, and the copy that travels into analysis, webhooks and your language-model provider. So a purge takes all of it.
+
+**Deleted:**
+
+- The transcript — every message, in both directions.
+- Every tool call the agent made and everything those tools returned.
+- The session's `userdata`, its summary, its outcome rationale and its extracted [analysis](/observability/call-analysis) fields.
+- The recording, and the screen recording if the agent watched a screen. Both are content in the same sense, and a screen video surviving a purge would be the most indefensible thing here to get wrong.
+- Every image anyone attached to the conversation.
+- The whole event trace, **except one record**: if a caller withdrew consent to being recorded, that one event survives, carrying a single timestamp and nothing derived from the conversation. It is the evidence the content was handled correctly, which is precisely what someone asks for *after* the content is gone.
+- **The phone numbers on the call** — the caller's, the agent's, and any number the call was transferred to.
+
+**Survives:**
+
+- The call record itself: its duration, status, outcome, close reason and every cost column.
+- The usage records behind those costs — counts of tokens, characters and seconds, holding no content.
+- A `content_deleted_at` stamp, so the call reads as erased rather than as empty.
+
+The line is **what an invoice needs, not what a debugger would like**. Everything a bill is built from stays; everything else goes.
+
+## The deadline is fixed when the call ends
+
+Each call's purge is scheduled once, at the moment it ends, from the policy as it stood **then**. A [chat](/channels/text-conversations) is the same: its deadline is counted from when the chat **ends**, and an open chat is never purged.
+
+That has two consequences worth planning around:
+
+- **Changing the policy never moves a deadline that already exists.** Shortening it to 30 days does not retroactively destroy the calls you already have; lengthening it does not rescue calls already scheduled to go.
+- **A new policy applies to calls from that point on.** If you need old calls gone sooner, delete them yourself.
+
+A workspace with no policy schedules nothing at all, which is why the default costs nothing.
+
+## Deleting a call yourself
+
+`DELETE /v1/calls/{session_id}` runs exactly the same purge, immediately.
+
+```bash
+curl -X DELETE https://api.in.talqing.com/v1/calls/$SESSION_ID \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+It answers `202`: the erase is scheduled rather than done inline, which is what stops a request covering two hundred thousand calls arriving as two hundred thousand synchronous deletes. It normally completes within seconds. Editors and admins can do it.
+
+A call still in progress is refused with `409` — it is still writing, and finalizing would put the content back on a row already marked erased. Ask again once it has ended.
+
+<Warning>
+**This cannot be undone**, and it takes the transcript with the audio. To delete only the audio and keep the transcript, use `DELETE /v1/calls/{session_id}/recording` instead — that one is immediate and narrow. See [recordings](/observability/recordings).
+</Warning>
+
+### Erasing a person
+
+A conversation is deleted once every call in it has been purged, and the contact record goes with it once they have no conversations left.
+
+That is usually what you want when someone asks to be erased, and it has a side effect to know about: **the contact's accumulated `userdata` is the agent's cross-call memory.** Purge a person's last conversation and the next call from that number meets an agent that has never heard of them — no name, no history, no preferences. Correct, and worth saying out loud before someone discovers it in a support ticket. See [conversation memory](/agents/conversation-memory).
+
+## Recording defaults and consent
+
+**Every voice and video agent records by default** — one stereo file per call, the caller on one channel and the agent on the other. `recording.enabled` on the agent turns it off. There is no per-call switch and no per-number setting: recording is a property of the agent that answers, and on a call with [handoffs](/teams/handoffs) it follows whichever agent is currently speaking.
+
+Whether callers are *told* is a separate setting, `recording.consent`, and it is `off` by default. Set it to `disclosure` and three things change: the agent's greeting must literally contain `{{consent.notice}}` — validated at publish — the agent gains a tool that stops the recording if the caller objects, and a [realtime](/agents/realtime) agent is refused the setting outright, because a speech-to-speech model may reword a scripted line and a disclosure has to be said word for word. The default notice is *"This call is recorded for quality and training purposes."*, and you can replace it.
+
+**A [task](/agents/agent-tasks) an agent enters mid-call is part of that call.** It never touches the recorder — it cannot pause it, and it cannot start one — so everything said while the task holds the floor is on the same file, and its turns are in `conversation_items` whether or not the call is recorded. That is fine for identity lookups, eligibility checks, address collection and booking flows. It means you should not build card capture on a task.
+
+Recording law differs by jurisdiction and by who is on the call, and Talqing does not decide it for you. The default is on; whether that is lawful where your callers are is yours to determine. Full detail is in [call recording](/telephony/recording).
+
+## Where your data lives
+
+Everything a workspace owns is regional. A call placed against `https://api.in.talqing.com` belongs to India; one placed against `https://api.us.talqing.com` belongs to the United States. Nothing is copied or replicated between regions, and no view in the product merges them.
+
+Databases hold the transcript, the analysis, the contact record and every other row, and they sit in the region itself — Bangalore for `in`, San Francisco for `us`. **Object storage is where the two regions differ, and it is worth knowing which:**
+
+| Region | Database and workers | Recordings and image attachments |
+| --- | --- | --- |
+| `us` | San Francisco | San Francisco |
+| `in` | Bangalore | **Singapore** |
+
+Our object storage provider does not currently offer buckets in Bangalore, so `in` uses the nearest datacenter it does offer. The consequence is stated rather than buried: **recordings and image attachments belonging to Indian workspaces are stored outside India.** Everything else about those calls stays in the country. If that is a constraint you cannot accept, say so before you build on it.
+
+One model provider extends that to *inference*. An agent on an [OpenRouter](/agents/models#openrouter) model reaches a gateway that forwards each request to one of many independent hosts, in whichever country that host runs in — and Talqing does not choose the country. If your workspace needs inference to stay in a particular jurisdiction, name a model from a provider you hold the account with directly.
+
+Your identity, your workspace membership and your payments are not regional at all — they live in the control plane in Frankfurt. See [regions](/get-started/regions).
+
+## What BYOK means for processing
+
+Talqing holds **no provider credentials of its own**. Your agent's language model, speech-to-text, text-to-speech and avatar all run on **your** accounts, on **your** keys.
+
+The practical privacy consequence: the conversation content those providers see is being processed under **your own agreement with them** — your terms, your data-processing arrangements, your data-retention and training settings in their console. If you have turned off training on your OpenAI account, that setting is the one in force. Talqing has no separate relationship with those providers on your behalf and no ability to override what you have configured with them.
+
+**A gateway is one step removed from that, and the difference is worth stating.** With [OpenRouter](/agents/models#openrouter), your agreement is with OpenRouter, and the call is processed by whichever independent host it routes each request to — chosen per request, so two consecutive turns of one call can land at two different companies. Your OpenRouter account settings govern what that gateway does. For **language models**, Talqing adds exactly one thing on top: **every request carries the strictest data policy OpenRouter offers**, refusing any host that may store prompts or train on them. That is the one place we set something on your behalf, and it can only tighten what you have configured, never loosen it. A handful of models in the long tail have no host that meets it; those calls fail with a message saying so rather than running somewhere the policy forbids.
+
+**For speech-to-text we cannot do the same.** OpenRouter's transcription endpoint ignores routing preferences entirely — we measured it accepting values its chat endpoint rejects, and serving a request from the very host it had been told to avoid. So caller audio sent to an [OpenRouter speech model](/agents/models#openrouter-speech-to-text) goes to whichever host OpenRouter picks, under your account's settings alone. If callers' audio must not reach a host that may store or train on it, turn off training in your [OpenRouter privacy settings](https://openrouter.ai/settings/privacy), which makes OpenRouter skip those hosts — or use a speech-to-text provider you hold the account with directly. The editor says this where the model is picked.
+
+What passes through Talqing is what the platform itself needs: the audio and text of the call while it is running, and whatever is stored afterwards under the policy above.
+
+Talqing does use its own model keys for two things, neither of which is an agent run: the CoPilots in the editors, and the voice and avatar galleries before you have stored a key for that provider. See [provider keys](/get-started/provider-keys).
+
+## What we do not claim
+
+We do not hold a compliance certification, and this page will not imply one. Talqing has no published certification, audit report or compliance programme, and nothing here should be read as a legal assurance about any particular regime. What is documented above is what the software does — the settings, what a purge deletes, what survives it, and where the data sits — so you can evaluate it against your own obligations.
+
+If you need something in writing for a procurement or legal review, email `hello@talqing.com` and ask.
+
+<CardGroup cols={2}>
+<Card title="Call recording" href="/telephony/recording">
+  Defaults, consent, stereo files, and deleting audio on its own.
+</Card>
+<Card title="Regions" href="/get-started/regions">
+  Where each region's data lives, and what never leaves it.
+</Card>
+</CardGroup>

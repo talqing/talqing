@@ -1,0 +1,583 @@
+---
+title: "Research and outreach"
+description: "An agent task that researches a company from its domain, feeding an email batch you review row by row before anything is sent."
+---
+
+You are going to build a two-part pipeline: an [agent task](/tasks/overview) that takes a company domain, searches the web, and returns a typed result — including a subject line and a body written about that specific company — and an [email batch](/email/overview) that runs the task once per row of a list, puts every draft in front of you as a spreadsheet, and sends only the rows you name. When it is finished, one CSV plus one press of a button produces drafts; a second, separate, deliberate press sends them.
+
+<Warning>
+**Resend's Acceptable Use Policy prohibits unsolicited email.** You are "prohibited from sending unsolicited messages of any kind, including cold outreach, purchased lists, or scraped contact data", and "all mail must be sent to recipients who have explicitly opted in to receive communications from you". This pipeline runs on **your** Resend account under **your** agreement with them, and the consequences of breaking it — a suspended account, a burned sending domain — land on you. Read [resend.com/legal/acceptable-use](https://resend.com/legal/acceptable-use) before you upload a list. A list of people who asked to hear from you is the only list this feature is for.
+
+And one of ours: **there is no spend cap on drafting.** Every row runs the task and is billed — your model tokens, plus whatever its tools and MCP servers charge per call — whether or not the draft is ever sent. A five-thousand-row batch costs five thousand task runs with zero emails sent. Nothing anywhere caps that.
+</Warning>
+
+## What you need
+
+| | Why |
+| --- | --- |
+| An LLM provider key | The task runs on your own key. See [provider keys](/get-started/provider-keys). |
+| A search or enrichment integration | Tavily or Exa for search; HubSpot or RocketReach for enrichment. See the [catalog](/integrations/catalog). |
+| A Resend account with a verified sending domain | Verification is domain-level and checked live. See [email setup](/email/setup). |
+| A list of people who opted in | With a column the task can research from — a domain, a company name, an address. |
+| The EDITOR role | Creating a task, running one, creating a batch and sending all need it. |
+
+## The build
+
+<Steps>
+
+<Step title="Connect the research integration and narrow it to what you need">
+
+Tavily and Exa take an API key and are connected over the API. HubSpot, RocketReach, Asana, Jira, Cal.com, Calendly and Google Calendar are OAuth-only and must be connected from the dashboard's **Integrations** page.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/integrations \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "tavily",
+    "display_name": "Tavily (research)",
+    "credentials_ref": "tvly-your-api-key"
+  }'
+```
+
+```typescript TypeScript
+const integration = await talqing.integrations.create({
+  createIntegrationRequest: {
+    provider: "tavily",
+    display_name: "Tavily (research)",
+    credentials_ref: "tvly-your-api-key",
+  },
+});
+```
+
+```python Python
+integration = talqing.integrations.create(
+    provider="tavily",
+    display_name="Tavily (research)",
+    credentials_ref="tvly-your-api-key",
+)
+```
+</CodeGroup>
+
+Then list what the server actually offers. This is a **live call to the provider**, so it also proves the connection works, and it returns each tool under both its own name and the `exposed_name` the model will see.
+
+<CodeGroup>
+```bash cURL
+curl -sS "https://api.in.talqing.com/v1/integrations/$INTEGRATION_ID/mcp-tools" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const listed = await talqing.integrations.mcpTools.list({ integration_id });
+for (const tool of listed.tools) console.log(tool.name, tool.exposed_name);
+```
+
+```python Python
+listed = talqing.integrations.mcp_tools.list(integration_id)
+for tool in listed["tools"]:
+    print(tool["name"], tool["exposed_name"])
+```
+</CodeGroup>
+
+Now narrow the approval to the two tools this task needs. `allowed_tools` is `null` on a new connection, which means every tool the server lists; a `PATCH` replaces the list wholesale, and it can never be empty.
+
+<CodeGroup>
+```bash cURL
+curl -sS -X PATCH "https://api.in.talqing.com/v1/integrations/$INTEGRATION_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"allowed_tools": ["tavily_search", "tavily_extract"]}'
+```
+
+```typescript TypeScript
+await talqing.integrations.update({
+  integration_id,
+  patchIntegrationRequest: { allowed_tools: ["tavily_search", "tavily_extract"] },
+});
+```
+
+```python Python
+talqing.integrations.update(
+    integration_id, allowed_tools=["tavily_search", "tavily_extract"]
+)
+```
+</CodeGroup>
+
+Approval matches the tool's **own** name; the namespace is applied afterwards. Narrowing is worth the trouble because every approved tool is described to the model on every round — a task picking from six tools is faster, cheaper and more accurate than the same task picking from ninety. See [MCP servers](/integrations/mcp-servers).
+
+</Step>
+
+<Step title="Write the task">
+
+A task is inputs, a prompt, a model, tools and a typed output. Here is the whole thing.
+
+```json
+{
+  "config": {
+    "name": "Research a company and draft an opener",
+    "prompt": "You research a company from its website and draft one short email to a person there.\n\nYou are given the company's domain as {{vars.domain}}, the recipient's first name as {{vars.first_name}}, and their role as {{vars.role}}. They downloaded our warehouse capacity planning guide, which is why we are writing to them.\n\nWork in this order:\n1. Search for the company behind the domain and read their own site. Prefer what they publish about themselves over a directory listing.\n2. Work out what they sell, who buys it, and anything specific and recent enough to be worth mentioning — a new location, a product launch, a hiring push.\n3. Write a subject line and a body of at most 120 words, addressed to {{vars.first_name}}, that names one specific thing you actually read about them and connects it to warehouse capacity planning. No flattery, no adjectives you cannot support, and no claim about their business that you did not read somewhere.\n\nIf you cannot find enough about them to say something specific and true, send null for the subject and the body. An empty draft that a person can see is worth far more than a generic one that gets sent.\n\nFinishing means calling the submit_result tool. A plain text answer is not a result.",
+    "llm": { "provider": "openai", "model": "gpt-5.6-luna", "reasoning_effort": "medium" },
+    "mcps": [{ "integration_id": "c41d8e37-25a9-4f60-b3d8-9e07a15c4b62" }],
+    "vars": [
+      { "name": "domain", "description": "The company's website domain, e.g. asha-textiles.com", "required": true },
+      { "name": "first_name", "description": "The recipient's first name", "required": true },
+      { "name": "role", "description": "The recipient's job title, as they gave it", "default": "" }
+    ],
+    "output": [
+      {
+        "name": "company_name",
+        "type": "string",
+        "description": "The company's trading name as it appears on their own site. Send null if the domain resolves to no company you can identify."
+      },
+      {
+        "name": "what_they_do",
+        "type": "string",
+        "description": "One sentence on what they sell and who buys it, in plain language, taken from their own site. Send null if you could not read enough to say."
+      },
+      {
+        "name": "specific_detail",
+        "type": "string",
+        "description": "The one recent, checkable thing you found that is worth mentioning — a new warehouse, a product launch, a hiring push — in one sentence, with no adjectives. Send null if you found nothing specific enough to be worth saying, which is common and is not a failure."
+      },
+      {
+        "name": "subject_line",
+        "type": "string",
+        "description": "A subject line under 60 characters that names the company and reads like a person wrote it. No exclamation marks, no words in capitals. Send null if specific_detail is null, because a generic subject line should not be sent."
+      },
+      {
+        "name": "email_body",
+        "type": "string",
+        "description": "The email body, at most 120 words, addressed to the recipient by first name, naming the specific detail and connecting it to warehouse capacity planning. Plain text with line breaks, no signature and no subject line. Send null if you could not write something specific and true."
+      }
+    ],
+    "max_steps": 12,
+    "timeout_seconds": 240
+  }
+}
+```
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/tasks \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @task.json
+```
+
+```typescript TypeScript
+const task = await talqing.tasks.create({ createTaskRequest: { config } });
+```
+
+```python Python
+task = talqing.tasks.create(config=config)
+```
+</CodeGroup>
+
+Four decisions in that config are worth being deliberate about.
+
+**`vars` are the inputs, and the batch fills them from the CSV.** Each row's uploaded columns are handed to the task as its `{{vars.*}}` values, so a column named `domain` becomes `{{vars.domain}}`. A `required` variable with no column and no default is refused when the batch is created, before a single row runs.
+
+**Every `description` is the only instruction the model gets.** It becomes the description of that argument in the generated `submit_result` tool, so it is literally the prompt for the value. `"The subject line"` produces subject lines; the description above produces subject lines under sixty characters that name the company. Write it as: what good looks like, where to look, and what to send when the answer is not findable.
+
+**Every output field is sent, and a field with `required` off may be `null`.** The model has to say something about each one; for a value research can fail to find, turn `required` off and end its description with the null case. An optional field lets the model silently omit the address it failed to find, and then "omitted" and "not generated yet" look identical to whoever reads the row. One of those is a fact and the other is a bug. See [inputs and output](/tasks/inputs-and-output).
+
+**`max_steps` and `timeout_seconds` are two different budgets.** `max_steps` (default 25, max 50) counts model → tools → model **rounds**, not tool calls: four searches in one reply cost one step. Twelve is generous for search-then-read-then-write and low enough to catch a loop. `timeout_seconds` (default 300, max 600) is wall-clock, and it is what actually bounds a run — a run that ends without calling `submit_result` is re-prompted, and **each re-prompt starts the step budget over**.
+
+<Note>
+**A task has a draft and a publish step, exactly as an agent does.** `create_task` and `update_task` write the draft; `publish_task` freezes it and is what a run and an email batch use. `validate_task` gives you the publish-grade problems and the warnings — a prompt reading a variable nothing declares, a task with no prompt — without publishing anything. Every run records `task_version`, so you can tell which wording produced it. See [task versions](/tasks/versions).
+</Note>
+
+</Step>
+
+<Step title="Run it once by hand and read the trace">
+
+Never point a batch at a task you have not run. One run costs one run; five thousand rows of a bad prompt costs five thousand.
+
+`version: "draft"` runs the config you just wrote without publishing it, which is
+what you want while you are still iterating. Drop it once you are happy and
+publish — a batch needs a published task.
+
+<CodeGroup>
+```bash cURL
+curl -sS -X POST "https://api.in.talqing.com/v1/tasks/$TASK_ID/runs" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  --max-time 300 \
+  -d '{ "version": "draft", "vars": { "domain": "asha-textiles.example", "first_name": "Priya", "role": "Head of Operations" } }'
+
+# Happy with it? Publish, and the batch can use it.
+curl -sS -X POST "https://api.in.talqing.com/v1/tasks/$TASK_ID/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const run = await talqing.tasks.runs.create({
+  task_id,
+  runTaskRequest: {
+    version: "draft",
+    vars: { domain: "asha-textiles.example", first_name: "Priya", role: "Head of Operations" },
+  },
+});
+console.log(run.status, run.steps_used, run.attempts, run.provider_cost);
+console.log(run.output);
+
+// Happy with it? Publish, and the batch can use it.
+await talqing.tasks.publish({ task_id });
+```
+
+```python Python
+run = talqing.tasks.runs.create(
+    task_id,
+    version="draft",
+    vars={"domain": "asha-textiles.example", "first_name": "Priya", "role": "Head of Operations"},
+)
+print(run["status"], run["steps_used"], run["attempts"], run["provider_cost"])
+print(run["output"])
+
+# Happy with it? Publish, and the batch can use it.
+talqing.tasks.publish(task_id)
+```
+</CodeGroup>
+
+The request blocks for as long as the run takes, so set your client's read timeout above `timeout_seconds` — the Python SDK defaults to 30 seconds and will abandon a run that is perfectly healthy. The task above asks for 240.
+
+Then read three numbers before you read the output:
+
+| Field | What it tells you |
+| --- | --- |
+| `trace` | Every tool call with its arguments, its result and how long it took, plus everything the model wrote. Secrets are masked and long fields are truncated and marked. This is where you find out that the model searched for the wrong thing. |
+| `steps_used` against `max_steps` | The busiest attempt's round count. At the ceiling, the run is being cut off rather than finishing. |
+| `attempts` | **Read this one.** `attempts: 3` means the run failed to call `submit_result` twice, was re-prompted, and recovered on the third go — having used up to three times the rounds `steps_used` shows, and billed for all of them. A task that reads well and quietly costs triple is what this field is for. |
+
+A run that fails carries `error.type`, and the vocabulary says whose problem it is: `no_output` means fix the prompt, `step_limit` means fix `max_steps` or narrow the work, `configuration` means a missing key or a deleted tool is yours to fix. See [errors and limits](/tasks/errors-and-limits).
+
+</Step>
+
+<Step title="Connect Resend and verify a sending domain">
+
+Every batch sends through one connected Resend account, on your own API key. Talqing holds no email credential of its own.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/integrations \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "resend",
+    "display_name": "Resend (outreach)",
+    "credentials_ref": "re_your_resend_api_key"
+  }'
+
+curl -sS -G https://api.in.talqing.com/v1/email/senders \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "integration_id=$RESEND_INTEGRATION_ID"
+```
+
+```typescript TypeScript
+const resend = await talqing.integrations.create({
+  createIntegrationRequest: {
+    provider: "resend",
+    display_name: "Resend (outreach)",
+    credentials_ref: "re_your_resend_api_key",
+  },
+});
+
+const senders = await talqing.email.senders.list({ integration_id: resend.id });
+console.log(senders.domains); // ["yourdomain.com"]
+```
+
+```python Python
+resend = talqing.integrations.create(
+    provider="resend",
+    display_name="Resend (outreach)",
+    credentials_ref="re_your_resend_api_key",
+)
+
+senders = talqing.email.senders.list(integration_id=resend["id"])
+print(senders["domains"])
+```
+</CodeGroup>
+
+Verification is **domain-level** — once `yourdomain.com` is verified, any local part on it sends — and the list is read live off the account rather than cached, because a stale one would offer you a sender that starts failing twenty minutes later. A `from_email` on an unverified domain is refused at create, at patch and at every send press. See [email setup](/email/setup).
+
+</Step>
+
+<Step title="Map the CSV and the task output onto to, subject and body">
+
+A row has **one flat column space, filled from two directions**: your CSV supplies some names, the task's `output` supplies the rest, and a person's edits sit on top. `field_map` points `to`, `subject` and `body` at names in that merged space, and **each may be either a CSV header or a task output field**.
+
+That is why these two are the same feature:
+
+```json
+// The list already carries addresses. The task writes the words.
+{
+  "field_map": { "to": "email", "subject": "subject_line", "body": "email_body" },
+  "recipients": [
+    { "input": { "email": "priya@asha-textiles.example", "domain": "asha-textiles.example", "first_name": "Priya", "role": "Head of Operations" } }
+  ]
+}
+```
+
+```json
+// The list carries no address. The task finds one and writes the words.
+{
+  "field_map": { "to": "work_email", "subject": "subject_line", "body": "email_body" },
+  "recipients": [
+    { "input": { "domain": "asha-textiles.example", "first_name": "Priya", "role": "Head of Operations" } }
+  ]
+}
+```
+
+In the first, `email` is a header of your file and the other two are output fields of the task. In the second, all three are output fields — which means the task has to declare `work_email` in its `output`, with a description saying where to look and to send null rather than guess. Nothing downstream can tell the two cases apart.
+
+A row is sendable when all three resolve to a **non-empty string** and `to` parses as an address. Every other field the task produces — `company_name`, `what_they_do`, `specific_detail` — is kept on the row as context you read while deciding, and is sent nowhere.
+
+Refused at create, all together in one 400: a mapped name that is neither a column nor an output field; a mapped output field that is not a `string`; a CSV header that collides with an output field name; a `required` task variable with no column and no default; an unverified `from_email`. The full list is in [creating a batch](/email/creating-a-batch).
+
+<Warning>
+**A header that exists but is blank on some rows still passes create.** The check is on the header, not the cells. Those rows fail at drafting time with `missing_vars` — one row, not the batch, and with no tokens spent, because the check runs before the model is reached. Count the blanks in every column a required variable reads before you upload.
+</Warning>
+
+</Step>
+
+<Step title="Create the batch and let it draft">
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/email/batches \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Guide downloads, week 36",
+    "task_id": "5e2a7b91-0c34-4d6f-8a12-b93f5c7e2d61",
+    "integration_id": "a41f6c2d-8b17-4e93-9d05-2c7e6f31b840",
+    "from_email": "priya@yourdomain.com",
+    "from_name": "Priya at Northwind",
+    "reply_to": "priya@yourdomain.com",
+    "body_format": "text",
+    "field_map": { "to": "email", "subject": "subject_line", "body": "email_body" },
+    "recipients": [
+      { "input": { "email": "priya@asha-textiles.example", "domain": "asha-textiles.example", "first_name": "Priya", "role": "Head of Operations" } },
+      { "input": { "email": "arjun@ravi-foods.example", "domain": "ravi-foods.example", "first_name": "Arjun", "role": "Supply Chain Lead" } }
+    ],
+    "timezone": "Asia/Kolkata",
+    "window": { "start": "09:00", "end": "18:00", "days": [1, 2, 3, 4, 5] },
+    "draft_concurrency": 5,
+    "draft_attempts": 2,
+    "draft_retry_after_minutes": 30,
+    "send_gap_seconds": 1
+  }'
+```
+
+```typescript TypeScript
+import { readFileSync } from "node:fs";
+
+const rows: Record<string, string>[] = JSON.parse(readFileSync("list.json", "utf8"));
+
+const batch = await talqing.email.batches.create({
+  createEmailBatchRequest: {
+    name: "Guide downloads, week 36",
+    task_id: "5e2a7b91-0c34-4d6f-8a12-b93f5c7e2d61",
+    integration_id: "a41f6c2d-8b17-4e93-9d05-2c7e6f31b840",
+    from_email: "priya@yourdomain.com",
+    from_name: "Priya at Northwind",
+    reply_to: "priya@yourdomain.com",
+    body_format: "text",
+    field_map: { to: "email", subject: "subject_line", body: "email_body" },
+    recipients: rows.map((input) => ({ input })),
+    timezone: "Asia/Kolkata",
+    window: { start: "09:00", end: "18:00", days: [1, 2, 3, 4, 5] },
+    draft_concurrency: 5,
+    draft_attempts: 2,
+    draft_retry_after_minutes: 30,
+    send_gap_seconds: 1,
+  },
+});
+console.log(batch.id, batch.status, batch.counts.total);
+```
+
+```python Python
+import csv
+
+with open("list.csv", newline="") as handle:
+    rows = [
+        {key: value.strip() for key, value in row.items() if value and value.strip()}
+        for row in csv.DictReader(handle)
+    ]
+
+batch = talqing.email.batches.create(
+    name="Guide downloads, week 36",
+    task_id="5e2a7b91-0c34-4d6f-8a12-b93f5c7e2d61",
+    integration_id="a41f6c2d-8b17-4e93-9d05-2c7e6f31b840",
+    from_email="priya@yourdomain.com",
+    from_name="Priya at Northwind",
+    reply_to="priya@yourdomain.com",
+    body_format="text",
+    field_map={"to": "email", "subject": "subject_line", "body": "email_body"},
+    recipients=[{"input": row} for row in rows],
+    timezone="Asia/Kolkata",
+    window={"start": "09:00", "end": "18:00", "days": [1, 2, 3, 4, 5]},
+    draft_concurrency=5,
+    draft_attempts=2,
+    draft_retry_after_minutes=30,
+    send_gap_seconds=1,
+)
+print(batch["id"], batch["status"], batch["counts"]["total"])
+```
+</CodeGroup>
+
+`draft_concurrency` (1–10, default 5) is how many rows draft at once, and it is **the only limit in the system** — each row is a model run, and a task that fans out to a provider that rate-limits or charges per call will feel it here. `window` is about **sending**, not drafting: nobody receives a draft, so drafting runs at any hour and every send inherits these hours.
+
+In the dashboard this is **Email → Outbound → New batch**, whose last step is three dropdowns — To, Subject, Body — listing your file's columns under **From your file** and the task's output fields under the task's name, with non-text fields greyed out.
+
+</Step>
+
+<Step title="Review, fix a cell, and create a send">
+
+When the last row lands the batch reads `drafted`, shown as **Ready to review**. That means the drafts are ready. It says nothing about what has been sent.
+
+Read the rows, with `not_ready_reason` telling you why any of them cannot go yet — it is computed live on every read, never stored:
+
+<CodeGroup>
+```bash cURL
+curl -sS "https://api.in.talqing.com/v1/email/batches/$BATCH_ID/recipients?status=draft" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const page = await talqing.email.batches.recipients.list({ batch_id, status: "draft" });
+for (const row of page.items) {
+  console.log(row.row_number, row.to_email, row.not_ready_reason, row.columns.subject_line);
+}
+```
+
+```python Python
+page = talqing.email.batches.recipients.list(batch_id, status="draft")
+for row in page["items"]:
+    print(row["row_number"], row["to_email"], row["not_ready_reason"], row["columns"]["subject_line"])
+```
+</CodeGroup>
+
+A row whose task returned `null` for the address is fixed by typing one in. An edit is stored **apart from** what the model wrote and merged last, so it always wins and a re-draft can never silently discard it. An empty value clears the override and falls back to whatever was underneath.
+
+<CodeGroup>
+```bash cURL
+curl -sS -X PATCH \
+  "https://api.in.talqing.com/v1/email/batches/$BATCH_ID/recipients/$RECIPIENT_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"overrides": {"email": "priya@asha-textiles.example", "subject_line": "Your second warehouse"}}'
+```
+
+```typescript TypeScript
+await talqing.email.batches.recipients.update({
+  batch_id,
+  recipient_id,
+  patchEmailRecipientRequest: {
+    overrides: { email: "priya@asha-textiles.example", subject_line: "Your second warehouse" },
+  },
+});
+```
+
+```python Python
+talqing.email.batches.recipients.update(
+    batch_id,
+    recipient_id,
+    overrides={"email": "priya@asha-textiles.example", "subject_line": "Your second warehouse"},
+)
+```
+</CodeGroup>
+
+Then create a send. `scope: "all"` takes every draft — and, had drafting still been running, every row as it finished, unread; `scope: "selected"` with `recipient_ids` takes only the rows you name. The pace and the ceiling are what keep it safe.
+
+<CodeGroup>
+```bash cURL
+curl -sS -X POST "https://api.in.talqing.com/v1/email/batches/$BATCH_ID/sends" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "scope": "all",
+    "send_gap_seconds": 45,
+    "send_daily_cap": { "kind": "fixed", "limit": 100 }
+  }'
+```
+
+```typescript TypeScript
+const { send, rejected } = await talqing.email.batches.sends.create({
+  batch_id,
+  createEmailSendRequest: {
+    scope: "all",
+    send_gap_seconds: 45,
+    send_daily_cap: { kind: "fixed", limit: 100 },
+  },
+});
+console.log(send.id, send.counts.queued, send.next_send_at, rejected);
+```
+
+```python Python
+res = talqing.email.batches.sends.create(
+    batch_id, scope="all", send_gap_seconds=45, send_daily_cap={"kind": "fixed", "limit": 100}
+)
+print(res["send"]["id"], res["send"]["counts"]["queued"], res["rejected"])
+```
+</CodeGroup>
+
+<Warning>
+**The safeguard is a rate, not a row count.** `send_daily_cap` (200 a day by default, per batch, across every one of its sends) is what stands between a new sending domain and a reputation nobody can repair. Raise it deliberately, over weeks — a review gate cannot undo a spam folder — or let a [ramp](/email/creating-a-batch#warming-up-a-new-domain) raise it for you on the days the batch sends.
+
+Do the arithmetic before you press: 1 240 rows at 45 seconds apart is about 15 hours of sending; with a 09:00–17:00 window and a cap of 100 a day, it is thirteen working days.
+</Warning>
+
+A send is a row you can steer: `pause` stops it on the next email, `resume` carries on, and `cancel` hands **every unsent row back as a draft** — which is also the only way to change what a scheduled send contains.
+
+A send may override `from_email`, `from_name` and `reply_to` for itself alone, which is how one list gets worked through from more than one address. The Resend account itself is not overridable — a different account is a different batch.
+
+</Step>
+
+</Steps>
+
+## Test it
+
+1. **One task run by hand**, on a domain you know well, so you can tell a true sentence from a plausible one. Read `specific_detail` first: if it is generic, the prompt is not asking for enough, and every row will be generic.
+2. **A two-row batch**, with both addresses your own. Watch it move `scheduled` → `drafting` → `drafted`, then read both drafts as a stranger would.
+3. **Break a row on purpose.** Blank the `domain` cell on one row before uploading. It should fail at drafting with `missing_vars`, alone, while the other row drafts normally.
+4. **Send those two to yourself.** Check what actually arrives — the line breaks, the `from_name`, the reply-to — before any of it reaches somebody who did not ask for a test.
+
+## What to watch
+
+| Where | What it answers |
+| --- | --- |
+| `GET /v1/email/batches/{batch_id}` | Live counts, `failure_reason`, the drafting cost so far, and `next_draft_at` — which is how "waiting for Monday" is told apart from "stuck". |
+| `status` | About **drafting** and nothing else: `scheduled`, `drafting`, `paused`, `drafted`, `canceled`, `failed`. `drafted` is shown as **Ready to review**, `failed` as **Stopped**. |
+| Row `last_error` | `"{error_type}: {message}"`, where `provider_error`, `timeout`, `platform` and `canceled` are retryable — `canceled` being a deploy, which costs the row no attempt — and `missing_vars` and `configuration` are data or config problems of yours. |
+| The Resend dashboard | Deliveries, bounces and spam complaints. |
+
+**A batch stops itself** after ten consecutive drafting failures — `missing_vars` never counts, being a per-row data problem — or on the **first** `configuration` failure: a deleted task, a field map an edit broke. Those are deterministic and will fail identically for every remaining row.
+
+**A send stops itself** the same way, on its own: ten consecutive provider failures, or one account-level refusal (a revoked key, an unverified domain, an exhausted quota). It never takes the batch with it, and it returns every row it had not sent to the review table as a draft.
+
+**One address is mailed at most once per batch**, enforced when the row is claimed for sending; the second row settles `skipped` with `duplicate_recipient`. And **Talqing reports what it sent, not what landed** — a row reading `Sent` means Resend accepted it, and whether it was delivered is a question only the Resend dashboard answers. Watching it there is how a sending domain survives.
+
+## Where it falls short
+
+- **Cost scales with rows drafted, not rows sent.** Drafting is the expensive half and it happens to every row. There is no cap, no budget and no estimate before the fact — decide the size of the list on the cost of the single run you measured.
+- **Publishing a task mid-batch changes every later row.** A batch follows the task's current published version, so rows 1–800 came from v2 and 801 onwards from v3. The batch's `drafted_versions` shows the split, and `redraft` with `selection: "stale_version"` rewrites exactly the older ones — at the cost of running the task again on each. Pause, improve, publish, resume, redraft the rest.
+- **No cross-batch dedup and no suppression list of ours.** The once-per-address rule is per batch. The same person on two lists gets two emails, and nothing here knows they unsubscribed from the first. Resend keeps a suppression list and auto-suppresses hard bounces and complaints; that is the one you are relying on, and it is yours.
+- **Enrichment providers spend their own credits per row.** A task attached to RocketReach or a similar provider spends that provider's plan credits every time it runs, and nothing on our side caps it — a 5,000-row list is 5,000 lookups. Check what one run costs at the provider before you point a batch at it.
+- **Task spend is not in Observability.** The charts are built on calls and conversations; a task's cost appears on its own run and on the batch page, and nowhere else.
+- **Deleting a batch deletes the record of what was sent.** It is allowed once drafting and every send have ended. Identity fields — the sender, the body format, the field map — freeze once anything has been sent.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Reviewing and sending" href="/email/reviewing-and-sending">
+    Skip, restore, retry, duplicates and the send press in full.
+  </Card>
+  <Card title="Monitoring a batch" href="/email/monitoring">
+    Statuses, counts, cost and why a batch stops itself.
+  </Card>
+  <Card title="Tools and MCP servers" href="/tasks/tools-and-mcps">
+    What a task can reach while it works.
+  </Card>
+</CardGroup>

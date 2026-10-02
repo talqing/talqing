@@ -1,0 +1,21 @@
+; pgbouncer's auth file: plaintext passwords, one line per username. Comments
+; start with `;` — a `#` line is a "broken auth file" error and pgbouncer starts
+; with NO users loaded, so every client is then rejected.
+;
+; pgbouncer computes the SCRAM verifier it challenges the client with from the
+; plaintext, and uses the same plaintext to log in to Postgres — so the entry
+; for `talqing` must be the password BOTH planes' roles hold. docker-compose.yml
+; sets the same POSTGRES_PASSWORD on control-pg and data-pg for that reason.
+;
+; Committed on purpose. Local's Postgres password is already a literal in
+; docker-compose.yml and configs/local.config.yaml; a generation step for one
+; file would be ceremony around a credential sitting in the open beside it. The
+; dev droplet's copy is rendered from its .env and is not committed.
+;
+; `pgb_stats` exists ONLY in this file. It has no Postgres role and must not be
+; created: it authenticates to pgbouncer's own `pgbouncer` admin database, which
+; never connects to a server. It is in stats_users, so it can read SHOW output
+; and nothing else. Locally it is for manual inspection; on dev it is also the
+; exporter's credential.
+"talqing"   "PhQrqWbF9Ejh3GEgPy2GE8NfK4vtCPIz"
+"pgb_stats" "c0407f736f3f451daa533a15e2a8f0b0afd80eb95059a800"

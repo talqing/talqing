@@ -1,0 +1,137 @@
+---
+title: "ToolCoPilot"
+description: "The builder in the tool editor: what it can reach, what it deliberately cannot, and how to prompt it."
+---
+
+ToolCoPilot is a chat rail in the tool editor. Describe what you want the tool to
+do and it writes the operation tree, validates it, runs it and reports back. The
+editor updates live as it works — you are watching the same draft it is editing.
+
+It edits **one tool: the one you have open.** "Build a tool that books a slot"
+means configure this tool, renaming it if the current name is a placeholder. It
+will not create a second tool unless you explicitly ask for one, and it will
+never delete the one you are in.
+
+## What it can reach
+
+Its tools are the platform's own API operations, run in-process as you. It gets
+the slice that concerns tools, and nothing else.
+
+| It can | Endpoint |
+| --- | --- |
+| List and read the workspace's tools | `GET /v1/tools`, `GET /v1/tools/{tool_id}` |
+| Create a tool (only if you ask for a second one) | `POST /v1/tools` |
+| Edit this tool | `PATCH /v1/tools/{tool_id}` |
+| Delete a tool (never this one) | `DELETE /v1/tools/{tool_id}` |
+| Validate the draft | `POST /v1/tools/{tool_id}/validate` |
+| Run the draft | `POST /v1/tools/{tool_id}/run` |
+| Publish it | `POST /v1/tools/{tool_id}/publish` |
+| Read and roll back a version | `GET`/`POST /v1/tools/{tool_id}/versions/{version}` |
+| Read secret **names** | `GET /v1/secrets` |
+| List agents, to name a `handoff` target | `GET /v1/agents` |
+| List integrations and their MCP tools | `GET /v1/integrations`, `GET /v1/integrations/{integration_id}/mcp-tools` |
+| Fetch the operation-tree schema | `GET /v1/schemas/{name}` |
+
+That list is the whole surface. Everything on it is either about this tool, or a
+read it needs to name something it cannot invent.
+
+## What it deliberately cannot do
+
+<Warning>
+**No agent writes.** ToolCoPilot cannot create or edit an agent, and it cannot
+attach this tool to one. That happens in the agent's own editor, where
+[AgentCoPilot](/agents/copilot) lives. If the tool needs an agent, a secret or an
+integration that does not exist yet, it will tell you to create it and where —
+not offer to do it itself.
+</Warning>
+
+It also never sees a secret's value. It can read the *names* in your workspace
+and write `{{secrets.STRIPE_API_KEY}}` into the tree; the value stays in the
+vault. And it runs **as you, with your role** — an editor drives it, a viewer can
+watch the conversation but cannot send a message.
+
+## What it is good at
+
+- **Building a tree from a description of an API.** Paste the endpoint, the
+  auth scheme and an example response, and say what the agent should do with it.
+  It writes the `http` operation, the `publish_fields` that pick the values out,
+  and the `say` or `generate_reply` that uses them.
+- **Fixing a validation error.** Paste the error, or just say "validate and fix
+  it". Validation errors are precise about which operation and which token, and
+  the CoPilot acts on them well.
+- **Writing a `json_schema`.** Including the property descriptions, which are the
+  part people skip and the model actually reads.
+- **Reshaping a response.** "The API returns a nested array; get the first
+  delivery's date into tooldata" is a `code` operation it can write.
+
+It is a worse choice for deciding *whether* a tool should exist, how many tools
+you need, or what the escalation policy on a
+[transfer](/tools/transfer) should be. Those are product decisions and it will
+take whatever you tell it.
+
+## How to prompt it
+
+Give it the endpoint and the behaviour, not the tree.
+
+> The tool should look up a booking by reference.
+> `GET https://api.acme.example.com/bookings/{ref}` with `Authorization: Bearer` from
+> the `ACME_API_KEY` secret. It returns `{booking: {date, time, table_size}}`.
+> The agent should read the date and time back to the caller and ask if they want
+> to change it.
+
+Things worth saying explicitly, because it will otherwise pick a default and
+tell you which one it picked:
+
+- Whether a value should go in `tooldata` (this tool run only) or `userdata`
+  (the rest of the session).
+- Whether the agent should speak the result verbatim (`say`) or phrase it
+  (`generate_reply`).
+- What should happen when the endpoint fails — `on_error` is a real choice.
+
+Ask it to **validate and run** before you believe it. The live snapshot it is
+given each turn tells it what the draft *says*, never whether it works.
+
+## Running your tool
+
+<Warning>
+`run_tool` executes for real: HTTP operations call your endpoints with your
+secrets. ToolCoPilot runs read-only tools freely and asks you first before
+running one that books, charges, sends or deletes — but "read-only" is its
+judgement of your API, made from the URL and the method. If the tool touches
+anything expensive, say so at the start of the conversation.
+</Warning>
+
+## Publishing
+
+In this editor, publishing is your call. ToolCoPilot publishes when you ask it
+to, not on its own, and it says when a change is still only in the draft.
+
+Remember the other half: publishing the tool does not change live calls until the
+agents that attach it are published too. See
+[testing and publishing](/tools/testing-and-publishing).
+
+## Limits
+
+| Limit | What it means |
+| --- | --- |
+| **25 model round-trips per turn** | A long build can run out mid-way. It says so — *"I hit my step limit for one turn — tell me to continue and I'll pick up where I left off"* — and everything it had already written is saved. Tell it to continue. |
+| **No retry on a provider rate limit** | If the model provider rate-limits the turn, the turn ends with that provider's own message on it. Nothing is retried automatically; send your message again. Partial progress is kept. |
+| **Runs as you** | Every call it makes carries your role. A `403` it hits is a `403` you would have hit. |
+| **Never billed** | ToolCoPilot runs on Talqing's own model, not on your provider keys, and it costs your workspace nothing. It is not a call, it opens no session, and it does not appear in your usage. |
+
+The conversation is stored per tool, so you can close the editor and come back to
+it. Each CoPilot has its own thread against its own subject.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="AgentCoPilot" href="/agents/copilot">
+    The builder in the agent editor, which has the whole API surface.
+  </Card>
+  <Card title="Testing and publishing" href="/tools/testing-and-publishing">
+    What validate and run actually check.
+  </Card>
+  <Card title="Build from your terminal" href="/mcp/overview">
+    The same operations, pointed at Claude Code or Codex.
+  </Card>
+</CardGroup>

@@ -1,0 +1,383 @@
+---
+title: "Calls"
+description: "The call record: transcript, every tool call and its output, the final userdata, per-stage latency and cost."
+---
+
+A call is one voice or video session — a web call, an inbound phone call or an
+outbound one. When an agent misbehaves, the call record is the single most
+useful thing in the product: it holds what was said, every tool the model
+called and what came back, the state the call ended with, and where the time
+and money went.
+
+Chats are not calls. Read them on `GET /v1/chats` — see
+[chats](/channels/text-conversations) — and, with everything else in the same
+thread, under [conversations](/observability/conversations).
+
+## Listing calls
+
+`GET /v1/calls` returns calls newest first, in the standard page shape
+(`items`, `has_more`, `limit`, `offset`).
+
+| Parameter | Type | Meaning |
+| --- | --- | --- |
+| `limit` | integer, 1–200 | Default `200`. |
+| `offset` | integer | Default `0`. |
+| `start` | datetime | Window start. **Defaults to 30 days ago.** |
+| `end` | datetime | Window end. Defaults to now. |
+| `agent_id` | uuid | Calls this agent answered. |
+| `type` | `WEB` \| `SIP_INBOUND` \| `SIP_OUTBOUND` \| `WHATSAPP_INBOUND` \| `STREAM` | How the call reached the agent. |
+| `status` | string | `queued`, `in_progress`, `completed`, `failed` or `canceled`. |
+| `outcome` | string | `success`, `failure` or `unknown`, as judged by [post-call analysis](/observability/call-analysis). |
+| `contact_key` | string | Your own stable id for a person — every call with that one customer, however many numbers they rang from. |
+| `close_reason` | string | Exactly how the call ended, e.g. `participant_disconnected`. The same strings the observability `endings` breakdown ranks. See [close reasons](/observability/close-reasons). |
+| `batch_id` | uuid | Only calls one outbound batch placed, retries included. |
+
+<CodeGroup>
+```bash cURL
+curl -G https://api.in.talqing.com/v1/calls \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "type=SIP_INBOUND" \
+  --data-urlencode "close_reason=participant_disconnected" \
+  --data-urlencode "limit=50"
+```
+
+```typescript TypeScript
+const page = await talqing.calls.list({
+  type: "SIP_INBOUND",
+  close_reason: "participant_disconnected",
+  limit: 50,
+});
+
+for (const call of page.items) {
+  console.log(call.id, call.close_reason_label, call.cost?.total_charge);
+}
+```
+
+```python Python
+from talqing import paginate
+
+for call in paginate(
+    talqing.calls.list,
+    type="SIP_INBOUND",
+    close_reason="participant_disconnected",
+):
+    print(call["id"], call["close_reason_label"], call["cost"])
+```
+</CodeGroup>
+
+A list row carries enough to render without opening anything: `status`,
+`close_reason` and its plain-English `close_reason_label`, `duration_s`,
+`cost`, `contact_key`, `recording.state`, `message_count`, `total_audio_ms`,
+and the analysis `summary` and `outcome`. It also carries `plan` — non-null
+only when the call ran something other than an agent's published version, with
+`members`, `inline` and `overridden` — so a list can say `Inline`,
+`Overridden` or `Team · 3` without a second request.
+
+## One call, in full
+
+`GET /v1/calls/{session_id}` returns everything. Start with `snapshot`: it
+answers "did this call go well?" on its own. `snapshot.issues` lists every
+problem found as `{kind, message}` — a stable `kind` to switch on and a plain
+sentence to show — and `snapshot.ok` is `true` when the list is empty.
+
+### Identity — what ran, and for whom
+
+| Field | Meaning |
+| --- | --- |
+| `session.id` | The call id. |
+| `session.type` | `WEB`, `SIP_INBOUND`, `SIP_OUTBOUND`, `WHATSAPP_INBOUND` or `STREAM`. |
+| `session.from_e164` / `session.to_e164` | The SIP legs. Both null on a web call. |
+| `session.agent` | `{agent_id, name, channel}` — the agent that answered. |
+| `session.agent_version` | The exact published version number this call ran. Null when it ran an inline definition or an unpublished draft, neither of which has one. |
+| `agent_plan` | What was *asked for*, when it differed from "the entry agent's published version". Null on an ordinary call. Diff it against the published version to see what this one call did differently. |
+| `agent_config` | The resolved entry config, always served, so no client merges an override itself. |
+| `tools`, `starting_prompt`, `greeting` | The frozen definition this call actually ran — not the agent's current draft. |
+| `team` | The roster, `[0]` being the agent that answered. One entry on an ordinary call. |
+| `vars` | The `{{vars.*}}` values the request that started the call supplied. |
+| `session.batch_id` | Which outbound batch placed it. Null for every other kind. |
+| `session.contact_key` | Who the call was with. Stable across every call from the same person. |
+| `session.conversation_id` | This call's thread. New on each call for an agent that starts clean. |
+| `session.contact_userdata` | What the platform knows about this caller across **all** their calls, as opposed to `session.userdata` below. |
+
+### Timing and status
+
+`session.started_at`, `session.ended_at` and `session.duration_s` (wall-clock
+seconds; null while the call is still running). `session.status` is `queued`,
+`in_progress`, `completed`, `failed` or `canceled`.
+
+`session.close_reason` is the most specific fact about how it ended, and
+`session.close_reason_label` is the same thing as a sentence — served rather
+than mapped client-side, because there are around forty values written from
+five places and a second copy of that list goes stale.
+
+`session.error` is set only when the run died on an unhandled error, never on a
+normal close.
+
+### The transcript
+
+`transcript` is an ordered list of items, in the same shape
+[conversation items](/observability/conversations) have. Every tool call and its
+result is in there beside the speech, which is what makes it the first thing to
+read when a model did something unexpected.
+
+| `type` | What it is |
+| --- | --- |
+| `message` | Something said: `role` and `text`. Also carries per-turn `metrics`, a caller message's `origin` (`speech`, `typed` or `keypad`) and any `attachments` (web calls only — a phone call has no way to carry a file). |
+| `function_call` | The model called a tool. `metadata.data` carries `name`, `call_id` and the `arguments` it chose. |
+| `function_call_output` | What that tool returned. `metadata.data` carries `output` and `is_error`. |
+| `agent_handoff` | Control moved to another agent, or into a task and back. `text` says which; `metadata.data.kind` is `handoff`, `task` or `task_return`. |
+| `agent_config_update` | The running agent's configuration changed mid-call. |
+
+Each item stamps its own `agent_id` and `agent_version` rather than inheriting
+the session's. The session names the agent that *answered* and never moves, so
+on a call with a handoff these are the only way to tell who said what.
+
+`events` beside it is the durable runtime trace — `agent.ready`,
+`tool.started` / `tool.ended`, `provider.failed` / `provider.recovered`,
+`hold.started` / `hold.ended`, `transfer.briefing`, `screenshare.started`,
+`session.error` and more, each with a sequence number and a payload. It is
+where you look when the transcript reads fine and the call still went wrong.
+
+### The final userdata
+
+`session.userdata` is the state the call ended with — what its tools collected
+and computed. It is the second thing to read after the transcript, because a
+tool that wrote the wrong value usually shows up here before it shows up
+anywhere else.
+
+Post-call analysis results are deliberately **not** merged into it. See
+[call analysis](/observability/call-analysis).
+
+### Usage and cost
+
+`usage` splits by kind: `llm`, `stt`, `tts`, `realtime` and `avatar`. A call
+fills either `llm` + `stt` + `tts` or `realtime` — never both, because the agent
+ran one pipeline or the other. Each LLM row carries `purpose`
+(`conversation` or `analysis`) and `priority`, the flag that can make one line
+cost double the standard rate.
+
+`cost` carries `provider_cost`, `platform_fee`, `total_charge`, `duration_s`
+and the full `pricing_snapshot` — the priced breakdown the biller froze, rates
+included, never re-derived from today's catalog.
+
+<Warning>
+**`cost` is `null` until billing has computed it.** A call in progress shows no
+cost at all — never a partial estimate. `session.billing_status` says which
+state it is in: `pending`, `computed` or `unpriceable`. Only `computed` has a
+`cost` object.
+</Warning>
+
+See [costs](/observability/costs) for what each line means and which half you
+are actually charged for.
+
+### Latency, stage by stage
+
+`snapshot.response_latency` is the number a caller feels: from the caller
+finishing speech to the agent's first audio. It carries `avg_ms`, `p95_ms`,
+`max_ms` and `samples` — the p95 is what tells you whether a call was
+*sometimes* slow, which a mean hides.
+
+Where the average went is `snapshot.response_stages`: an ordered list of
+`{kind, ms, label}` that adds up to `avg_ms`.
+
+| `kind` | What it measures |
+| --- | --- |
+| `stt` | Speech to text: the caller stops talking until the final transcript arrives. |
+| `endpoint` | After the transcript: the wait for turn detection to agree the caller is done — tune it in [turn handling](/agents/turn-handling). |
+| `hook` | Your `on_user_turn_completed` hook. |
+| `llm_step` | The model deciding to call a tool, before it had said anything. |
+| `tool` | Waiting for the tool to return. |
+| `llm` | The model: asked for the reply until its first token. |
+| `tts` | Text to speech: first token until the first byte of audio. |
+| `other` | Scheduling, network and buffering between the stages above. |
+
+A realtime agent has no separate STT or TTS leg, so those stages are absent on
+one.
+
+**Per reply**, the same list is `transcript[].latency.stages`, on the reply the
+wait ended on. `latency.kind` is `response` for caller
+stopped → first agent audio, `reply` for a typed message arriving → the first
+token back, and `after_filler` for the gap between a line like "let me check" and
+the reply a tool produced.
+
+**The thresholds ship on the response**, so a client never hard-codes a line
+the platform might move:
+
+| Field | Value | Meaning |
+| --- | --- | --- |
+| `snapshot.slow_response_threshold_ms` | `3500` | A response slower than this is the thing callers notice first. |
+| `snapshot.slow_tool_threshold_ms` | `8000` | A tool the caller waited on for longer than this. Higher than the response threshold because a tool is *expected* to take a moment. |
+
+`snapshot.slow_tool_calls` counts every tool over the threshold;
+`snapshot.slow_tool_calls_in_silence` counts the subset where nothing was being
+spoken over it, which is the only version that is a defect. `tool_calls`,
+`tool_call_failures` and `unfinished_tool_calls` sit beside them —
+"unfinished" means the run died while the tool was still going, which is not
+the same as one that reported a failure.
+
+`snapshot.pace` describes how the call *sounded* rather than how fast the stack
+was: `longest_agent_turn_ms` (the number that says your agent monologued),
+`talk_over_turns`, and `hold_ms` — time parked on hold music during a bridged
+transfer, which is inside the duration, inside the recording and inside the
+bill, and silent.
+
+`snapshot.connection` splits connection quality into `agent` and `caller`,
+because a collapsed reading makes the caller's own network look like a platform
+fault.
+
+### Transfer
+
+`session.transfer` is null on every call that never attempted one. When it is
+set it *is* the ending, and it explains a short duration and a truncated
+recording that would otherwise read as a call that failed early.
+
+| Field | Meaning |
+| --- | --- |
+| `mode` | `cold` or `warm`. |
+| `transport` | `refer` or `bridge`. Always `bridge` today. |
+| `destination` | The number dialled. |
+| `outcome` | `connected` or `failed`. |
+| `detail` | The plain-English reason the agent was given, and through it the caller. Null on a transfer that connected. |
+| `sip_status` | The raw carrier verdict, e.g. `{"code": 486, "phrase": "Busy Here"}`. Null unless the carrier gave one. It is for support — deliberately a different string from `detail`. |
+| `on_failure` | `continue` or `end_call` — what the tool did when it did not connect. |
+| `at` | When it was attempted. |
+
+Both `duration_s` and the recording measure **our** part of the call. The caller
+may have stayed with the person for another fifteen minutes.
+
+### Recording and analysis
+
+`session.recording` and `session.screen_recording` carry `state` and the sizes,
+plus signed links on the detail view only. `session.analysis` carries the
+summary, outcome and extracted fields. Both have pages of their own:
+[recordings](/observability/recordings) and
+[call analysis](/observability/call-analysis).
+
+`session.content_deleted_at` is the deletion receipt — when this call's content
+was erased, by your retention policy or by a delete. It is what tells an empty
+transcript apart from a call where nobody spoke.
+
+<CodeGroup>
+```bash cURL
+curl https://api.in.talqing.com/v1/calls/9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1 \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const call = await talqing.calls.get({
+  session_id: "9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1",
+});
+
+if (!call.snapshot.ok) console.log(call.snapshot.issues);
+
+for (const item of call.transcript) {
+  if (item.type === "function_call") console.log("called", item.metadata.data);
+  if (item.type === "function_call_output") console.log("returned", item.metadata.data);
+}
+
+console.log(call.session.userdata);
+```
+
+```python Python
+call = talqing.calls.get("9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1")
+
+if not call["snapshot"]["ok"]:
+    for issue in call["snapshot"]["issues"]:
+        print(issue["message"])
+
+for item in call["transcript"]:
+    if item["type"] in ("function_call", "function_call_output"):
+        print(item["type"], item["metadata"]["data"])
+
+print(call["session"]["userdata"])
+```
+</CodeGroup>
+
+## Aggregate counts
+
+`GET /v1/calls/stats` gives range totals for the same window rules — `start`
+defaults to 30 days ago, `end` to now, and `agent_id` narrows it.
+
+| Field | Meaning |
+| --- | --- |
+| `total_calls` | Every matching voice or video session. |
+| `priced_calls` | The subset billing has computed. |
+| `total_minutes` | Minutes across the window. |
+| `total_spend`, `avg_cost_per_call` | Over `priced_calls` only, so a call still being priced does not drag the average down. |
+| `judged_calls`, `successful_calls` | Over calls post-call analysis actually judged. A call it skipped is not a failure. |
+| `start`, `end` | The resolved window. |
+
+<CodeGroup>
+```bash cURL
+curl -G https://api.in.talqing.com/v1/calls/stats \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "start=2026-08-01T00:00:00Z"
+```
+
+```typescript TypeScript
+const stats = await talqing.calls.stats({ start: "2026-08-01T00:00:00Z" });
+console.log(stats.total_calls, stats.priced_calls, stats.avg_cost_per_call);
+```
+
+```python Python
+stats = talqing.calls.stats(start="2026-08-01T00:00:00Z")
+print(stats["total_calls"], stats["priced_calls"], stats["avg_cost_per_call"])
+```
+</CodeGroup>
+
+## Deleting a call
+
+`DELETE /v1/calls/{session_id}` erases the call's **content**. The call itself
+stays, with everything an invoice is built from.
+
+| Destroyed | Kept |
+| --- | --- |
+| The recording and the screen video | The call row, its duration and status |
+| The transcript, every tool call and its output | Its outcome and per-turn timings |
+| The session's userdata | Every cost column and the usage tables |
+| The summary and the extracted fields | `content_deleted_at`, stamped as the receipt |
+| The phone numbers on the call | |
+
+<Warning>
+**Erasing a person's last remaining call also erases what your agents remember
+about them.** The next call from that number meets an agent that has never
+heard of them. This cannot be undone.
+</Warning>
+
+It returns `202`: the work is scheduled rather than done, which is what stops a
+request to erase two hundred thousand calls arriving as two hundred thousand
+synchronous deletes. It normally completes within seconds. A call still in
+progress is refused with a `409` — ask again once it has ended.
+
+Retention runs exactly the same purge on a schedule. See
+[data retention and privacy](/platform/data-retention-and-privacy).
+
+To delete only the audio and keep the transcript, use
+`DELETE /v1/calls/{session_id}/recording` instead — that one is immediate.
+
+<CodeGroup>
+```bash cURL
+curl -X DELETE \
+  https://api.in.talqing.com/v1/calls/9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1 \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+await talqing.calls.delete({
+  session_id: "9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1",
+});
+```
+
+```python Python
+talqing.calls.delete("9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1")
+```
+</CodeGroup>
+
+<CardGroup cols={2}>
+  <Card title="Debugging agents" href="/observability/debugging-agents">
+    Symptom first: what to open, which field answers it, and the fix.
+  </Card>
+  <Card title="Close reasons" href="/observability/close-reasons">
+    Every value `close_reason` can take, and what to do about each.
+  </Card>
+</CardGroup>

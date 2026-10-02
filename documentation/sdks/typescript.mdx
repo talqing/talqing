@@ -1,0 +1,345 @@
+---
+title: "TypeScript"
+description: "The @talqing/sdk client: options, the call shape, errors, pagination, streams and types."
+---
+
+`@talqing/sdk` is the server-side client for the `/v1` API. It is generated from
+the OpenAPI document, so it carries every operation, every request shape and
+every response shape under the API's own names.
+
+```bash
+npm install @talqing/sdk
+```
+
+Node 20 or newer. The package ships an ESM build and a CommonJS build, so
+`import` and `require` both work, and it installs **one package and nothing
+else** — it is `fetch` and types. Joining a call from a browser is
+[`@talqing/react`](/sdks/react), a separate install, so a server-side consumer
+never pulls in the LiveKit browser stack.
+
+<Warning>
+This client holds a personal access token, which is a workspace credential with
+your full role and no scope. **Keep it on your server.** To let a browser join a
+call, mint a room token with `POST /v1/calls/token` and send the browser only
+that — see [web calls](/channels/web-calls).
+</Warning>
+
+## Creating a client
+
+```typescript
+import { TalqingClient } from "@talqing/sdk";
+
+const talqing = new TalqingClient({
+  baseUrl: "https://api.in.talqing.com",
+  token: process.env.TALQING_API_KEY,
+});
+```
+
+| Option | Type | What it does |
+| --- | --- | --- |
+| `baseUrl` | `string` | **Required, with no default.** The region you are working in. Trailing slashes are trimmed. An empty or whitespace value throws at construction. |
+| `token` | `string`, or a function returning a token (or null, or a promise of either) | Your personal access token. The function form is resolved per request, so a token you rotate is picked up without rebuilding the client. |
+| `credentials` | `RequestCredentials` | `"include"` to authenticate with the dashboard's cookie session instead of a token. Browser only. |
+| `headers` | `Record<string, string>` | Sent on every request. |
+| `fetch` | `typeof fetch` | Your own fetch — a proxy agent, a test double, an instrumented wrapper. |
+| `onUnauthorized` | `(error: TalqingApiError) => void` | Called when the API answers `401`. A dead credential is a session-level fact, not a per-call one, so handling it here saves every call site from re-deriving it. **The error is still thrown afterwards.** |
+
+Three properties come with the client:
+
+| Property | Type | What it is |
+| --- | --- | --- |
+| `talqing.baseUrl` | `string` | The normalized base URL. |
+| `talqing.http` | `Client` | The underlying transport, for interceptors and one-off requests. |
+| `talqing.oauthStartUrl(provider, integrationId?)` | `string` | Where to send a browser to authorize an integration. It is a redirect rather than an operation, so the OpenAPI document does not describe it and nothing generates it. |
+
+### Why `baseUrl` has no default
+
+A bundler inlines `NEXT_PUBLIC_*` at build time. A localhost fallback would
+therefore ship a production bundle pointing at a server that is not there, and
+the failure would surface as a connection error three layers down. Refusing to
+start says what is wrong at the line that is wrong.
+
+In the dashboard's own case that reads:
+
+```typescript
+const baseUrl = process.env.NEXT_PUBLIC_API_URL;
+if (!baseUrl) throw new Error("NEXT_PUBLIC_API_URL is required");
+
+const talqing = new TalqingClient({
+  baseUrl,
+  credentials: "include",
+  onUnauthorized: () => router.push("/login"),
+});
+```
+
+## The call shape
+
+Operations are reached by resource, exactly as the API names them. **Path and
+query parameters go in one flat object. A request body is keyed by its schema
+name.**
+
+```typescript
+await talqing.agents.list({ limit: 50 });
+await talqing.agents.get({ agent_id });
+await talqing.agents.versions.rollback({ agent_id, version: 3 });
+await talqing.calls.batches.pause({ batch_id });
+
+await talqing.telephony.phoneNumbers.assign({
+  number_id,
+  assignPhoneNumberRequest: { agent_id },
+});
+```
+
+The body key — `assignPhoneNumberRequest`, `createAgentRequest`,
+`outboundCallRequest` — is the generator's one ergonomic cost: it has no `body`
+option, so the body arrives as a named argument like everything else. It is
+uniform, so it is the same shape at every write call site, and your editor
+autocompletes the key.
+
+Every method returns the response body directly and throws on anything that is
+not a 2xx. There is no `{ data, error }` tuple to unwrap and no `!` to add.
+
+## Errors
+
+```typescript
+import { TalqingApiError } from "@talqing/sdk";
+
+try {
+  await talqing.agents.publish({ agent_id });
+} catch (error) {
+  if (error instanceof TalqingApiError) {
+    console.error(error.status, error.message); // 400 config is invalid
+    error.errors.forEach((problem) => console.error(problem));
+  }
+}
+```
+
+| Member | Type | What it holds |
+| --- | --- | --- |
+| `.status` | `number` | The HTTP status. |
+| `.message` | `string` | The envelope's `message` — one sentence, safe to show a person. |
+| `.errors` | `string[]` | The per-field problems. Always an array, empty when there was only one problem. |
+| `.response` | `Response` | The raw fetch response, for a header or the raw body. |
+| `.name` | `"TalqingApiError"` | |
+
+`instanceof` works even when a dependency graph pulls in both the ESM and the
+CommonJS copy of this package. Class identity would not survive that — an error
+thrown by one copy would fall straight through a `catch` written against the
+other, silently, because the error just keeps propagating. The class brands
+itself with a key from the global symbol registry and matches on the brand
+instead, so the check above cannot fall through.
+
+A failure that never reached the API — DNS, an abort, an offline machine — has
+no envelope to parse, so the transport's own error is rethrown unchanged.
+
+## Pagination
+
+```typescript
+import { paginate } from "@talqing/sdk";
+
+for await (const agent of paginate((query) => talqing.agents.list(query))) {
+  console.log(agent.config.name);
+}
+```
+
+`paginate<T>(page, { limit })` is an async generator over
+`Page<T>`. It requests `limit` rows at a time — 200 by default — and stops when
+`has_more` is false. Filters go in the closure, alongside the query it hands
+you. Full detail on [pagination](/api-reference/pagination).
+
+## Streams
+
+The six event-stream endpoints return an object with a `stream` property, which
+is an async iterable of typed frames. Narrow on `event`.
+
+```typescript
+const controller = new AbortController();
+const { stream } = await talqing.conversations.events(
+  { conversation_id },
+  { signal: controller.signal },
+);
+
+for await (const frame of stream) {
+  if (frame.event === "assistant.delta") process.stdout.write(frame.text);
+  if (frame.event === "turn" && frame.status === "done") controller.abort();
+}
+```
+
+`talqing.copilot.agents.stream`, `copilot.tools.stream` and
+`copilot.tasks.stream` work the same way. The second argument also takes `sseMaxRetryAttempts`,
+`sseDefaultRetryDelay`, `sseMaxRetryDelay`, `onSseError` and `onSseEvent`. See
+[streaming](/api-reference/streaming) for every frame these emit.
+
+## Types
+
+Every request and response shape is exported under the API's own name:
+
+```typescript
+import type {
+  AgentConfig,
+  AgentResponse,
+  CallOutcome,
+  OperationRequest,
+  Page,
+} from "@talqing/sdk";
+```
+
+`Page<T>` is the shape every list endpoint returns. OpenAPI has no generics, so
+the document spells each instantiation out by hand — `PageAgentResponse`,
+`PageCallSummaryResponse` — but TypeScript is structural, so those satisfy
+`Page<AgentResponse>` and generic helpers work over them.
+
+Three more exports fill gaps the document leaves:
+
+- `JsonObject`, `JsonValue`, `JsonPrimitive` — for the free-form fields:
+  `userdata`, `vars`, a tool's `json_schema`, tool arguments. `JsonObject` is an
+  object of `unknown`, which is exactly what the API promises, so a value read
+  off a response drops into it without a cast. `JsonValue` is the recursive form
+  for a payload you build: it refuses a `Date` or a class instance that would
+  not survive `JSON.stringify`.
+- The vocabulary aliases — `CallOutcome`, `ReasoningEffort`, `CallType`,
+  `CallBatchStatus`, `CallBatchRecipientStatus`, `EmailBatchStatus`,
+  `EmailRecipientStatus`, `NumberReadiness`, `TaskErrorType`, `PublishStore`,
+  `ObservabilityGranularity`, `ObservabilityChannel`, `OnError`,
+  `OperationRequest`, `ConversationItemType`, `DeliveryStatus`,
+  `ConversationItemRole`, `ConversationItemDirection`,
+  `ConversationItemVisibility`, `CopilotItem`, `PriceLine`,
+  `TelephonyAccountStatus`, `TelephonyProvider`, `ObservabilityLatencyMetric`,
+  `ObservabilityCloseReasonBucket`, `CatalogEntry`, `CatalogPricing`. These name
+  the literal unions the document spells inline, by reading them off the field
+  that carries them — so they cannot drift from the contract.
+- `API_VERSION` — the API version the generated half was built against.
+
+## The resource namespaces
+
+| Namespace | Sub-namespaces |
+| --- | --- |
+| `agents` | `versions` |
+| `tools` | `versions` |
+| `tasks` | `runs` |
+| `calls` | `analysis`, `batches` (with `recipients`), `recording`, `screenRecording` |
+| `conversations` | `items`, `messages`, `sessions` |
+| `telephony` | `accounts`, `phoneNumbers`, `providers` |
+| `email` | `batches` (with `recipients`), `senders` |
+| `integrations` | `mcpTools`, `triggers` |
+| `catalog` | `voices` (with `elevenlabs`), `avatars` |
+| `billing` | `credits` |
+| `copilot` | `agents`, `tools`, `tasks` |
+| `webhooks`, `secrets`, `providerKeys`, `observability`, `schemas` | — |
+| `health()` | A method on the client itself. |
+
+Every method under them is in the **Endpoints** section of the API reference,
+where each operation's id is its path here: `telephony.phoneNumbers.assign` is
+`POST /v1/telephony/phone-numbers/{number_id}/assign`.
+
+## Worked examples
+
+### Create and publish an agent
+
+```typescript
+const agent = await talqing.agents.create({
+  createAgentRequest: {
+    config: {
+      name: "Support line",
+      channel: "text",
+      prompt: "You are the support desk for Acme. Be brief and specific.",
+      llm: { provider: "openai", model: "gpt-5.6-luna" },
+    },
+  },
+});
+
+const published = await talqing.agents.publish({ agent_id: agent.id });
+console.log(published.version, published.warnings);
+```
+
+`PATCH /v1/agents/{agent_id}` takes only the fields you change — see
+[updating an agent](/agents/overview#updating-an-agent). Publishing runs
+full validation and refuses with the errors if it fails; warnings come back on
+the response and do not block.
+
+### Place an outbound call
+
+```typescript
+const call = await talqing.calls.outbound({
+  outboundCallRequest: {
+    agent_id: agent.id,
+    from_phone_number_id: numberId,
+    to: "+919876543210",
+    userdata: { name: "Priya", plan: "pro" },
+  },
+});
+console.log(call.session_id);
+```
+
+<Warning>
+This places a live, billable call to a real person. It returns when the call is
+placed, not when it is answered, and there is no idempotency key — a retried
+request dials again. See [outbound calls](/telephony/outbound-calls).
+</Warning>
+
+### Page through calls
+
+```typescript
+import { paginate } from "@talqing/sdk";
+
+const failures = [];
+for await (const call of paginate((query) =>
+  talqing.calls.list({ ...query, agent_id: agent.id, outcome: "failure" }),
+)) {
+  failures.push({ id: call.id, reason: call.close_reason });
+}
+```
+
+### Read the credit balance
+
+```typescript
+const credits = await talqing.billing.credits.get();
+console.log(credits.balance, credits.currency, credits.voice_minutes_remaining);
+
+for await (const entry of paginate((query) => talqing.billing.credits.ledger(query))) {
+  console.log(entry.created_at, entry.kind, entry.amount, entry.balance_after);
+}
+```
+
+The balance belongs to whichever region this client's `baseUrl` points at.
+Credits do not move between regions, so label it with the region before you show
+it to anyone. See [pricing and credits](/get-started/pricing-and-credits).
+
+### Chat with a text agent
+
+```typescript
+import { randomUUID } from "node:crypto";
+
+const chat = await talqing.chats.create({
+  createChatRequest: { contact_key: "user-42", agent_id: agent.id },
+});
+
+const turn = await talqing.chats.messages.create({
+  chat_id: chat.id,
+  chatMessageRequest: {
+    message: "Where is my order?",
+    client_message_id: randomUUID(),
+  },
+});
+
+for (const item of turn.items) {
+  if (item.type === "message") console.log(item.text);
+}
+
+await talqing.chats.end({ chat_id: chat.id });
+```
+
+The reply comes back on the message request itself. `client_message_id` is your
+own UUID and is the one deduplication key in this API: re-sending with the same
+one returns the same turn rather than posting a second message, so a retry is
+safe. A chat stays open until something ends it — see
+[chats](/channels/text-conversations).
+
+<CardGroup cols={2}>
+  <Card title="React SDK" href="/sdks/react">
+    The layer that joins a voice or video call from a browser.
+  </Card>
+  <Card title="Errors" href="/api-reference/errors">
+    Every status code and what to retry.
+  </Card>
+</CardGroup>

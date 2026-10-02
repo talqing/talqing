@@ -1,0 +1,95 @@
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.0
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      # Runs from the backend venv, not an isolated one: mypy needs the real
+      # livekit/pydantic packages installed to resolve any of this. Checks the
+      # whole tree rather than staged files — it is ~2s warm, and a per-file run
+      # misses breakage in the modules that import what you changed.
+      - id: mypy
+        name: mypy
+        language: system
+        entry: bash -c 'cd backend && .venv/bin/mypy'
+        types: [python]
+        pass_filenames: false
+
+      # The lint gate that `next build` applies: an ESLint *error* fails the
+      # Cloudflare Pages deploy, `next dev` never reports it, and we don't run
+      # `next build` locally — so this is the only place it gets caught before
+      # the push. Whole-project like mypy above: it is ~1s, and `next lint`
+      # takes directories rather than arbitrary staged paths.
+      - id: next-lint
+        name: next lint
+        language: system
+        entry: bash -c 'cd frontend && node_modules/.bin/next lint'
+        files: ^frontend/.*\.[jt]sx?$
+        pass_filenames: false
+
+      # The frontend resolves the three @talqing packages through their built
+      # dist/, so a staged source change has to be compiled before the typecheck
+      # below can see it — otherwise we check against yesterday's types while
+      # the Cloudflare build, which runs `prebuild`, checks against today's.
+      # dist/ is gitignored, so the rebuild leaves nothing for git to pick up.
+      # The workspace's `build` runs them in dependency order: sdk, client, react.
+      - id: sdk-build
+        name: build typescript sdk
+        language: system
+        entry: bash -c 'cd clients/typescript && npm run build'
+        files: ^clients/typescript/(packages/[^/]+/(src/.*\.tsx?|tsconfig.*\.json)|tsconfig\.base\.json|scripts/.*\.mjs)$
+        pass_filenames: false
+
+      # The three packages' own typecheck, which the frontend's cannot stand in
+      # for: it only ever compiles what the dashboard happens to import, and
+      # packages/react/typetests/auth.tsx is where the call-auth union's mutual
+      # exclusion is asserted.
+      - id: sdk-typecheck
+        name: typecheck typescript sdk
+        language: system
+        entry: bash -c 'cd clients/typescript && npm run typecheck'
+        files: ^clients/typescript/(packages/[^/]+/(src|typetests)/.*\.tsx?|packages/[^/]+/tsconfig.*\.json|tsconfig\.base\.json)$
+        pass_filenames: false
+
+      # The other half of the `next build` gate: Cloudflare's step is "Linting
+      # and checking validity of types", and a type error fails the deploy just
+      # as hard as a lint error. Runs after sdk-build so it sees fresh types.
+      - id: frontend-typecheck
+        name: frontend typecheck
+        language: system
+        entry: bash -c 'cd frontend && node_modules/.bin/tsc --noEmit'
+        files: ^(frontend/(.*\.[jt]sx?|tsconfig\.json)|clients/typescript/packages/[^/]+/src/.*\.tsx?)$
+        pass_filenames: false
+
+      # `clients/python/src/talqing/gen` is generated from openapi/openapi.json and
+      # checked in, like the document itself. The test suite asserts it is what
+      # the document generates and that every operation in the document is
+      # reachable, so a route change that re-exports the spec but forgets the SDK
+      # fails at the commit rather than at someone's next `pip install`. mypy runs
+      # beside it because nothing else type-checks this package.
+      #
+      # README.md is in the pattern because test_readme.py reads it: every call
+      # the README shows is bound against the real signatures, and a doc-only
+      # commit is exactly when that goes stale.
+      - id: python-sdk
+        name: python sdk
+        language: system
+        entry: bash -c 'cd clients/python && ../../backend/.venv/bin/python -m pytest -q && ../../backend/.venv/bin/mypy'
+        files: ^(openapi/openapi\.json|clients/python/(.*\.py|README\.md))$
+        pass_filenames: false
+
+      - id: clean-pycache
+        name: clean __pycache__
+        language: system
+        entry: bash -c 'find . -type d -name __pycache__ -prune -exec rm -rf {} +'
+        pass_filenames: false
+        always_run: true

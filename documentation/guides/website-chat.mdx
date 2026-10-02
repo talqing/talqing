@@ -1,0 +1,431 @@
+---
+title: "Website chat"
+description: "Put a text agent in your own React app: your server starts the chat and mints a token, your page streams the reply."
+---
+
+You are going to put a text agent inside your own React application: a chat panel for signed-in visitors, streaming replies token by token, accepting photos, and answering from data only your app knows. **There is no drop-in chat widget, no script tag and no iframe.** This is an SDK integration you build — Talqing gives you a published agent, a chat API and a browser token for one chat, and you own every pixel in front of them. When it is finished you will have one small endpoint of your own and one React component.
+
+## What you need
+
+| | Why |
+| --- | --- |
+| One LLM provider key | A text agent has no speech models, so that is the whole model stack. See [provider keys](/get-started/provider-keys). |
+| A personal access token with the EDITOR role | Starting a chat and minting its browser token both need it — which is exactly why it lives on your server. |
+| A server you control | Next.js route handlers here, but any server works. |
+| A stable id per signed-in visitor | Your own user id, your own account id. It becomes `contact_key`. |
+| An endpoint on your app the agent may call | Optional, for the tool in step 6. |
+
+**Text costs $0.0001 per answered message**, from your credit balance, on top of what your own LLM key was charged. There is no per-minute charge on this channel. See [pricing and credits](/get-started/pricing-and-credits).
+
+## The build
+
+<Steps>
+
+<Step title="Build and publish the text agent">
+
+`channel: "text"` removes the speech slots — no `stt`, no `tts`, no `greeting`, no turn handling. What is left is a prompt, a model, and whatever you attach.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/agents \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "name": "Northwind in-app help",
+      "channel": "text",
+      "prompt": "You are the in-app assistant for Northwind Tools, a warehouse management product. You are talking to a signed-in customer.\n\nAnswer questions about their account, their orders and how the product works. Look things up with your tools before you answer anything specific to them; never state a number you did not read from a tool.\n\nIf you do not know, say so and offer to get a person. Keep replies to two or three short paragraphs, and use plain sentences rather than long bulleted lists.",
+      "llm": { "provider": "openai", "model": "gpt-5.6-luna" }
+    }
+  }'
+
+curl -sS -X POST "https://api.in.talqing.com/v1/agents/$AGENT_ID/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const agent = await talqing.agents.create({
+  createAgentRequest: {
+    config: {
+      name: "Northwind in-app help",
+      channel: "text",
+      prompt: "You are the in-app assistant for Northwind Tools…",
+      llm: { provider: "openai", model: "gpt-5.6-luna" },
+    },
+  },
+});
+await talqing.agents.publish({ agent_id: agent.id });
+```
+
+```python Python
+agent = talqing.agents.create(
+    config={
+        "name": "Northwind in-app help",
+        "channel": "text",
+        "prompt": "You are the in-app assistant for Northwind Tools…",
+        "llm": {"provider": "openai", "model": "gpt-5.6-luna"},
+    }
+)
+talqing.agents.publish(agent["id"])
+```
+</CodeGroup>
+
+Nothing can talk to a draft. Starting a chat with an unpublished agent is refused.
+
+<Note>
+**Decide what a returning visitor's next chat should know.** Inside one chat the agent always sees the whole chat. What a *new* chat starts with is `conversation.context`, exactly as on a call: `none` (the default) starts clean, `summary` briefs the agent on the visitor's earlier chats, and `transcript` continues their last conversation in full — at the price of every old message being in the model's context on every turn. See [conversation memory](/agents/conversation-memory).
+</Note>
+
+</Step>
+
+<Step title="Start the chat on your server, and mint a token for the browser">
+
+<Warning>
+A personal access token is a **workspace credential**. It can read, change and delete every agent, call, number and conversation in the workspace. **It must never reach a browser** — not in a bundle, not in a public environment variable, not behind a fetch the browser makes directly.
+</Warning>
+
+The browser gets a **chat token** instead: good for one hour, for one chat, and for nothing else. Your server starts the chat — or finds the one this visitor already has open — and mints the token.
+
+```typescript app/api/chat/token/route.ts
+import { TalqingClient } from "@talqing/sdk";
+import { getSession } from "@/lib/auth"; // your own sign-in
+
+const talqing = new TalqingClient({
+  baseUrl: "https://api.in.talqing.com",
+  token: process.env.TALQING_API_KEY,
+});
+
+const AGENT_ID = "6d3f2a10-9b74-4c58-8e21-40af7c9b1d35";
+
+export async function POST() {
+  const session = await getSession();
+  if (!session) return new Response("Unauthorized", { status: 401 });
+
+  const contact_key = `app-user:${session.userId}`;
+
+  // Reuse the visitor's open chat. Starting a second one would end it.
+  const open = await talqing.chats.list({
+    contact_key,
+    agent_id: AGENT_ID,
+    status: "open",
+    limit: 1,
+  });
+  const chat =
+    open.items[0] ??
+    (await talqing.chats.create({
+      createChatRequest: {
+        contact_key,
+        agent_id: AGENT_ID,
+        userdata: {
+          name: session.name,
+          plan: session.plan,
+          account_id: session.accountId,
+        },
+      },
+    }));
+
+  // { chat_id, token, expires_at, api_url } — hand it to the page unchanged.
+  return Response.json(await talqing.chats.tokens.create({ chat_id: chat.id }));
+}
+```
+
+Three things are being decided here, and they are worth separating:
+
+- **`contact_key` is identity.** Derive it from your own session, never from anything the browser sends. Do not use the prefixes `telegram:`, `whatsapp:`, `sip:`, `stream:` or a CoPilot's — they are reserved.
+- **`userdata` is what the agent knows about them.** It is readable as `{{userdata.name}}` from the prompt and from tools, and it is merged onto that contact's record, so it is there again in their next chat. Because your server writes it, the agent's idea of who it is talking to comes from your session and not from anything the visitor typed. See [userdata](/agents/userdata).
+- **One open chat per visitor.** `POST /v1/chats` ends the contact's open chat with the same agent, so look for the open one first. That is also what makes this endpoint safe to call on every page load and every token refresh.
+
+</Step>
+
+<Step title="Render it">
+
+`TalqingChat` from `@talqing/client` is the browser side. It sends each message with `stream: true`, so the reply arrives on the same request as it is generated.
+
+```bash
+npm install @talqing/client
+```
+
+```tsx components/Chat.tsx
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { TalqingChat, type TalqingChatItem } from "@talqing/client";
+
+type Bubble = { id: string; who: "you" | "agent"; text: string };
+
+const toBubbles = (items: TalqingChatItem[]): Bubble[] =>
+  items
+    .filter((item) => item.type === "message" && item.text)
+    .map((item) => ({
+      id: item.id,
+      who: item.role === "user" ? "you" : "agent",
+      text: item.text ?? "",
+    }));
+
+export default function Chat() {
+  const chat = useMemo(
+    () =>
+      new TalqingChat({
+        fetchToken: async () => (await fetch("/api/chat/token", { method: "POST" })).json(),
+      }),
+    [],
+  );
+  const [bubbles, setBubbles] = useState<Bubble[]>([]);
+  const [draft, setDraft] = useState("");
+  const [streaming, setStreaming] = useState("");
+  const [working, setWorking] = useState(false);
+  const [ended, setEnded] = useState(false);
+
+  // A reload picks the open chat back up.
+  useEffect(() => {
+    void chat.items().then((items) => setBubbles(toBubbles(items)));
+  }, [chat]);
+
+  async function send(event: React.FormEvent) {
+    event.preventDefault();
+    const text = draft.trim();
+    if (!text) return;
+    setDraft("");
+    setWorking(true);
+
+    const { events, result } = chat.send(text);
+    let reply = "";
+    for await (const frame of events) {
+      // Append. A delta is an increment, never the running total.
+      if (frame.event === "assistant.delta") setStreaming((reply += frame.text));
+    }
+    const turn = await result;
+
+    setStreaming("");
+    setWorking(false);
+    // `canceled`: the visitor sent a newer message, and that send has the reply.
+    setBubbles((current) => [...current, ...toBubbles([turn.input, ...turn.items])]);
+    if (turn.chat_status === "ended") setEnded(true);
+  }
+
+  return (
+    <div>
+      {bubbles.map((bubble) => (
+        <p key={bubble.id}>
+          <strong>{bubble.who}:</strong> {bubble.text}
+        </p>
+      ))}
+      {streaming && (
+        <p>
+          <strong>agent:</strong> {streaming}
+        </p>
+      )}
+      {working && !streaming && <p>Thinking…</p>}
+      {ended ? (
+        <p>This chat has ended.</p>
+      ) : (
+        <form onSubmit={send}>
+          <input value={draft} onChange={(event) => setDraft(event.target.value)} />
+          <button type="submit">Send</button>
+        </form>
+      )}
+    </div>
+  );
+}
+```
+
+What the turn gives you:
+
+| | |
+| --- | --- |
+| `events` | `assistant.started`, `assistant.delta` and `assistant.completed` as the reply is generated, `item.created` for each item, then `turn.result`. |
+| `result` | The whole turn, read from the record: `status`, `items`, and `chat_status`. Build the transcript from this, not from the deltas. |
+| `status: "canceled"` | The visitor sent a newer message before this one was answered. It has no reply; the newer send does. |
+| `status: "error"` | The turn failed; `error` says why. Show it and let them try again. |
+| `chat_status: "ended"` | The agent ended the chat with `end_call`. A further message is refused — call your token endpoint again to start a new chat. |
+
+### What the browser cannot see
+
+A chat token is the visitor's own credential, so it shows only what a visitor should see: **no tool calls, no handoff rows**, and no cost, analysis or userdata on the chat. The "Thinking…" line above covers the gap while a tool runs. The full record — every tool call and its output — is on your server's side of the API and in the dashboard.
+
+</Step>
+
+<Step title="End the chat">
+
+**A chat never times out.** A visitor who closes the tab leaves it open, and an open chat is never analysed and never sends `session.completed`. So decide what ends one:
+
+- **The agent**, with an [`end_call`](/tools/end-call) tool, when the conversation is plainly over.
+- **The visitor**, with a "New chat" button that calls `chat.end()`.
+- **Your server**, on a schedule: list `GET /v1/chats?status=open`, and `POST /v1/chats/{id}/end` the ones that have been open longer than you want to keep them.
+
+When a chat ends, the agent's `on_exit` hook runs, analysis writes its summary and outcome, and `session.completed` is sent. The visitor's next visit starts a new chat through the same token endpoint.
+
+</Step>
+
+<Step title="Let the visitor attach a photo">
+
+An image and its caption arrive as **one turn, one item and one bubble** — send them together rather than as two messages, because a photo the agent has to reconcile with a separate sentence is a worse conversation than the one the visitor wrote.
+
+`talqingImageDataUrl` validates, downscales and encodes a `File` into the `data:` URL a message carries, and throws the sentence to show when the file is refused.
+
+```tsx
+import { talqingImageDataUrl } from "@talqing/client";
+
+const images = await Promise.all(
+  files.slice(0, 4).map(async (file) => ({
+    data_url: await talqingImageDataUrl(file),
+    filename: file.name,
+  })),
+);
+
+const { result } = chat.send(caption, { images });
+```
+
+The limits, all enforced server-side: **at most 4 images per message**, JPEG, PNG or WebP, 10 MB each, and at most 100 images across one conversation. Anything larger than 1568 pixels on its longest edge is downscaled for you before the model sees it.
+
+**Whether the agent can read an image is decided by its model, not by a setting.** There is no image toggle on an agent; the `vision` flag on the model's catalog entry is where it says so, and a message with images to an agent on a model without it is refused, naming the model. See [vision and images](/agents/vision-and-images).
+
+</Step>
+
+<Step title="Give the agent a tool that reads your app's data">
+
+The agent can only be useful about this visitor if it can look them up. One tool, one capability, keyed on the `account_id` **your server** put in userdata — so identity comes from your session and never from something the model or the visitor supplied.
+
+```json
+{
+  "name": "get_account_summary",
+  "description": "Look up this customer's plan, seat count, current usage and renewal date. Call it before answering anything about their account, their limits or their bill.",
+  "json_schema": { "type": "object", "properties": {}, "required": [] },
+  "operations": [
+    {
+      "kind": "http",
+      "config": {
+        "method": "GET",
+        "url": "https://app.northwind.example/internal/accounts/{{userdata.account_id}}/summary",
+        "headers": { "Authorization": "Bearer {{secrets.NORTHWIND_INTERNAL_TOKEN}}" },
+        "timeout": 10
+      }
+    }
+  ]
+}
+```
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/tools \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @get_account_summary.json
+
+curl -sS -X POST "https://api.in.talqing.com/v1/tools/$TOOL_ID/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"changelog": "First version"}'
+```
+
+```typescript TypeScript
+const tool = await talqing.tools.create({ createToolRequest: definition });
+await talqing.tools.publish({
+  tool_id: tool.id,
+  publishToolRequest: { changelog: "First version" },
+});
+```
+
+```python Python
+tool = talqing.tools.create(**definition)
+talqing.tools.publish(tool["id"], changelog="First version")
+```
+</CodeGroup>
+
+Then attach it — `{"config": {"tools": [{ "tool_id": "…" }]}}`, with any tools the agent already has, since a list is sent whole — and publish the agent again. Publishing pins the tool version live at that moment, so a later tool edit changes nothing until you publish the agent again.
+
+The tool has an empty `json_schema` on purpose: there is nothing for the model to decide. Every argument you can avoid is an argument it cannot get wrong. Saving it warns that `{{userdata.account_id}}` is read but not published by this tool — that warning is correct and expected here, because it is your `/api/chat/token` route that puts it there. See [templating and data](/tools/templating-and-data).
+
+</Step>
+
+<Step title="Decide what happens when the agent cannot help">
+
+Read this before you promise a visitor a human, because the honest answer is short.
+
+**On text, Talqing has no transfer to a person.** The `transfer` operation is phone only — on a web or text session it fails with *transfer is only available on phone calls*. A `handoff` moves the conversation to another **agent**, not to a colleague. And there is no API that writes a human's reply into the thread: `POST /v1/chats/{id}/messages` creates the *visitor's* message and triggers the agent, which is the only thing it does.
+
+What you have instead is the fact that **your server is in the middle**. Handover on this surface is a routing decision you own: end the chat, stop handing that visitor a token, and route them to your own support desk instead. The agent's part is to file the escalation and say so.
+
+```json
+{
+  "name": "escalate_to_a_person",
+  "description": "File this conversation for a person on the support team. Use it only after you have tried to answer, and either the customer has asked for a person or the answer needs access you do not have. Tell them what will happen next before you call it.",
+  "json_schema": {
+    "type": "object",
+    "properties": {
+      "reason": {
+        "type": "string",
+        "description": "Why this needs a person, in one sentence, written for the colleague who will read it."
+      },
+      "summary": {
+        "type": "string",
+        "description": "What the customer wants and what you have already tried, in three or four sentences, so nobody has to read the whole thread."
+      }
+    },
+    "required": ["reason", "summary"]
+  },
+  "operations": [
+    {
+      "kind": "http",
+      "config": {
+        "method": "POST",
+        "url": "https://app.northwind.example/internal/escalations",
+        "headers": {
+          "Authorization": "Bearer {{secrets.NORTHWIND_INTERNAL_TOKEN}}",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "account_id": "{{userdata.account_id}}",
+          "reason": "{{args.reason}}",
+          "summary": "{{args.summary}}"
+        }
+      }
+    }
+  ]
+}
+```
+
+The response comes back to the model rather than being hidden, so it can tell the visitor the ticket number your endpoint returned. When your desk picks the thread up, flip your own routing flag and end the chat with `POST /v1/chats/{id}/end`. A further message from the browser is then refused, and the chat is analysed and closed like any other.
+
+</Step>
+
+</Steps>
+
+## Test it
+
+1. **Talk to it before you wire anything.** Open the agent in the dashboard and use the **Test chat** panel. It runs the published version with the same prompt and tools a real visitor gets.
+2. **Send from the page.** Watch the order on `events`: `assistant.started`, deltas, `assistant.completed`, then `turn.result`.
+3. **Reload mid-chat.** The token endpoint should find the open chat, and `chat.items()` should repaint the same transcript. If you get an empty panel, the endpoint started a new chat instead of reusing the open one.
+4. **Sign in as a second user.** Two `contact_key` values, two chats, no leakage. If both see the same history, your key is not coming from your session.
+5. **Ask something only the tool knows.** Then check the call actually happened: the `function_call` row is in `GET /v1/chats/{id}/items` when you read it with your workspace token.
+6. **End it.** `GET /v1/chats/{id}` then shows `status: "ended"` and, a few seconds later, `analysis`.
+
+## What to watch
+
+- **The conversations inbox.** **Monitor → Conversations** in the dashboard is a contact-centric inbox with a live timeline: every thread, every item, and which agent version handled each turn. That is where you read what your agent actually said to somebody. See [conversations](/observability/conversations).
+- **Open chats.** `GET /v1/chats?status=open` is every chat nothing has ended yet. A number that only grows means nothing is ending them — see step 4.
+- **Latency.** The latest message wins: a newer message supersedes one still being answered, and the older request returns `status: "canceled"` with `superseded_by_item_id`. What Talqing measures on text is the message arriving until the reply's first token, tools included; each reply's `latency` in the chat's items breaks it into stages. Do not compare it to voice latency, which includes speech.
+- **Cost.** Every turn re-reads the whole chat — and, under `transcript`, everything before it — so a long-running thread is a growing input-token bill on your own key. Talqing's part is $0.0001 per answered message.
+
+## Where it falls short
+
+- **No widget.** No `<script>` tag, no embed, no hosted bubble, no themeable component. Everything above is code you write and maintain.
+- **No chat without a server of yours.** A browser can only talk to a chat your server started and minted a token for; there is no public agent id it could start one with. A "chat with us" box on a marketing page still needs your own endpoint in front of it, and your own way of telling one anonymous visitor from another.
+- **No read receipts and no typing indicator from us on this surface.** `delivery_status` on an item is about delivery to a messaging provider; on web it is `not_applicable`, because you are the surface. The "thinking" state in the component above is inferred from the request being in flight, not reported. On [Telegram](/channels/telegram), where we own delivery, the typing indicator and delivery status are real; here they are yours to draw.
+- **No tool activity in the browser.** A chat token never sees tool calls, so the page cannot say which tool is running.
+- **No transfer to a human, and no way to write into the thread as one.** Covered in step 7. If your product needs a shared inbox where agents and people take turns in one thread, the thread has to live in your system and Talqing is one participant in it.
+- **No inactivity timeout.** Nothing ends a chat for you, and an open chat has no analysis. Covered in step 4.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Chats" href="/channels/text-conversations">
+    Starting and ending, streaming, browser tokens, and what a chat costs.
+  </Card>
+  <Card title="Tools overview" href="/tools/overview">
+    What a tool is, and the operation tree behind one.
+  </Card>
+  <Card title="Conversations" href="/observability/conversations">
+    Reading a person's whole history across every surface.
+  </Card>
+</CardGroup>

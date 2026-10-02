@@ -1,0 +1,62 @@
+{
+  "name": "@talqing/client",
+  "version": "0.6.0",
+  "description": "The Talqing call protocol over a LiveKit room — token, userdata, images, screen share and frontend RPC. Framework-free.",
+  "license": "MIT",
+  "homepage": "https://talqing.com",
+  "bugs": {
+    "email": "hello@talqing.com"
+  },
+  "keywords": [
+    "talqing",
+    "ai",
+    "agents",
+    "voice",
+    "video",
+    "livekit",
+    "webrtc"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node ../../scripts/dist-markers.mjs",
+    "dev": "tsc -w -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "livekit-client": "^2.20.2"
+  },
+  "devDependencies": {
+    "livekit-client": "^2.22.3",
+    "typescript": "~5.9.3"
+  }
+}

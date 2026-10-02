@@ -1,0 +1,310 @@
+---
+title: "Conditional handoffs"
+description: "The handoff operation: routing decided by a tool's operation tree after a lookup, rather than by the model."
+---
+
+Some routing is not the model's to decide. "Enterprise accounts go to their
+account manager" is a fact about the account, not a judgement about what the
+caller said — the tree should look it up and act on it. That is what the
+`handoff` **operation** is for: one operation inside a
+[tool's operation tree](/tools/operation-tree) that moves the conversation to
+another agent. It is still agent → agent; reaching a person is a
+[transfer](/tools/transfer).
+
+<Note>
+When the **model** should pick the desk from what the caller wants, put the
+destinations on the agent's own [`handoffs`](/teams/handoffs) field instead.
+That is one line per edge; this is a tool with a lifecycle, a version and a
+publish step.
+</Note>
+
+## When the tree should decide
+
+| The decision follows from | Use |
+| --- | --- |
+| What the caller said they need | `handoffs` on the agent |
+| A field on the account you just looked up | The `handoff` operation |
+| Whether the caller passed a check the tool ran | The `handoff` operation |
+| Time of day, or anything the tree can compute | The `handoff` operation |
+
+The two live side by side on one agent. A front desk can route by intent through
+its `handoffs` **and** carry an escalation tool that routes by tier.
+
+## The mechanics
+
+The operation's full field reference is on
+[the handoff operation](/tools/handoff-operation). What matters for this pattern:
+
+- **It is terminal in its chain.** Nothing may follow it in the top-level list
+  or in a `then`/`else` branch, and branches do not rejoin. Anything the tool
+  must do first — logging the routing decision, stamping `userdata` — goes
+  before it.
+- **Name exactly one target.** `target_agent_id` is a stored agent and **must
+  already be published** — publishing the tool fails otherwise. `agent_name`
+  resolves against the [team defined on the call](/teams/agent-teams-on-a-call),
+  which cannot be checked when the tool is published, so it publishes with a
+  warning instead.
+- **`context: "summary"` needs a `summary`, and it is a value rather than a
+  request.** This tree runs *after* the model's tool call, so there is no
+  argument being written at that moment to take one from. Point it at where the
+  text comes from: `{{args.summary}}` — a property on this tool's own
+  `json_schema` that the model filled — or `{{tooldata.brief}}` published by an
+  earlier `http` or `code` operation, or fixed prose. There is no second LLM
+  call either way. A `summary` under any other context is an error.
+- **`recent_turns` works exactly as it does on a `handoffs` entry**: the tail
+  that crosses verbatim, defaulting to two turns under `summary` and none under
+  `none`, and refused under `transcript`. See
+  [context policies](/teams/context-policies).
+- **`message` is said while the target loads**, queued before the target is
+  built, exactly as the config field's is.
+- **The cap is shared.** Both kinds of handoff count against the same limit of
+  25 on one call.
+
+The cross-agent rules — same channel, same pipeline, same avatar on video, the
+same voice out of an expressive agent — are checked when an **agent** carrying
+the tool is published, because only then is there a source agent to compare
+against. A tool published on its own is checked only for the target existing and
+being published.
+
+## A complete tool
+
+A support line that escalates. The tool looks the caller's account up by the
+number they called from, and hands enterprise accounts to their own desk;
+everyone else stays with the agent that called it.
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/tools \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "route_by_account",
+    "description": "Call this once you know what the caller needs help with, before you start answering. It checks which support desk owns this account and moves the call there if it should not be handled here.",
+    "json_schema": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "What the caller is asking for, in one sentence, in your own words."
+        }
+      },
+      "required": ["reason"]
+    },
+    "operations": [
+      {
+        "kind": "http",
+        "config": {
+          "method": "GET",
+          "url": "https://api.example.com/accounts/lookup",
+          "query": { "phone": "{{system_vars.human_phone_number}}" },
+          "headers": { "Authorization": "Bearer {{secrets.CRM_API_KEY}}" },
+          "timeout": 8
+        },
+        "silent": true,
+        "publish_fields": [
+          { "path": "tier", "store": "tooldata" },
+          { "path": "account.id", "key": "account_id", "store": "tooldata" }
+        ]
+      },
+      {
+        "kind": "if",
+        "config": { "left": "{{tooldata.tier}}", "op": "eq", "right": "enterprise" },
+        "then": [
+          {
+            "kind": "handoff",
+            "config": {
+              "target_agent_id": "e5b3c910-77a4-4d2f-8c61-3b9d0e4f2a58",
+              "context": "summary",
+              "summary": "The caller is asking about: {{args.reason}}. This is enterprise account {{tooldata.account_id}}.",
+              "recent_turns": 2,
+              "message": "You have a dedicated account manager for this - let me bring them in."
+            }
+          }
+        ],
+        "else": [
+          {
+            "kind": "generate_reply",
+            "config": {
+              "instructions": "Tell the caller you can help with this yourself, and ask for the first detail you need."
+            }
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+```typescript TypeScript
+const tool = await talqing.tools.create({
+  createToolRequest: {
+    name: "route_by_account",
+    description:
+      "Call this once you know what the caller needs help with, before you start answering. It checks which support desk owns this account and moves the call there if it should not be handled here.",
+    json_schema: {
+      type: "object",
+      properties: {
+        reason: {
+          type: "string",
+          description: "What the caller is asking for, in one sentence, in your own words.",
+        },
+      },
+      required: ["reason"],
+    },
+    operations: [
+      {
+        kind: "http",
+        config: {
+          method: "GET",
+          url: "https://api.example.com/accounts/lookup",
+          query: { phone: "{{system_vars.human_phone_number}}" },
+          headers: { Authorization: "Bearer {{secrets.CRM_API_KEY}}" },
+          timeout: 8,
+        },
+        silent: true,
+        publish_fields: [
+          { path: "tier", store: "tooldata" },
+          { path: "account.id", key: "account_id", store: "tooldata" },
+        ],
+      },
+      {
+        kind: "if",
+        config: { left: "{{tooldata.tier}}", op: "eq", right: "enterprise" },
+        then: [
+          {
+            kind: "handoff",
+            config: {
+              target_agent_id: "e5b3c910-77a4-4d2f-8c61-3b9d0e4f2a58",
+              context: "summary",
+              summary:
+                "The caller is asking about: {{args.reason}}. This is enterprise account {{tooldata.account_id}}.",
+              recent_turns: 2,
+              message: "You have a dedicated account manager for this - let me bring them in.",
+            },
+          },
+        ],
+        else: [
+          {
+            kind: "generate_reply",
+            config: {
+              instructions:
+                "Tell the caller you can help with this yourself, and ask for the first detail you need.",
+            },
+          },
+        ],
+      },
+    ],
+  },
+});
+
+await talqing.tools.publish({
+  tool_id: tool.id,
+  publishToolRequest: { changelog: "Route enterprise accounts to their own desk" },
+});
+```
+
+```python Python
+tool = talqing.tools.create(
+    name="route_by_account",
+    description=(
+        "Call this once you know what the caller needs help with, before you start "
+        "answering. It checks which support desk owns this account and moves the call "
+        "there if it should not be handled here."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "reason": {
+                "type": "string",
+                "description": "What the caller is asking for, in one sentence, in your own words.",
+            }
+        },
+        "required": ["reason"],
+    },
+    operations=[
+        {
+            "kind": "http",
+            "config": {
+                "method": "GET",
+                "url": "https://api.example.com/accounts/lookup",
+                "query": {"phone": "{{system_vars.human_phone_number}}"},
+                "headers": {"Authorization": "Bearer {{secrets.CRM_API_KEY}}"},
+                "timeout": 8,
+            },
+            "silent": True,
+            "publish_fields": [
+                {"path": "tier", "store": "tooldata"},
+                {"path": "account.id", "key": "account_id", "store": "tooldata"},
+            ],
+        },
+        {
+            "kind": "if",
+            "config": {"left": "{{tooldata.tier}}", "op": "eq", "right": "enterprise"},
+            "then": [
+                {
+                    "kind": "handoff",
+                    "config": {
+                        "target_agent_id": "e5b3c910-77a4-4d2f-8c61-3b9d0e4f2a58",
+                        "context": "summary",
+                        "summary": (
+                            "The caller is asking about: {{args.reason}}. This is "
+                            "enterprise account {{tooldata.account_id}}."
+                        ),
+                        "recent_turns": 2,
+                        "message": "You have a dedicated account manager for this - let me bring them in.",
+                    },
+                }
+            ],
+            "else": [
+                {
+                    "kind": "generate_reply",
+                    "config": {
+                        "instructions": (
+                            "Tell the caller you can help with this yourself, and ask for "
+                            "the first detail you need."
+                        )
+                    },
+                }
+            ],
+        },
+    ],
+)
+
+talqing.tools.publish(tool["id"], changelog="Route enterprise accounts to their own desk")
+```
+</CodeGroup>
+
+Then attach it to the agent's `tools` and publish the agent. Three things about
+that tree are worth naming:
+
+- `CRM_API_KEY` must already exist as a [workspace secret](/platform/secrets),
+  and the credential belongs there rather than in an argument the model wrote.
+- The `if` is terminal, so both outcomes are complete inside their own branch.
+  The `else` is what stops the tool from returning nothing on the common path.
+- `{{system_vars.human_phone_number}}` is empty on a web call and on text — it
+  is the number on a phone call. On any other channel, look the account up by
+  something the session actually carries, such as `{{userdata.account_id}}`.
+
+## Routing before the agent speaks
+
+A `handoff` operation is also legal in an
+[`on_enter` hook](/agents/lifecycle-hooks), which is how you route a caller
+before anyone says anything: the hook looks the number up and hands the call
+straight to the right desk, and the agent that answered never speaks. (A
+`transfer` is refused in a hook, for reasons specific to transfers.)
+
+Keep the lookup fast if you do this. The hook runs before the greeting, so its
+latency is silence on the caller's ear.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="The handoff operation" href="/tools/handoff-operation">
+    Every field on the operation, in reference form.
+  </Card>
+  <Card title="Context policies" href="/teams/context-policies">
+    What `context` and `recent_turns` mean for the target.
+  </Card>
+  <Card title="Patterns" href="/teams/patterns">
+    This pattern in the context of a whole multi-agent design.
+  </Card>
+</CardGroup>

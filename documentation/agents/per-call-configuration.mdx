@@ -1,0 +1,419 @@
+---
+title: "Per-call configuration"
+description: "Pin a version, run the draft, override one field, or define a whole agent for a single call."
+---
+
+Every request that starts a conversation takes the same four fields for
+deciding what actually runs on it. They let you try an unpublished edit, run an
+older version, change one setting for one call, or supply a definition that
+lives nowhere else — without touching what live callers hear.
+
+| Field | What it does |
+| --- | --- |
+| `agent_version` | Run a specific published version of `agent_id`, or `"draft"` for the unpublished working copy. |
+| `agent_override` | Layer changes on top of whichever base was named. |
+| `agent` | A complete agent definition, run for this call and stored nowhere. |
+| `agent_team` | A cast of agents for one call. `members[0]` answers. |
+
+The four endpoints that take them:
+
+| Endpoint | Channel | Also takes |
+| --- | --- | --- |
+| `POST /v1/calls/token` | voice, video | `contact_key`, `userdata`, `vars` |
+| `POST /v1/calls/outbound` | voice | `from_phone_number_id`, `to`, `userdata`, `vars` |
+| `POST /v1/chats` | text | `contact_key`, `userdata`, `vars` |
+| `POST /v1/calls/batches` | voice | recipients, schedule, `vars` |
+
+<Note>
+`agent_id` / `agent` / `agent_version` / `agent_override` and `agent_team` are
+mutually exclusive: one agent, or a team of them. `agent_version` requires
+`agent_id` — an inline definition has no versions. Sending both `agent_id` and
+`agent` is a `422`.
+</Note>
+
+All four of these need the editor role. They run an arbitrary prompt on an
+arbitrary model, paid for with your own provider keys.
+
+## `agent_version` — run a version that is not live
+
+Omit it and the call runs whatever is published. Give it a number and it runs
+that frozen version. Give it `"draft"` and it runs the current unpublished
+working copy — validated and tool-pinned at request time, and refused with the
+publish errors if it does not hold together.
+
+`"draft"` is how you try an edit without publishing over what live callers are
+hearing. Save the draft, mint a web-call token with `agent_version: "draft"`,
+and talk to it in the browser; the number on the wall keeps answering with the
+published version.
+
+The TypeScript and Python samples below assume a configured client — see
+[SDKs](/sdks/overview).
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/calls/token \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    "agent_version": "draft",
+    "contact_key": "qa-rehearsal",
+    "userdata": { "name": "Priya", "tier": "gold" }
+  }'
+```
+
+```typescript TypeScript
+const call = await talqing.calls.token({
+  tokenRequest: {
+    agent_id: "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    agent_version: "draft",
+    contact_key: "qa-rehearsal",
+    userdata: { name: "Priya", tier: "gold" },
+  },
+});
+// call.server_url + call.participant_token go to the browser.
+// Which version ran is on GET /v1/calls/{call.session_id} — null for a draft,
+// which has no version number.
+```
+
+```python Python
+call = talqing.calls.token(
+    agent_id="9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    agent_version="draft",
+    contact_key="qa-rehearsal",
+    userdata={"name": "Priya", "tier": "gold"},
+)
+# Which version ran is on GET /v1/calls/{session_id} — None for a draft.
+print(call["session_id"])
+```
+</CodeGroup>
+
+A draft moves, so the whole config travels with the call rather than being
+pointed at. That means a draft-pinned call is decided the moment you make the
+request: editing the draft afterwards does not change the call you just started.
+
+A number, by contrast, points at a frozen version, so it costs nothing and reads
+exactly like the published path.
+
+<Warning>
+Nothing about a call started this way is special afterwards. A `"draft"` call on
+`POST /v1/calls/outbound` rings a real phone and is billed like any other call.
+</Warning>
+
+## `agent_override` — change one thing for one call
+
+An `AgentOverride` is the same field tree as an `AgentConfig` with every field
+optional. It is generated from `AgentConfig`, so it never lags behind it, and it
+merges by four rules:
+
+| In the override | Result |
+| --- | --- |
+| The key is absent | The base's value is kept |
+| The key is an explicit `null` on a nullable field | The field is **cleared** |
+| The value is an object | Deep-merged into the base's object, key by key, recursively |
+| The value is a list or a scalar | Replaces the base's wholesale |
+
+Deep merge is what makes a small override small. `{"tts": {"voice": "priya"}}`
+changes the voice and leaves the provider, the model and the speed alone. With
+shallow replace it would have reset `provider` and `model` to their defaults,
+and the agent would have answered in a different voice from a different vendor
+with nothing saying so.
+
+Three field types are the exception and **replace whole** even though they look
+like objects: `ToolSelection` (`tools`, and each of the three lifecycle hooks),
+`McpSelection` (`mcps`) and `HandoffTarget` (`handoffs`). Each is a reference,
+and half a reference is not a smaller reference — it is a different one. So
+`{"on_enter": {"tool_id": "…"}}` attaches that tool at its currently published
+version, pinned when the request is made — it does not inherit the base's
+`tool_version`. Send them complete; where the model requires a field — a `HandoffTarget` needs `name` and
+`description` — a partial one is a `422` naming it.
+
+`channel` can be overridden within what the endpoint runs: `/calls/token` runs
+voice or video, so a voice agent can take an avatar for one web call, or a video
+agent can run without one. `/calls/outbound` runs voice and `/conversations`
+runs text, so a different channel there is refused, naming the agent.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/calls/outbound \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    "from_phone_number_id": "c2b7e5d1-08f4-4a63-b0de-71c4a9f6e332",
+    "to": "+919876543210",
+    "userdata": { "name": "Priya", "order_id": "A-7X9" },
+    "agent_override": {
+      "tts": { "voice": "priya" },
+      "greeting": "Hello Priya, this is Example Retail calling about order A-7X9.",
+      "language": "hi-IN"
+    }
+  }'
+```
+
+```typescript TypeScript
+const call = await talqing.calls.outbound({
+  outboundCallRequest: {
+    agent_id: "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    from_phone_number_id: "c2b7e5d1-08f4-4a63-b0de-71c4a9f6e332",
+    to: "+919876543210",
+    userdata: { name: "Priya", order_id: "A-7X9" },
+    agent_override: {
+      tts: { voice: "priya" },
+      greeting: "Hello Priya, this is Example Retail calling about order A-7X9.",
+      language: "hi-IN",
+    },
+  },
+});
+// The version the override was layered on is on GET /v1/calls/{session_id}.
+console.log(call.session_id);
+```
+
+```python Python
+call = talqing.calls.outbound(
+    agent_id="9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    from_phone_number_id="c2b7e5d1-08f4-4a63-b0de-71c4a9f6e332",
+    to="+919876543210",
+    userdata={"name": "Priya", "order_id": "A-7X9"},
+    agent_override={
+        "tts": {"voice": "priya"},
+        "greeting": "Hello Priya, this is Example Retail calling about order A-7X9.",
+        "language": "hi-IN",
+    },
+)
+print(call["session_id"])
+```
+</CodeGroup>
+
+Clearing a field is an explicit `null`:
+
+```json
+{ "agent_override": { "greeting": null, "on_enter": null } }
+```
+
+### An override pins the version
+
+A call whose base is a stored agent and which carries an override pins the
+version it merged against, because the merged result was validated against that
+exact base. A republish underneath would leave it unvalidated. A bare `agent_id`
+with no override follows whatever is published, as it always has.
+
+This matters most on the two surfaces that re-resolve: an outbound batch
+re-reads the agent on every dispatcher pass, and an open chat follows the
+published agent from one message to the next.
+
+### `agent_override.vars` is not the same as `vars`
+
+Both appear on the same request and they do different jobs.
+
+| Field | Type | Means |
+| --- | --- | --- |
+| `agent_override.vars` | A list of `{name, description, default, required}` | The agent's **declarations** for this call, replacing the stored list wholesale — `vars` is a list, and lists replace |
+| `vars` (top level) | A flat `{name: value}` map of strings | The **values** for this session, overriding each agent's declared defaults |
+
+They do not conflict: the override decides what is declared, the top-level bag
+decides what it is worth. The top-level bag is one bag for the whole session and
+reaches every agent on it, including a handoff target that was never in the
+plan. See [variables](/agents/variables).
+
+## `agent` — a whole definition for this call
+
+Send a complete `AgentConfig` and the call runs it. Nothing is stored: there is
+no row, no id, no editor, no version history and no diff. The definition is
+frozen into the call's plan so you can read back later what actually ran, and
+that is all.
+
+It may carry inline tools, inline MCP servers and inline [FAQs](/agents/faqs),
+which are compiled and validated for that call and thrown away with it — unlike
+an inline tool or FAQ on a stored agent, which is materialized into a real,
+stored one.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/chats \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contact_key": "web-user-8842",
+    "agent": {
+      "name": "Trial evaluator",
+      "channel": "text",
+      "prompt": "You help someone evaluating our product during their trial. Answer from what they tell you; do not invent pricing.",
+      "llm": { "provider": "openai", "model": "gpt-5.6-luna" }
+    },
+    "userdata": { "plan": "trial", "signed_up_on": "2026-08-14" }
+  }'
+```
+
+```typescript TypeScript
+const chat = await talqing.chats.create({
+  createChatRequest: {
+    contact_key: "web-user-8842",
+    agent: {
+      name: "Trial evaluator",
+      channel: "text",
+      prompt:
+        "You help someone evaluating our product during their trial. Answer from what they tell you; do not invent pricing.",
+      llm: { provider: "openai", model: "gpt-5.6-luna" },
+    },
+    userdata: { plan: "trial", signed_up_on: "2026-08-14" },
+  },
+});
+```
+
+```python Python
+chat = talqing.chats.create(
+    contact_key="web-user-8842",
+    agent={
+        "name": "Trial evaluator",
+        "channel": "text",
+        "prompt": (
+            "You help someone evaluating our product during their trial. "
+            "Answer from what they tell you; do not invent pricing."
+        ),
+        "llm": {"provider": "openai", "model": "gpt-5.6-luna"},
+    },
+    userdata={"plan": "trial", "signed_up_on": "2026-08-14"},
+)
+```
+</CodeGroup>
+
+`agent_override` layers onto an inline `agent` too, though there is rarely a
+reason — you already control every field.
+
+## `agent_team` — a cast for one call
+
+`agent_team` is `{"members": [{name, …the same four fields…}]}`, up to ten
+members. **`members[0]` answers**, and the rest are reachable through
+[handoffs](/teams/handoffs) that name them. Each member is described exactly as
+a single-agent call is: an `agent_id` with an optional `agent_version` and
+`agent_override`, or a whole inline `agent`. The member's `name` wins over the
+stored agent's own, and is what handoff edges reference and the transcript
+records.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/calls/token \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contact_key": "web-user-8842",
+    "agent_team": {
+      "members": [
+        { "name": "Front desk", "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704" },
+        { "name": "Billing", "agent_id": "3d84b1c7-6e29-4b50-8a11-fd0c72e4a695", "agent_version": 7 }
+      ]
+    }
+  }'
+```
+
+```typescript TypeScript
+const call = await talqing.calls.token({
+  tokenRequest: {
+    contact_key: "web-user-8842",
+    agent_team: {
+      members: [
+        { name: "Front desk", agent_id: "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704" },
+        { name: "Billing", agent_id: "3d84b1c7-6e29-4b50-8a11-fd0c72e4a695", agent_version: 7 },
+      ],
+    },
+  },
+});
+```
+
+```python Python
+call = talqing.calls.token(
+    contact_key="web-user-8842",
+    agent_team={
+        "members": [
+            {"name": "Front desk", "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704"},
+            {"name": "Billing", "agent_id": "3d84b1c7-6e29-4b50-8a11-fd0c72e4a695", "agent_version": 7},
+        ]
+    },
+)
+```
+</CodeGroup>
+
+Full detail — reachability warnings, how a member's handoffs resolve against the
+roster, and when a team beats stored handoffs — is on
+[agent teams on a call](/teams/agent-teams-on-a-call).
+
+## Which one to reach for
+
+**Prefer `agent_id` plus `userdata`.** Most of what looks like a per-call
+difference is really a per-person fact, and `userdata` is what carries those:
+`{{userdata.name}}` in the prompt and greeting is that person's name, with one
+published agent behind every call. See [userdata](/agents/userdata).
+
+Reach for `agent_override` when one call genuinely differs from the published
+agent — a language, a voice, a greeting that only makes sense for this campaign.
+
+Reach for `agent` or `agent_team` only for definitions generated per request that
+would never be reused. An agent that exists in the workspace has an editor, a
+test panel, version history, a diff, [AgentCoPilot](/agents/copilot) and reuse
+across calls. An inline one has none of those and disappears with the call.
+Composing inline agents by habit ends with a workspace that has no agents in it
+and no way to see what your callers are actually hearing.
+
+## The merged result is validated
+
+Whatever you send, the resolved config is checked by
+`validate_agent_draft(..., for_publish=True)` — the same function that guards
+publishing. There is one validator and no second one to drift.
+
+So a bad override is a `400` at create, naming the problem, rather than a call
+that connects and then fails. The response body is the standard envelope with
+`message: "the resolved agent config is invalid"`; on a team, each error is
+prefixed with the member's name.
+
+Checked in this order, before anything is compiled and before any provider is
+called:
+
+1. The merged JSON must parse as an `AgentConfig` (`422` if not).
+2. Member names must be unique across the team.
+3. The resolved `channel` must match the endpoint — `this endpoint runs voice
+   agents; 'Support' resolves to a text agent`.
+4. Every `required` variable with no default must have a value —
+   `this session needs values it was not given`.
+5. Every inline `code` operation across the whole roster is compiled.
+6. Full publish-grade validation of every member. See
+   [validation](/agents/validation).
+
+Warnings do not block the call. They come back on the response as `warnings`, on
+`CallTokenResponse`, `OutboundCallResponse` and the batch — including team-only
+ones such as `nothing hands off to 'Escalations', so it will never take a turn
+on this call`.
+
+One hard limit: at most **10 team members**. The plan itself has no size limit,
+but a batch stores its plan on every call it places — so on a batch, attach an
+[FAQ](/agents/faqs) by `faq_id` rather than inline, or its entries are stored
+once per recipient.
+
+## Reading back what ran
+
+A call that ran exactly the published agent stores no plan at all. Anything else
+freezes what it ran, so the record stays readable after the agent has moved on:
+
+- `agent_version` on `GET /v1/calls/{session_id}` says which version answered —
+  `"draft"` for the unpublished draft, `null` for an inline agent.
+- `GET /v1/calls/{session_id}` returns the `tools`, `starting_prompt` and
+  `greeting` the call actually ran, plus the frozen `agent_plan`, not the
+  agent's current draft.
+- `GET /v1/conversations/{conversation_id}/sessions` carries an
+  `agent_version_id` per session, so you can see which version handled each
+  stretch of a thread.
+- `GET /v1/calls/batches/{batch_id}` returns the campaign's own `agent_plan`.
+- In the dashboard, the call list badges a call `Inline`, `Draft`, `Overridden`,
+  `Pinned` or `Team · 3`, and the call detail shows the config it ran.
+
+<CardGroup cols={2}>
+  <Card title="Versions" href="/agents/versions">
+    Draft and published, publishing, rollback, and tool pinning.
+  </Card>
+  <Card title="Agent teams on a call" href="/teams/agent-teams-on-a-call">
+    Casts, `members[0]`, and how handoffs resolve inside one.
+  </Card>
+  <Card title="Validation" href="/agents/validation">
+    Every refusal the merged config can hit, and the fix.
+  </Card>
+</CardGroup>

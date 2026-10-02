@@ -1,0 +1,232 @@
+---
+title: "The operation tree"
+description: "The ordered list of operations that runs when the model calls a tool: the eleven kinds, error handling, and how branching works."
+---
+
+`operations` is an ordered list. It runs top to bottom when the model calls the
+tool, and it is where everything the tool actually does lives.
+
+**Sending `operations` replaces the tree entirely.** There is no partial update
+of a tree — `PATCH /v1/tools/{tool_id}` leaves out fields you omit, but a tree
+you do send is the whole tree. Read the current one, change it, send it back.
+
+## One operation
+
+Every operation is `{kind, config, on_error?}`, and `kind` decides the rest. An
+operation is a union of eleven shapes, one per kind, each carrying only its own
+fields — so a field belonging to another kind is **rejected, not ignored**. A
+`publish_fields` on a `say` is refused at save with
+`422 operations.0.say.publish_fields: Extra inputs are not permitted`, and a
+`then` on an `http` the same way.
+
+```json
+{
+  "kind": "http",
+  "config": { "method": "GET", "url": "https://api.example.com/ping" },
+  "on_error": "continue",
+  "silent": true,
+  "publish_fields": [{ "path": "status", "store": "tooldata" }]
+}
+```
+
+`config` is required on every kind but `end_call`, which has no settings.
+
+## The eleven kinds
+
+| Kind | What it does | Ends the chain |
+| --- | --- | --- |
+| [`http`](/tools/http) | Calls a REST API and reads the JSON response | |
+| [`code`](/tools/code) | Runs TypeScript in a sandbox to reshape data or compute a value | |
+| [`frontend_rpc`](/tools/frontend-rpc) | Calls a handler your web page registered, and waits for its answer | |
+| [`if`](/tools/conditionals) | Compares two values and runs `then` or `else` | yes |
+| [`set_variable`](/tools/templating-and-data) | Writes one templated value into `tooldata` or `userdata` | |
+| [`say`](/tools/speech-operations) | Speaks a fixed line, with variables filled in | |
+| [`generate_reply`](/tools/speech-operations) | Has the model phrase the line from your instructions | |
+| [`add_message`](/tools/speech-operations) | Adds a system message to the context without triggering a reply | |
+| [`end_call`](/tools/end-call) | Hangs up | yes |
+| [`handoff`](/tools/handoff-operation) | Moves the conversation to another agent | yes |
+| [`transfer`](/tools/transfer) | Puts the caller through to a person on a phone number | yes |
+
+## Which fields exist on which kinds
+
+`silent`, `publish_fields` and `background_execution` exist on `http`, `code`
+and `frontend_rpc` and on nothing else, because those three are the only kinds
+that produce a result. There is nothing for the other eight to hide, to publish
+out of, or to stop waiting for.
+
+`then` and `else` belong to an `if` in exactly the same way.
+
+| Field | On | Default | Meaning |
+| --- | --- | --- | --- |
+| `on_error` | every kind | `"abort"` | What happens when the operation fails |
+| `silent` | `http`, `code`, `frontend_rpc` | `false` | Run it, but hide the result from the model |
+| `publish_fields` | `http`, `code`, `frontend_rpc` | `[]` | Which values from the result to keep, and where |
+| `background_execution` | `http`, `code`, `frontend_rpc` | `false` | Fire and forget — no result, so no `publish_fields` |
+| `then` / `else` | `if` | `null` | The two branch chains |
+
+`silent: true` still runs the operation and still publishes its fields; it only
+keeps the response away from the model. Use it for a noisy intermediate lookup —
+a lookup whose raw JSON the agent has no business narrating.
+
+`background_execution: true` is the stronger thing and the two are worth keeping
+apart: a silent operation still **waits** and still **publishes**, a background
+one does neither. The tree moves straight on, the result is thrown away, and a
+failure only reaches the platform's log. Reach for it when the call has no use
+for the answer — a webhook you fire and forget.
+
+## `on_error`
+
+`abort` (the default) stops the tool. Nothing after the failing operation runs,
+nothing further is published, and the model is told the tool could not be
+completed — the agent then apologises to the caller in its own words.
+
+`continue` logs the failure and moves to the next operation **in the same
+chain**. Two consequences worth knowing:
+
+- A failed operation publishes nothing. Anything a later template expected from
+  it resolves to empty instead. Validation cannot see this, because it checks
+  what an operation *declares*, not whether it ran.
+- On an `if`, there is no next operation — an `if` is terminal. `on_error:
+  "continue"` on one means **neither branch runs and the tree ends there**. That
+  is a real outcome to reach for, and it is the only thing `continue` can mean
+  on an operation nothing follows.
+
+## The branching rule
+
+`if`, `handoff`, `end_call` and `transfer` are **terminal in their chain**, and
+a chain is the top-level list or any `then` / `else` list. Nothing may follow
+one there — a tree that puts something after one is refused at save, naming the
+operations that came after it.
+
+**Branches do not rejoin.** There is no operation that both paths flow back into. So:
+
+- If work must happen on both paths, write it into both branches.
+- If work must happen after the decision, move the branch later instead.
+- For an early-exit guard, put the rest of the flow inside the guard's `else`.
+
+Anything the tool has to do before hanging up — logging the outcome, posting a
+lead, saving what the caller said — goes **before** the `end_call`, not after
+it. By the time an `end_call` returns, the session is already closing.
+
+## Derived silence
+
+**If no operation in the tree can return a response, the tool is silent
+whatever `silent` says** — including operations inside `if` branches. A tool
+whose whole tree is one `say "Your appointment is confirmed"` says that once, rather than
+saying it and then having the model improvise a second sentence on top.
+
+A `background_execution` operation counts as silent here whatever its own
+`silent` holds: nothing waits for it, so it has no response to hide. A tool of
+one background `http` followed by that same `say` is therefore a silent tool, and
+the agent says the line once.
+
+You cannot turn derived silence off, and there is nothing to untick. If the
+agent should add a closing line, add a [`generate_reply`](/tools/speech-operations)
+operation that states what to add: it is visible in the tree, it says what it
+will say, and it costs the same turn.
+
+When a tool is **not** silent, the model is handed the ordered outputs as JSON —
+`{"responses": [{"operation": "http", "response": { … }}, … ]}` — or the literal
+string `"Done."` when a tool that could have returned something happened not to.
+A run that reaches `end_call` tells the model nothing either way; there is
+nobody left to narrate to.
+
+## Timeouts are in seconds
+
+Every timeout in a tree is in **seconds**, never milliseconds. A caller is on
+the line while an operation runs, so a long timeout is not a patient tool, it is
+a hung call. Each one is capped:
+
+| Kind | Field | Default | Maximum |
+| --- | --- | --- | --- |
+| `http` | `timeout` | 20 | 120 |
+| `code` | `timeout` | 10 | 30 |
+| `frontend_rpc` | `timeout` | 5 | 60 |
+| `transfer` | `ringing_timeout` | 30 | 120 (minimum 5) |
+
+If an endpoint is genuinely slow, the answer is the tool-level
+`long_running_task` flag — the agent keeps talking while the work runs, and the
+result arrives when it arrives — not a 120-second timeout. See
+[overview](/tools/overview).
+
+## A three-branch tree
+
+Look the account up, then take one of three paths. Notice that the second `if`
+is the only operation in the first one's `else`: that is how you get a third
+branch, since nothing may follow an `if` in the same chain.
+
+```json
+[
+  {
+    "kind": "http",
+    "config": {
+      "method": "GET",
+      "url": "https://api.example.com/accounts/{{args.account_number}}",
+      "headers": { "Authorization": "Bearer {{secrets.CRM_API_KEY}}" },
+      "timeout": 8
+    },
+    "silent": true,
+    "publish_fields": [
+      { "path": "account.tier", "key": "tier", "store": "userdata" },
+      { "path": "account.balance_due", "key": "balance_due", "store": "tooldata" }
+    ]
+  },
+  {
+    "kind": "if",
+    "config": { "left": "{{userdata.tier}}", "op": "eq", "right": "enterprise" },
+    "then": [
+      {
+        "kind": "say",
+        "config": { "text": "You are on the enterprise plan, so I can settle this on the call." }
+      },
+      {
+        "kind": "generate_reply",
+        "config": { "instructions": "Offer to waive the late fee and ask whether to apply it now." }
+      }
+    ],
+    "else": [
+      {
+        "kind": "if",
+        "config": { "left": "{{tooldata.balance_due}}", "op": "gt", "right": 0 },
+        "then": [
+          {
+            "kind": "say",
+            "config": { "text": "There is {{tooldata.balance_due}} outstanding on the account." }
+          }
+        ],
+        "else": [
+          { "kind": "say", "config": { "text": "The account is fully paid up." } }
+        ]
+      }
+    ]
+  }
+]
+```
+
+Three details in that tree:
+
+- The `http` publishes `tier` into `userdata`, so the rest of the conversation —
+  and the next tool — can read it. `balance_due` goes to `tooldata`, because
+  nothing outside this run needs it.
+- The `http` is `silent`, and it is the only operation that could return
+  anything. So the whole tool is silent: each branch speaks for itself and the
+  agent adds nothing after.
+- The enterprise branch runs two operations. A branch is an ordinary chain — it
+  can be as long as you like, and the same terminal rule applies inside it.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Templating and data" href="/tools/templating-and-data">
+    The six template roots, the two stores, and `publish_fields`.
+  </Card>
+  <Card title="Conditionals" href="/tools/conditionals">
+    Every comparison operator, and why time comparisons fail.
+  </Card>
+  <Card title="Testing and publishing" href="/tools/testing-and-publishing">
+    Run the draft tree and see what each operation did.
+  </Card>
+  <Card title="Patterns" href="/tools/patterns">
+    Lookup-then-answer, guard-and-continue, escalation.
+  </Card>
+</CardGroup>

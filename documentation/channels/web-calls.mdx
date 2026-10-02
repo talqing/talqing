@@ -1,0 +1,346 @@
+---
+title: "Web calls"
+description: "Put a voice or video agent in a browser: your server mints a call token, your page joins with @talqing/react."
+---
+
+A web call has two halves. **Your server** mints a call token with
+`POST /v1/calls/token`. **Your page** joins the call with `@talqing/react`.
+There is no widget to embed and no script tag — you build the UI, and the SDK
+gives you the room, the microphone, the transcript and the agent's state.
+
+<Warning>
+`POST /v1/calls/token` needs the **editor** role, and a personal access token is a
+workspace credential: it can read, change and delete every agent, call and phone
+number in the workspace. **Never ship one to a browser, and never call this
+endpoint from browser code with one.** Mint the token on your server, behind your
+own sign-in, and hand the browser only the response.
+</Warning>
+
+## 1. Mint the token on your server
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/calls/token \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    "contact_key": "user-42",
+    "userdata": { "name": "Priya", "plan": "gold" },
+    "vars": { "support_region": "in" }
+  }'
+```
+
+```typescript TypeScript
+const call = await talqing.calls.token({
+  tokenRequest: {
+    agent_id: "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    contact_key: "user-42",
+    userdata: { name: "Priya", plan: "gold" },
+    vars: { support_region: "in" },
+  },
+});
+
+// Send these two to the browser. Nothing else has to leave your server.
+return { server_url: call.server_url, participant_token: call.participant_token };
+```
+
+```python Python
+call = talqing.calls.token(
+    agent_id="9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    contact_key="user-42",
+    userdata={"name": "Priya", "plan": "gold"},
+    vars={"support_region": "in"},
+)
+return {"server_url": call["server_url"], "participant_token": call["participant_token"]}
+```
+</CodeGroup>
+
+<Note>
+**The token starts nothing by itself.** It mints the credential a browser needs to
+join, and files the call so `GET /v1/calls/{session_id}` answers immediately —
+as `queued` until a browser actually connects. To dial a phone instead, use
+`POST /v1/calls/outbound`; see [outbound calls](/telephony/outbound-calls).
+</Note>
+
+### The request body
+
+<ParamField path="agent_id" type="uuid">
+  The agent to run. Prefer this over the three inline forms below — an agent that
+  exists in the workspace has an editor, a version history and a cost record.
+</ParamField>
+
+<ParamField path="contact_key" type="string">
+  **Your own stable id for the person on the call.** Omit it and each call mints a
+  single-use key of its own, so two calls from the same person arrive as two
+  strangers. Max 256 characters, and it must not start with a reserved prefix —
+  see [chats](/channels/text-conversations#start-a-chat).
+</ParamField>
+
+<ParamField path="userdata" type="object">
+  What this call already knows about the person, read as `{{userdata.field}}` from
+  the prompt, the greeting and every tool. It is merged onto the contact's record,
+  so it is there again on their next call. Keys beginning with `_talqing` are
+  reserved. See [userdata](/agents/userdata).
+</ParamField>
+
+<ParamField path="vars" type="object">
+  Values for the `{{vars.*}}` the agents on this call declare — configuration of
+  the session rather than facts about the person. Read-only, gone when the call
+  ends, never written onto anybody's record. See [variables](/agents/variables).
+</ParamField>
+
+The same four per-call configuration fields every call-starting endpoint takes are
+also accepted here. One line each, in full on
+[per-call configuration](/agents/per-call-configuration):
+
+| Field | What it does |
+| --- | --- |
+| `agent_version` | Run a specific published version of `agent_id`, or `"draft"` for the unpublished working copy. |
+| `agent_override` | Layer changes on top of the named base for this call only. |
+| `agent` | A complete agent definition, run for this call and stored nowhere. |
+| `agent_team` | A cast of agents for one call; `members[0]` answers. |
+
+`agent_id` / `agent` / `agent_version` / `agent_override` and `agent_team` are
+mutually exclusive: one agent, or a team of them.
+
+### The response
+
+<ResponseField name="server_url" type="string">
+  The media server this call runs on, chosen per call. Pass it to the browser SDK.
+</ResponseField>
+
+<ResponseField name="participant_token" type="string">
+  The join credential. It names one room — the room this call uses — so it is good
+  for exactly one call and cannot be reused for the next one.
+</ResponseField>
+
+<ResponseField name="session_id" type="uuid">
+  This call's id, and the one `GET /v1/calls/{session_id}` answers to. Keep it if
+  you want to read the transcript, cost or analysis back afterwards.
+</ResponseField>
+
+<ResponseField name="warnings" type="string[]">
+  Everything the resolved plan could not refuse but you should know about — an
+  unreachable team member, a handoff into an agent that records when this one does
+  not. **Nothing stores these**, so log them here or they are gone. The plan is
+  resolved against state at call time, so this is not the list publishing
+  returned: a team member deleted since is a warning only this response carries.
+</ResponseField>
+
+Four fields, and that is deliberate: at mint time the call has not happened yet,
+so there is nothing to describe. Anything else you want about it —
+`conversation_id`, `contact_key`, the version it ran, its status — is on
+`GET /v1/calls/{session_id}`, which answers on this id from the moment it is
+returned. See [calls](/observability/calls).
+
+## 2. Join from the browser
+
+```bash
+npm install @talqing/react
+```
+
+npm 7+ and pnpm install the peers for you — `@talqing/client`, `@talqing/sdk`,
+`livekit-client`, `@livekit/components-react` and React 18 or 19. Yarn only
+warns, so on Yarn name them all on one line. There is **no Talqing credential in
+this half**: the browser calls your token route and joins with what comes back.
+
+### A complete integration
+
+```tsx
+"use client";
+import { useCallback, useEffect, useState } from "react";
+import {
+  TalqingSessionProvider,
+  useAgent,
+  useSessionMessages,
+  useTalqingConnection,
+  useTalqingSession,
+} from "@talqing/react";
+
+export function TalkToUs() {
+  // Nothing LiveKit exists until the person asks for a call: mounting the
+  // session is what mints the token, so rendering it early would file a call
+  // nobody placed. Each call gets its own number, and that number is the `key`
+  // below — a second call is a second mount, never a restart of the first.
+  const [call, setCall] = useState(0);
+  const [inCall, setInCall] = useState(false);
+
+  if (!inCall) {
+    return (
+      <button
+        onClick={() => {
+          setCall((n) => n + 1);
+          setInCall(true);
+        }}
+      >
+        Talk to us
+      </button>
+    );
+  }
+  return <CallSession key={call} onLeave={() => setInCall(false)} />;
+}
+
+function CallSession({ onLeave }: { onLeave: () => void }) {
+  // Your route from step 1. Called exactly once per call, however often LiveKit
+  // asks — see createTalqingTokenSource. Stable, because the hook rebuilds its
+  // token source whenever this changes identity.
+  const fetchToken = useCallback(async () => {
+    const response = await fetch("/api/talqing-token", { method: "POST" });
+    if (!response.ok) throw new Error("could not start the call");
+    return await response.json();
+  }, []);
+
+  const session = useTalqingSession({ fetchToken });
+
+  useEffect(() => {
+    // The token is minted inside start(), so a refusal — your route saying no,
+    // an unpublished agent, a workspace out of credits — arrives here.
+    session.start().catch((error: unknown) => {
+      console.error(error);
+      onLeave();
+    });
+    return () => void session.end();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount and unmount only
+  }, []);
+
+  return (
+    <TalqingSessionProvider session={session}>
+      <CallUI onLeave={onLeave} />
+    </TalqingSessionProvider>
+  );
+}
+
+function CallUI({ onLeave }: { onLeave: () => void }) {
+  const { isConnected, end } = useTalqingConnection();
+  const agent = useAgent();
+  const { messages } = useSessionMessages();
+
+  return (
+    <div>
+      <p>{isConnected ? `agent: ${agent.state}` : "connecting…"}</p>
+      <ul>
+        {messages.map((message) => (
+          <li key={message.id}>
+            <strong>{message.from?.isLocal ? "You" : "Agent"}</strong> {message.message}
+          </li>
+        ))}
+      </ul>
+      <button
+        onClick={() => {
+          void end();
+          onLeave();
+        }}
+      >
+        End call
+      </button>
+    </div>
+  );
+}
+```
+
+<Note>
+`useAgent`, `useSessionMessages` and `VideoTrack` are LiveKit's own, re-exported
+from `@talqing/react` under their own names so one install and one import cover a
+whole call. They are not wrapped — anything else `@livekit/components-react`
+ships is one import away. See [the escape hatch](/sdks/react#the-escape-hatch).
+</Note>
+
+### If your server cannot mint
+
+`{ fetchToken }` is one of three ways to authorize a call. `{ token }` takes a
+response your server already minted and passed down with the page, which suits a
+server-rendered app. `{ client, agentId, callOptions }` mints from the browser
+with a `TalqingClient` you already hold — **trusted first-party surfaces only**,
+meaning an app that is same-origin with the API and signed in as a real editor.
+Our own dashboard is that; a widget you embed for your customers is not. Full
+detail on [the React SDK page](/sdks/react#the-three-ways-to-authorize-a-call).
+
+`session.start()` publishes the microphone by default and buffers what the caller
+says before the agent has finished joining, so nothing said in the first second is
+lost. `TalqingSessionProvider` renders the room's audio for you — do not add a
+second audio element, or the agent is heard twice.
+
+## The rules that matter
+
+**One session is one call.** Start it when the component mounts and end it on the
+way out. To place a second call, mount a second session — give the component a
+`key` that changes per call, as above. Restarting a finished session rejoins the
+room the last call used, and the API will not let a second call in there; in
+practice you get a duplicate-stream-handler error from `livekit-client` before you
+get that far.
+
+**Pass `contact_key`, on the server.** It is your own id for the person on the
+call. Leave it out and every call mints its own key, so two calls from the same
+person arrive as two strangers — and an agent set to carry past conversations has
+nothing to carry. Keep the same value across calls and the whole history is one
+contact, readable from `GET /v1/conversations?contact_key=…`. It is chosen where
+you know who the visitor is, which is the same place you authenticated them: a
+browser that picked its own would be picking whose history to resume.
+
+**Leave echo cancellation on.** `useTalqingSession` builds the room with
+`TALQING_AUDIO_CAPTURE_DEFAULTS` — echo cancellation, noise suppression and auto
+gain control, all on. Without echo cancellation the agent hears its own speech
+through the caller's microphone and interrupts itself, which sounds exactly like a
+bad model. You can override them with `roomOptions.audioCaptureDefaults`, but the
+object **replaces all three rather than merging**, so send all three if you send
+any.
+
+**A video agent needs somewhere to render.** `channel: video` puts an avatar on
+the call as a second participant; the caller publishes no camera. Find the track
+and render it:
+
+```tsx
+import { useTalqingAvatarTrack, VideoTrack } from "@talqing/react";
+
+function AvatarStage() {
+  const track = useTalqingAvatarTrack();
+  if (!track) return <p>Avatar joining…</p>;
+  return <VideoTrack trackRef={track} className="avatar" />;
+}
+```
+
+Mount it inside `TalqingSessionProvider`. The avatar's voice is the room's audio
+like any other — never add a separate audio element for it. See
+[video avatars](/agents/video-avatars).
+
+## When a call does not connect
+
+The token request fails before the browser ever opens a socket, and its error says
+what to fix:
+
+| Status | Message | Fix |
+| --- | --- | --- |
+| `400` | `publish '<agent>' before calling it` | The agent has no published version. Publish it. |
+| `402` | `This workspace is out of credits…` | Add credits. Calls already in progress are unaffected. |
+| `403` | `your role is view-only…` | The token minting this needs the editor role. |
+| `404` | `agent not found` | Wrong id, or an agent in another region — everything is regional. |
+| `422` | `this endpoint runs voice and video agents; '<agent>' resolves to a text agent` | A text agent never joins a room. Use [chats](/channels/text-conversations). |
+
+Past that, the two failures worth instrumenting are both readable from the SDK:
+
+- **The room connects and the agent never joins.** `useAgent().state` goes
+  to `failed`. The room being up is not the agent being there — a UI keyed off
+  `isConnected` alone will say "live" to someone nobody is listening to. Wait for
+  the state to leave `connecting`, `pre-connect-buffering` and `initializing`
+  before you tell the caller to speak.
+- **Audio is blocked.** Browsers refuse to play audio on a page the person has not
+  interacted with. Starting the call from a click, as above, is what avoids it.
+
+Every call is readable afterwards whether or not it went well:
+`GET /v1/calls/{session_id}` returns the transcript, every tool call, the per-stage
+latency breakdown and the cost. See [calls](/observability/calls).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Web call features" href="/channels/web-call-features">
+    Images, screen share, userdata from the page, and the agent calling back into your UI.
+  </Card>
+  <Card title="React SDK reference" href="/sdks/react">
+    Every hook and helper with its signature.
+  </Card>
+  <Card title="Per-call configuration" href="/agents/per-call-configuration">
+    Pin a version, run the draft, override one field for one call.
+  </Card>
+</CardGroup>

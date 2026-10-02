@@ -1,0 +1,329 @@
+---
+title: "MCP servers"
+description: "Attach an integration's tools to an agent, approve the ones it may call, and control the names the model sees."
+---
+
+An MCP server is a set of tools an external service hosts. Attaching one to an
+agent puts those tools in front of the model on every turn, next to the
+[tools](/tools/overview) you built yourself. The agent decides when to call them;
+you decide which ones exist and what they are called.
+
+Three separate things control that, and they are worth keeping apart:
+
+| | Lives on | Changes reach a live agent |
+| --- | --- | --- |
+| The attachment | the agent's `mcps` | on the next **publish** |
+| `allowed_tools` | the integration | on the agent's **next turn** |
+| `tools_namespace` | the integration | on the agent's **next turn** |
+
+## Attaching
+
+`mcps` is a field of the agent config, alongside `tools` and `handoffs`. Each entry
+names an integration:
+
+```json
+{
+  "config": {
+    "name": "Northwind research",
+    "channel": "text",
+    "prompt": "Answer questions about the market. Search the web with tavily_search before you answer anything you are not certain of.",
+    "llm": { "provider": "openai", "model": "gpt-5.6-luna" },
+    "mcps": [{ "integration_id": "7c2f1a90-4e83-4d16-9b7a-2c5e08f31d64" }]
+  }
+}
+```
+
+The integration must be `active` and must be one that lends tools; Telegram is
+refused with `is not MCP-capable and cannot be attached as a tool`. Attaching the
+same integration twice in one config is refused too.
+
+**Attaching takes a publish.** Live traffic runs the last published version, so
+the tools are not in front of the model until you publish. `mcps` is a list and
+is sent whole, so read the current one and send it back with the integration
+appended:
+
+<CodeGroup>
+```bash cURL
+AGENT_ID=0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30
+INTEGRATION_ID=7c2f1a90-4e83-4d16-9b7a-2c5e08f31d64
+
+curl -s "https://api.in.talqing.com/v1/agents/$AGENT_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+| jq --arg id "$INTEGRATION_ID" \
+    '{config: {mcps: (.config.mcps + [{integration_id: $id}])}}' \
+| curl -s -X PATCH "https://api.in.talqing.com/v1/agents/$AGENT_ID" \
+    -H "Authorization: Bearer $TALQING_API_KEY" \
+    -H "Content-Type: application/json" \
+    --data @-
+
+curl -X POST "https://api.in.talqing.com/v1/agents/$AGENT_ID/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const agent_id = "0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30";
+const integration_id = "7c2f1a90-4e83-4d16-9b7a-2c5e08f31d64";
+
+const { config } = await talqing.agents.get({ agent_id });
+
+await talqing.agents.update({
+  agent_id,
+  updateAgentRequest: { config: { mcps: [...config.mcps, { integration_id }] } },
+});
+await talqing.agents.publish({ agent_id });
+```
+
+```python Python
+agent_id = "0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30"
+integration_id = "7c2f1a90-4e83-4d16-9b7a-2c5e08f31d64"
+
+mcps = talqing.agents.get(agent_id)["config"]["mcps"]
+
+talqing.agents.update(agent_id, config={"mcps": [*mcps, {"integration_id": integration_id}]})
+talqing.agents.publish(agent_id)
+```
+</CodeGroup>
+
+[Agent tasks](/tasks/tools-and-mcps) take the same field.
+
+### The inline shorthand
+
+An entry can carry a server definition instead of an id:
+
+```json
+{ "mcp": { "name": "Northwind CRM", "url": "https://mcp.northwind.dev/mcp" } }
+```
+
+On an agent write that is **created as a `custom_mcp` integration** and the entry
+is replaced by `{"integration_id": "…"}` in the stored config. It is a
+convenience for building an agent and its servers in one request, not a second
+kind of attachment — read the config back and you will find the id. The
+integration it made is an ordinary one, editable on the Integrations page, which
+is where its tool approval lives. Inline servers are API-key-shaped only; an
+OAuth provider has nowhere to keep a refresh token and must be a real
+integration. Details in [custom MCP servers](/integrations/custom-mcp).
+
+## Seeing what a server offers
+
+`GET /v1/integrations/{integration_id}/mcp-tools` connects to the server and
+lists everything it exposes. It is a live call, so it also proves the connection
+works.
+
+<CodeGroup>
+```bash cURL
+INTEGRATION_ID=b41d7e28-6c05-4f3a-8e19-9d02a7c4b5f6
+
+curl "https://api.in.talqing.com/v1/integrations/$INTEGRATION_ID/mcp-tools" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const { tools } = await talqing.integrations.mcpTools.list({
+  integration_id: "b41d7e28-6c05-4f3a-8e19-9d02a7c4b5f6",
+});
+
+tools.forEach((tool) => console.log(tool.exposed_name, "<-", tool.name));
+```
+
+```python Python
+result = talqing.integrations.mcp_tools.list("b41d7e28-6c05-4f3a-8e19-9d02a7c4b5f6")
+
+for tool in result["tools"]:
+    print(tool["exposed_name"], "<-", tool["name"])
+```
+</CodeGroup>
+
+For a server whose namespace is `crm`, that comes back as:
+
+```json
+{
+  "tools": [
+    {
+      "name": "search",
+      "exposed_name": "crm_search",
+      "description": "Find a contact by name, email or phone number."
+    },
+    {
+      "name": "create_note",
+      "exposed_name": "crm_create_note",
+      "description": "Attach a note to a contact."
+    }
+  ]
+}
+```
+
+`name` is the server's own name — that is what approval is keyed on.
+`exposed_name` is what the model is shown — that is what a prompt has to say.
+The two are the same string only when the namespace is blank, or when the
+server's names already start with it.
+
+The listing is deliberately **unfiltered**: it is what you choose an approval
+from, so it has to include the tools nobody has approved. An integration that is
+not `active` answers 400; a server that cannot be reached answers 502 with the
+underlying failure.
+
+## Approving tools
+
+Which of a server's tools an agent may call is `allowed_tools` on the
+integration. It is approved once and **shared by every agent attached to it**.
+
+- **`null` means all of them.** A new connection starts there.
+- **A `PATCH` replaces the list wholesale.** It is a set, not an accumulation:
+  send the full list you want, every time.
+- **It can never be empty.** "Approve nothing" is not a state; that is what
+  disabling the integration means, and an empty list would read as "no filter"
+  to the MCP client — the exact opposite.
+- **It is live.** Narrowing the list reaches every already-published agent on its
+  next turn. There is nothing to republish.
+
+<CodeGroup>
+```bash cURL
+curl -X PATCH "https://api.in.talqing.com/v1/integrations/$INTEGRATION_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"allowed_tools": ["tavily_search", "tavily_extract"]}'
+```
+
+```typescript TypeScript
+await talqing.integrations.update({
+  integration_id,
+  patchIntegrationRequest: { allowed_tools: ["tavily_search", "tavily_extract"] },
+});
+```
+
+```python Python
+talqing.integrations.update(
+    integration_id,
+    allowed_tools=["tavily_search", "tavily_extract"],
+)
+```
+</CodeGroup>
+
+There is no value that means "go back to everything" — send the full list from
+`mcp-tools` instead.
+
+### Why narrowing is worth the trouble
+
+Every approved tool is described to the model on every turn. A voice agent
+choosing from ninety tool descriptions is slower and less accurate than one
+choosing from six, and it pays for those descriptions in input tokens on each
+turn of every call. Some vendor servers expose a very large surface. Approve the
+handful the agent's job actually needs.
+
+### Approval matches the server's own name
+
+`allowed_tools` is filtered first, on the tool's own name, and the namespace is
+applied afterwards. So approve `search`, not `crm_search` — and changing the
+namespace later never invalidates an approval.
+
+## Namespacing
+
+The model does not see a server's tool names raw. Each is prefixed with the
+integration's `tools_namespace`:
+
+```
+<namespace>_<tool>
+```
+
+The default is the provider key for a hosted provider (`asana`, `hubspot`,
+`google_calendar`) and **nothing** for a custom server, which has no name to
+derive one from.
+
+The rules, all of them:
+
+- **A blank namespace leaves names untouched.** `""` is a real value meaning "the
+  server's own names", not an unset field.
+- **A tool that already starts with the prefix is not prefixed again.** Tavily's
+  own tools are `tavily_search` and `tavily_extract`, so they stay that way
+  rather than becoming `tavily_tavily_search`.
+- **The value must match `^$|^[a-z][a-z0-9_]{0,23}$`** — empty, or lowercase
+  starting with a letter, up to 24 characters.
+- **On a `PATCH`, omitting the field keeps the current namespace and sending
+  `""` clears the prefix.** Those are different requests. Read the field back
+  after any change you are not sure of.
+
+<Warning>
+**Write prompts against the exposed name.** `allowed_tools` approves
+`search`; your prompt has to say `crm_search`. Getting this backwards produces an
+agent that describes a tool the model cannot find and quietly stops calling it.
+`exposed_name` on the tool listing is the string to copy.
+</Warning>
+
+### Two servers cannot share a namespace
+
+If two attached servers present their tools under the same prefix, every name
+they share reaches the model twice and the session dies before the agent speaks.
+So the config is refused when you save it:
+
+```
+'Asana (2)' and 'Asana' both present their tools under 'asana' - every tool
+name they share would reach the model twice. Give one of them a different tool
+namespace.
+```
+
+This is the ordinary case, not an edge one: two connections to one provider both
+default to the provider key. See [connecting the same provider
+twice](/integrations/connecting#connecting-the-same-provider-twice).
+
+Two servers with **blank** namespaces are not checked, because a blank namespace
+is the author asking for the server's own names in both cases. If those names do
+collide the call ends at startup, with the duplicate named on the call detail
+page.
+
+## What happens on a call
+
+The connection is made when the session starts, in parallel with everything else
+the agent needs. Each request to an MCP server — the tool listing at connect, and
+every tool call after it — has a **five-second budget**.
+
+**A server that is down or slow to connect does not fail the call.** The agent
+starts without that server's tools and the failure is logged. From the caller's
+side nothing is wrong; from the model's side the tools simply are not in its
+list, and it will improvise around a prompt that still talks about them. This is
+the strongest argument for keeping the prompt honest about what the agent does
+when a lookup fails.
+
+A tool call that exceeds the budget comes back to the model as a failed tool
+call, and the model decides what to say. The native [Google
+Calendar](/integrations/google-calendar) tools are the exception to all of this:
+they run against Google directly, with their own retry and error handling.
+
+For an OAuth provider, the access token is minted per request. If the provider
+answers 401, the token is refreshed once and the request retried; if that fails
+too, the integration is moved to `needs_reconnect` and stays broken until someone
+reconnects it.
+
+## In the dashboard
+
+**Integrations** lists every connection with its status, the account it is signed
+in as, its namespace and how many of its tools are approved. Clicking a row — or
+**Tools** in its menu — opens the approval modal, which reads the live tool list,
+shows each tool under the name the model will see with the server's own name
+beneath it, and saves the ticked names and the namespace together. The namespace
+field previews the exposed names as you type it.
+
+The modal will not save an empty selection. It says so: *"Approve at least one
+tool, or disable the integration instead."*
+
+## Field reference
+
+| Field | On | Type | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `mcps[].integration_id` | agent config | uuid | — | Set this or `mcp`, not both |
+| `mcps[].mcp` | agent config | object | — | Inline server; materialized into a `custom_mcp` integration |
+| `allowed_tools` | integration | array of strings, or null | `null` | Null exposes everything. Minimum length 1. Replaces wholesale |
+| `tools_namespace` | integration | string | provider key; `""` for `custom_mcp` | Pattern `^$\|^[a-z][a-z0-9_]{0,23}$` |
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Custom MCP servers" href="/integrations/custom-mcp">
+    Point an agent at a server you run yourself.
+  </Card>
+  <Card title="Google Calendar" href="/integrations/google-calendar">
+    The nine native calendar tools, and how to prompt an agent to book.
+  </Card>
+  <Card title="Prompting" href="/agents/prompting">
+    Telling the model when to reach for a tool, and what to say while it runs.
+  </Card>
+</CardGroup>

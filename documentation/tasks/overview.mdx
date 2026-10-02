@@ -1,0 +1,265 @@
+---
+title: "Overview"
+description: "An agent task takes named inputs and returns a typed structured output — run on its own, or entered by an agent mid-conversation."
+---
+
+An agent task takes named inputs, does some work with a model and its tools, and returns a typed value. Same prompt, same model, same tools, same MCP servers, same FAQs and same lifecycle hooks as an agent — minus everything that belongs to a *session*, plus the one thing a conversation cannot have: a **structured output you declare up front**.
+
+**A task runs two ways, and it declares nothing that ties it to either.**
+
+| How | What it is |
+| --- | --- |
+| On its own — `POST /v1/tasks/{id}/runs`, or an [email batch](/email/overview) drafting a row | An LLM with tools and nobody to talk to. Its own run record, its own cost. |
+| Entered by an agent mid-conversation — [agent tasks](/agents/agent-tasks) | It takes over the call for as long as the job takes, speaking with that agent's voice, and hands its typed result back as a tool result. |
+
+Reach for a task when the work has an input and an answer rather than a conversation. Research a company from a domain. Classify an inbound message. Draft an opening line. Take a shipping address in the middle of a call and give it back.
+
+Here is a complete task, exactly as `POST /v1/tasks` takes it:
+
+```json
+{
+  "config": {
+    "name": "Research a company",
+    "prompt": "You research companies from a work email address.\n\nGiven {{vars.email}}, work out the company behind the domain, what it sells and who it sells to. Use the web search tool before you answer, and never guess a fact you did not read.",
+    "llm": {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "medium"
+    },
+    "vars": [
+      { "name": "email", "description": "A work email address, e.g. priya@northwind.com", "required": true }
+    ],
+    "output": [
+      { "name": "company_name", "type": "string", "description": "The company's legal or trading name. Send null if the domain resolves to no company you can identify." },
+      { "name": "what_they_sell", "type": "string", "description": "One or two sentences on the product and who buys it, in plain language. Send null if you could not read enough to say." },
+      { "name": "employee_count", "type": "integer", "description": "Headcount as a whole number, from the company's own site or a listing page. Send null rather than estimating." },
+      { "name": "is_enterprise", "type": "boolean", "description": "True if they sell mainly to companies of 500+ people, false if they sell to smaller businesses or consumers. Send null if the site does not say." }
+    ],
+    "max_steps": 25,
+    "timeout_seconds": 180
+  }
+}
+```
+
+Only `name` and `output` are required. Everything else takes a default.
+
+## What a task is not
+
+A task is its own noun with its own operations, not a fourth agent channel. What it leaves out is exactly what belongs to a **session** — and a task never owns one. Run on its own there is no session to configure; entered by an agent, it inherits that call's.
+
+| An agent has | A task has it too | Why not |
+| --- | --- | --- |
+| `prompt`, `llm`, `tools`, `mcps`, `faqs`, `vars`, `timezone` | Yes | — |
+| `on_enter`, `on_exit`, `on_user_turn_completed` | Yes | They are `Agent` fields, and a task is an agent. `on_user_turn_completed` only ever fires when an agent entered the task — a headless run has nobody to take a turn. |
+| `stt`, `tts`, `realtime`, `language`, `turn_handling` | No | It runs on the media of the session that entered it, or on no media at all. |
+| `channel` | No | `channel` says which media slots an agent fills, and a task fills none — which is what lets one task be entered by a voice agent and drafted by an email batch. |
+| `greeting` | No | A task enters mid-conversation; a scripted opening line there is jarring. It opens by answering instead. |
+| `handoffs` | No | A task hands control back to whoever entered it, so handing the conversation to a third agent would strand that return. Sent anyway, it is a `422` saying so. |
+| `avatar`, `recording`, `analysis`, `conversation` | No | These belong to a call. A task entered on a recorded call is recorded with it. |
+
+The config forbids fields it does not have. Sending `greeting` or `stt` on a task is a `422`, not a silent drop.
+
+<Warning>
+`vars` are **also the schema of the tool an agent calls the task with**. Declare a variable only for what the caller or the model must supply — anything the task can read for itself belongs in the prompt. See [agent tasks](/agents/agent-tasks#variables-what-the-model-is-asked-for).
+</Warning>
+
+## What the prompt can read
+
+A task's prompt is a template, checked when you save it, exactly as an agent's is.
+
+| Token | Resolves to |
+| --- | --- |
+| `{{vars.name}}` | The value this run was given, or the variable's declared `default`. |
+| `{{system_vars.now}}` / `.date` / `.time` | The clock, in the task's `timezone`. Setting `timezone` is required before you can read any of them — a task without one is refused with the reason. |
+
+`{{system_vars.human_phone_number}}`, `{{system_vars.agent_phone_number}}` and `{{system_vars.direction}}` come from the call a task was entered from, so they hold something there and nothing at all on a standalone run. Writing one is not an error, but it saves with a warning saying so.
+
+`{{userdata.*}}` resolves too, against the live state of the call that entered the task — which is how a task reads a value an earlier tool published without declaring a variable for it. `{{secrets.NAME}}`, `{{args.*}}` and `{{tooldata.*}}` are refused in a prompt here for the same reasons they are refused in an agent's — see [variables](/agents/variables).
+
+## Draft and published
+
+**A task has the same lifecycle an agent has**: a draft you save freely, a publish that freezes it as an immutable version, and runs that use the published one. `create_task` and `update_task` write the draft; `publish_task` is what makes it run.
+
+See [versions](/tasks/versions) for the whole of it — what a publish freezes, what a run records, and what rolling back does. The rules are the agent ones, so [agent versions](/agents/versions) covers the same ground for both.
+
+## Reference
+
+| Field | Type | Default | Bound | Meaning |
+| --- | --- | --- | --- | --- |
+| `name` | string | — | required, unique in the workspace | For people, not the model. A duplicate is a `409`. |
+| `prompt` | string | `""` | — | The system prompt, and the whole of the task's behaviour. An empty one saves with a warning. |
+| `llm` | object | `openai/gpt-5.6-luna` | one model | Same shape as an agent's: `provider`, `model`, plus `fallback`, `reasoning_effort`, `priority` and `builtin_tools`. See [models](/agents/models) and [thinking and provider tools](/agents/reasoning-and-builtin-tools). |
+| `tools` | array | `[]` | published tools only | Tools the model may call. See [tools and MCP servers](/tasks/tools-and-mcps). |
+| `mcps` | array | `[]` | active integrations only | MCP servers whose tools it may call. |
+| `faqs` | array | `[]` | at most 10 | FAQs the task answers from, each `{"faq_id": "…"}` — or a whole FAQ defined inline, which a task write creates as a stored FAQ. See [FAQs](/agents/faqs). |
+| `vars` | array | `[]` | — | The inputs. See [inputs and output](/tasks/inputs-and-output). |
+| `output` | array | `[]` | at most 25; publishing needs 1 | The typed result. |
+| `max_steps` | integer | `25` | 1 to 50 | Model → tools → model rounds per attempt. |
+| `timeout_seconds` | integer | `300` | 10 to 600 | The real time budget for the whole run. |
+| `timezone` | string \| null | `null` | IANA name | The task's clock, e.g. `"Asia/Kolkata"`. Only needed if the prompt or a tool reads it. |
+
+Nothing here is billed by Talqing. The platform fee is charged on calls and chats, and a task run is neither — what a run costs is your own provider spend on your own key, reported back as `provider_cost`. See [pricing and credits](/get-started/pricing-and-credits).
+
+## In the dashboard
+
+**Tasks** in the sidebar lists every task in the workspace, each row showing its signature — `email → company_name, what_they_sell` —, whether it is live or still a draft, and how its last run went. Opening one gives a single editor with Prompt, Model, Inputs and output, Tools, FAQs, Limits and Run sections, a TaskCoPilot rail beside them, and **History**, **Save draft** and **Publish** in the header. The Run section runs the published version, so publish before you can try it.
+
+## End to end
+
+Create a task and run it. Tasks are regional: a task created against `https://api.in.talqing.com` does not exist in `https://api.us.talqing.com`, though the same token reaches both.
+
+<CodeGroup>
+```bash cURL
+TASK_ID=$(curl -sS -X POST https://api.in.talqing.com/v1/tasks \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "name": "Classify an inbound message",
+      "prompt": "You triage inbound support messages.\n\nRead {{vars.message}} and decide which queue it belongs in.",
+      "llm": { "provider": "openai", "model": "gpt-5.6-luna" },
+      "vars": [
+        { "name": "message", "description": "The raw text of the message", "required": true }
+      ],
+      "output": [
+        { "name": "queue", "type": "string", "description": "One of: billing, technical, sales, other. Send null only if the message is empty." },
+        { "name": "is_urgent", "type": "boolean", "description": "True if the sender is blocked right now or reports an outage. Send null if the message gives no signal either way." }
+      ]
+    }
+  }' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+curl -sS -X POST "https://api.in.talqing.com/v1/tasks/$TASK_ID/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+
+curl -sS -X POST "https://api.in.talqing.com/v1/tasks/$TASK_ID/runs" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  --max-time 180 \
+  -d '{ "vars": { "message": "Our card was charged twice this morning." } }'
+```
+
+```typescript TypeScript
+import { TalqingClient } from "@talqing/sdk";
+
+const talqing = new TalqingClient({
+  baseUrl: "https://api.in.talqing.com",
+  token: process.env.TALQING_API_KEY,
+});
+
+const task = await talqing.tasks.create({
+  createTaskRequest: {
+    config: {
+      name: "Classify an inbound message",
+      prompt:
+        "You triage inbound support messages.\n\nRead {{vars.message}} and decide which queue it belongs in.",
+      llm: { provider: "openai", model: "gpt-5.6-luna" },
+      vars: [
+        { name: "message", description: "The raw text of the message", required: true },
+      ],
+      output: [
+        {
+          name: "queue",
+          type: "string",
+          description:
+            "One of: billing, technical, sales, other. Send null only if the message is empty.",
+        },
+        {
+          name: "is_urgent",
+          type: "boolean",
+          description:
+            "True if the sender is blocked right now or reports an outage. Send null if the message gives no signal either way.",
+        },
+      ],
+    },
+  },
+});
+
+const { warnings } = await talqing.tasks.publish({ task_id: task.id });
+warnings?.forEach((w) => console.warn(w));
+
+const run = await talqing.tasks.runs.create({
+  task_id: task.id,
+  runTaskRequest: { vars: { message: "Our card was charged twice this morning." } },
+});
+console.log(run.status, run.output);
+```
+
+```python Python
+import os
+from talqing import Talqing
+
+# A run blocks until the task finishes, so the client timeout must clear
+# `timeout_seconds` -- 300 seconds here, since this task does not set it. The
+# client's own default is 30.
+with Talqing(
+    token=os.environ["TALQING_API_KEY"],
+    base_url="https://api.in.talqing.com",
+    timeout=330.0,
+) as talqing:
+    task = talqing.tasks.create(
+        config={
+            "name": "Classify an inbound message",
+            "prompt": (
+                "You triage inbound support messages.\n\n"
+                "Read {{vars.message}} and decide which queue it belongs in."
+            ),
+            "llm": {"provider": "openai", "model": "gpt-5.6-luna"},
+            "vars": [
+                {"name": "message", "description": "The raw text of the message", "required": True}
+            ],
+            "output": [
+                {
+                    "name": "queue",
+                    "type": "string",
+                    "description": "One of: billing, technical, sales, other. Send null only if the message is empty.",
+                },
+                {
+                    "name": "is_urgent",
+                    "type": "boolean",
+                    "description": "True if the sender is blocked right now or reports an outage. Send null if the message gives no signal either way.",
+                },
+            ],
+        }
+    )
+    published = talqing.tasks.publish(task["id"])
+    for warning in published["warnings"]:
+        print("warning:", warning)
+
+    run = talqing.tasks.runs.create(
+        task["id"],
+        vars={"message": "Our card was charged twice this morning."},
+    )
+    print(run["status"], run["output"])
+```
+</CodeGroup>
+
+A completed run answers with the fields you declared:
+
+```json
+{
+  "status": "completed",
+  "output": { "queue": "billing", "is_urgent": false },
+  "steps_used": 1,
+  "max_steps": 25,
+  "attempts": 1,
+  "provider_cost": 0.0031,
+  "duration_ms": 2140
+}
+```
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Inputs and output" href="/tasks/inputs-and-output">
+    Declare what a task takes in and the typed result it must hand back.
+  </Card>
+  <Card title="Running and runs" href="/tasks/running-and-runs">
+    Run one, read the trace, and understand `attempts` and `steps_used`.
+  </Card>
+  <Card title="Tools and MCP servers" href="/tasks/tools-and-mcps">
+    Give a task something to do while it works.
+  </Card>
+  <Card title="Versions" href="/tasks/versions">
+    Publish, roll back, and which definition a run used.
+  </Card>
+</CardGroup>

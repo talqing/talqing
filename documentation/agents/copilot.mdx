@@ -1,0 +1,198 @@
+---
+title: "AgentCoPilot"
+description: "The assistant in the agent editor: what it can reach, what it will not do, and how to prompt it."
+---
+
+AgentCoPilot is a Talqing agent that builds Talqing agents. It sits in the rail
+of the agent editor at **Agents → your agent**, and it works through the same
+operation surface as the public API and the [MCP server](/mcp/overview) — one
+operation per endpoint, each running as you, in your workspace, with your role's
+permissions. There is no separate action layer, so anything it does you could
+have done with a `curl`.
+
+Describe what you want the agent to do and it writes the config. The editor
+updates live as it works, and everything it changes stays on the
+[draft](/agents/versions) until you publish.
+
+## What it can reach
+
+AgentCoPilot gets **every operation the API exposes to an AI builder** — the
+same set the MCP server serves. In practice that means:
+
+- **This agent's config.** It reads and rewrites the draft: prompt, greeting,
+  models, language, voice, variables, turn handling, handoffs,
+  lifecycle hooks, recording, call analysis and conversation memory.
+- **Tools.** It can create a tool with its argument schema and operation tree,
+  test it with a real run, validate it, publish it, and attach it to the agent —
+  the whole [order of operations](/agents/versions#order-of-operations-with-tools),
+  including that a tool must be published before it can be attached.
+- **FAQs.** It can create an [FAQ](/agents/faqs), add, fix and remove entries,
+  and attach it to the agent. Entry edits are live from the next session;
+  attaching still needs a publish.
+- **The catalog.** `GET /v1/catalog`, the avatar list and the voice list are the
+  only source of valid `provider`/`model` pairs, and it reads them rather than
+  guessing. It can also add an ElevenLabs library voice.
+- **Names it cannot invent.** Secret names (never their values), integrations
+  and their MCP tools, webhooks, and
+  which providers the workspace has a key for.
+- **Validation.** `validate_agent` and `validate_tool`, which it is told to call
+  rather than reason about — the snapshot says what the draft *says*, never
+  whether it is valid.
+- **The rest of the workspace, in service of this agent.** Phone numbers and
+  carrier accounts, past calls and conversations, observability
+  and webhooks. It will give this agent a number or read one of its calls to
+  work out why it went wrong; it will not go reorganizing the workspace on its
+  own.
+
+Before every model call it is handed a fresh snapshot: the agent's whole draft
+config, the full definitions of the tools attached to it, and an inventory of
+the workspace's tools with their published versions, secret names, configured providers and webhooks. That is why it does
+not need a round of reads before it starts, and why it can report what it just
+changed rather than describing the state it is looking at.
+
+It edits **this** agent. "Build me a support agent" in this editor configures
+the agent you have open and may rename it; it creates a second agent only when
+you ask for one, or when it needs a handoff target.
+
+## What it will not do
+
+Some of these are boundaries in the operation surface — the tool is not there —
+and some are rules it follows. Both are listed, because the difference
+matters when something does not happen.
+
+**Not reachable at all.** These operations are not exposed to any AI builder:
+
+| Out of reach | Why |
+| --- | --- |
+| Sign-in, organizations, members, invites and roles | Who is in a workspace stays where a human is deliberately in the loop. See [workspaces and roles](/get-started/workspaces-and-roles). |
+| Creating or revoking a personal access token | It cannot mint a credential. |
+| The workspace-wide data retention setting | Workspace-wide and irreversible. |
+| Anything under billing — buying credits, reading the balance or the ledger | A CoPilot must not spend your money. When a call failed for want of credit, the call's own `close_reason` says so. |
+| Playing, downloading or deleting a call recording | Not tool-shaped, and a recording cannot be rebuilt. `get_call` reports `recording.state`, which is the part it can reason about. |
+| Erasing a call (`DELETE /v1/calls/{session_id}`) | It destroys a call's whole content and can take a contact's cross-call memory with it. |
+| Any CoPilot's own chat endpoints | An agent must not drive itself or another builder agent. |
+| The SSE event streams | Not tool-shaped. It polls the equivalent list endpoints instead, so nothing is unreachable. |
+| Inbound provider and carrier webhooks | Callbacks, not operations. |
+
+**Rules it follows.** It has the operation and holds back:
+
+- **It does not publish the agent unless you ask.** It will tell you the draft
+  is ready and wait for "publish", "deploy" or "go live". Publishing a *tool*
+  needs no confirmation — that is a prerequisite for attaching it.
+- **It does not reach a real person unless you named them.** An outbound call
+  rings a phone and costs money; a message on a connected channel is a message
+  someone receives. Both are irreversible.
+- **It deletes only on an explicit request naming the target.** Agents, tools,
+  carrier accounts, integrations, triggers, secrets and
+  webhooks are permanent. Taking a phone number out of service is treated the
+  same way, because it stops real callers reaching anyone.
+- **It never repeats a secret back.** Provider keys, webhook signing secrets and
+  tokens are shown once; repeating one would put it in the chat transcript.
+- **It declines what the platform does not do** rather than approximating it.
+
+Your role still applies. AgentCoPilot acts as you, so an operation your role
+cannot perform comes back to it as a `403` — a viewer can watch the chat but
+cannot send to it at all.
+
+## It is never billed
+
+AgentCoPilot runs on a model Talqing provides and pays for. It does not use your
+provider keys, it opens no session, and it carries no platform fee. Nothing it
+does appears on your credit ledger.
+
+What it *builds* costs what it would have cost anyway: a test run of a tool, a
+`run_task`, an outbound call it placed at your request, and every call your
+published agent then handles are all billed normally.
+
+## Prompting it well
+
+Say what the agent should do. Do not name fields — it knows which field carries
+which behaviour, and describing the behaviour lets it pick the right one.
+
+Good starting prompts:
+
+> Build an order-status line for Example Retail. It should ask for the order
+> number, look it up at `https://api.example.com/orders/{order_id}` using the
+> `ORDERS_API_KEY` secret, read the status back plainly, and hand off to Billing
+> if the caller asks about a refund.
+
+> This agent talks to customers in Bengaluru. Set it to Hindi, pick a Sarvam
+> voice that suits a support line, and set the timezone so it can talk about
+> today's opening hours.
+
+> Add a `store_code` variable, required, defaulting to `blr-01`, and use it in
+> the prompt so the agent knows which branch it is answering for.
+
+> This agent should remember earlier calls from the same person and greet them
+> accordingly. Set that up properly rather than putting it in the prompt.
+
+> Validate this agent and tell me what is blocking a publish.
+
+> The call `4c1f8b02-91ad-4e6e-9a37-58c2d0f7bb14` went badly — the caller hung
+> up after the agent read out a list. Read the transcript and fix the prompt.
+
+What makes the difference:
+
+- **Give it the facts it cannot look up.** URLs, request shapes, business rules,
+  which secret holds which credential. It reads the catalog, the tool list and
+  the workspace inventory for itself; it cannot read your API docs.
+- **Create the secret first and name it.** Never paste a credential into the
+  chat. See [secrets](/platform/secrets).
+- **Ask it to validate**, then treat the errors as work. It is told never to
+  report a validation result it did not get back from the server, so "it should
+  be fine" is not an answer it will give you.
+- **One change at a time on an agent that already works.** It makes small,
+  granular edits and keeps partial progress when a call fails, so a narrow
+  instruction is both faster and easier to review in the diff.
+- **Say when you want it live.** It will not publish on its own.
+- **Point at real evidence when debugging.** A session id, a phone number, a
+  batch — it can read the transcript, the tool calls, the timings and the cost.
+
+## When a build stalls
+
+A single turn is capped at 25 model round-trips. On a long build it can hit that
+and stop with:
+
+> I hit my step limit for one turn — tell me to continue and I'll pick up where
+> I left off.
+
+Say "continue". Everything it had already written is saved — the writes went
+through as it made them, so nothing is rolled back.
+
+A turn can also fail outright, most often when the model provider rate-limits a
+long build mid-stream. The rail shows the error where the reply would have been.
+The fix is the same: the completed work stands, so send the next instruction and
+it carries on from the state it left.
+
+Sending a message while it is working interrupts the running turn and supersedes
+it — the composer says "Send to interrupt…" while a turn is in flight. Reloading
+the page is safe; the conversation and whether a turn is still running are both
+read from the server.
+
+If it reports a change and the editor does not show it, reload before assuming
+it lied. If it says a change was unnecessary, check the diff — the snapshot it
+reads is taken after its own writes, so "already correct" and "I just made it
+correct" look the same to it.
+
+## The other two CoPilots
+
+Each editor has its own, scoped to what that editor edits.
+
+- **[ToolCoPilot](/tools/copilot)** builds one tool: its argument schema and its
+  operation tree, with test runs, validation and publishing. No model choices,
+  no agent writes.
+- **[TaskCoPilot](/tasks/copilot)** builds one agent task: its prompt, its
+  inputs and the fields it must return. A task publishes like an agent, so
+  saving there is live.
+
+<CardGroup cols={2}>
+  <Card title="Versions" href="/agents/versions">
+    Draft and published — what the CoPilot's changes are waiting on.
+  </Card>
+  <Card title="Validation" href="/agents/validation">
+    The checks it runs for you, and how to read what comes back.
+  </Card>
+  <Card title="Build from your terminal" href="/mcp/overview">
+    The same operations, pointed at Claude Code or Codex.
+  </Card>
+</CardGroup>

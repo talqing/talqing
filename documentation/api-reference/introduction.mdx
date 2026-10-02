@@ -1,0 +1,194 @@
+---
+title: "Introduction"
+description: "Base URLs, the /v1 prefix, request and response conventions, and your first call."
+---
+
+The Talqing API is a JSON HTTP API. Everything the dashboard does, it does through
+these endpoints — building agents and tools, publishing them, placing calls, and
+reading back what happened.
+
+## Base URLs
+
+Every request goes to a region, and the region is the base URL. There is no
+region field anywhere in the API.
+
+| Region | Base URL |
+| --- | --- |
+| India (Bangalore) | `https://api.in.talqing.com` |
+| United States (San Francisco) | `https://api.us.talqing.com` |
+
+Every path is prefixed with `/v1`:
+
+```
+https://api.in.talqing.com/v1/agents
+```
+
+**One token reaches every region.** A personal access token names your workspace,
+not a place, and your workspace exists in every region already — so working in a
+second region is the same token and a different base URL. What is *not* shared is
+everything the workspace owns: an agent created against `api.in.talqing.com` does
+not exist in `api.us.talqing.com`, and neither do its calls, its phone numbers or
+its credit balance. See [regions](/get-started/regions).
+
+`GET /health` is the one unauthenticated endpoint. It answers for the API process
+only — a `200` does not promise the database or LiveKit is reachable.
+
+## Authenticating
+
+```
+Authorization: Bearer <personal access token>
+```
+
+Create a token in the dashboard under **Organization → API Tokens**. The token
+acts as the person who created it, with that person's current role. Full detail,
+including the role matrix and the dashboard's cookie session, is on
+[authentication](/api-reference/authentication).
+
+## Your first request
+
+<CodeGroup>
+```bash cURL
+curl https://api.in.talqing.com/v1/agents \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+import { TalqingClient } from "@talqing/sdk";
+
+const talqing = new TalqingClient({
+  baseUrl: "https://api.in.talqing.com",
+  token: process.env.TALQING_API_KEY,
+});
+
+const agents = await talqing.agents.list();
+console.log(agents.items.map((agent) => agent.config.name));
+```
+
+```python Python
+from talqing import Talqing
+
+with Talqing(
+    token=os.environ["TALQING_API_KEY"],
+    base_url="https://api.in.talqing.com",
+) as talqing:
+    agents = talqing.agents.list()
+    print([agent["config"]["name"] for agent in agents["items"]])
+```
+</CodeGroup>
+
+```json Response
+{
+  "items": [
+    {
+      "id": "9c2f1a44-3d0b-4a6e-8f21-5b7c0e93a4d1",
+      "config": { "name": "Support line", "channel": "voice" },
+      "published_version": 3,
+      "published_at": "2026-08-28T11:02:19.401882Z",
+      "created_at": "2026-08-21T09:14:22.792290Z",
+      "updated_at": "2026-08-28T11:02:19.401882Z"
+    }
+  ],
+  "has_more": false,
+  "limit": 200,
+  "offset": 0
+}
+```
+
+## Requests and responses
+
+| Convention | What it means |
+| --- | --- |
+| Content type | `application/json` in and out. Send `Content-Type: application/json` on any request with a body. |
+| Ids | Bare UUIDs as strings. There are no prefixed ids anywhere in this API. |
+| Timestamps | ISO 8601 in UTC, with microseconds and a `Z` suffix: `2026-08-30T15:49:30.792290Z`. |
+| Empty results | A list endpoint returns `{"items": [], "has_more": false, …}`, never `null` and never a bare array. |
+| Deletes | Return `{"ok": true}` with a `200`, not a `204`. |
+| Errors | One envelope at every status code: `{"detail": {"message", "errors"}}`. Both fields are always present. |
+| Rate limits | There are none. Nothing throttles inbound requests, and no endpoint returns a `429`. |
+
+### PATCH semantics
+
+A `PATCH` merges. A field you omit is left as it is; a field you send as an
+explicit `null` is cleared.
+
+```bash
+# clear the label, leave everything else alone
+curl -X PATCH https://api.in.talqing.com/v1/telephony/phone-numbers/1f6b0c85-9e34-4d72-a801-3c5d7e26f490 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"label": null}'
+```
+
+That distinction is why the Python SDK does not send an argument you did not
+pass, and why the TypeScript SDK's request bodies are plain objects you build
+yourself.
+
+### Lists are sent whole
+
+A merge reaches into objects but not into lists:
+
+- `PATCH /v1/agents/{agent_id}` and `PATCH /v1/tasks/{task_id}` merge `config`
+  key by key, into nested objects such as `llm` too. A list such as `tools` or
+  `handoffs` replaces the one stored, so to add an entry, send the full list with
+  it appended. An unknown field is refused. See
+  [updating an agent](/agents/overview#updating-an-agent).
+- `PATCH /v1/tools/{tool_id}` merges its top-level fields, but `operations`
+  replaces the entire tree. Send every node you want to keep.
+
+Writes land on the draft. Live traffic keeps running the published version until
+you publish again — see [versions](/agents/versions).
+
+### Validation and publishing
+
+Every `validate_*` endpoint answers `{"errors": [...], "warnings": [...]}`.
+Errors block a publish; warnings do not. `POST /v1/agents/{agent_id}/publish`
+runs the same validation and refuses with the errors if it fails.
+
+## The endpoint reference
+
+The **Endpoints** section of this tab is generated from the OpenAPI document and
+grouped by tag:
+
+| Tag | Covers |
+| --- | --- |
+| `agents` | Agent drafts, published versions, and runtime tokens |
+| `tools` | Custom tools and operation trees |
+| `tasks` | Agent tasks: a prompt, tools and a typed result, with nobody to talk to |
+| `calls` | Call tokens, call history, usage, and cost observability |
+| `conversations` | Persistent customer conversations across channels |
+| `telephony` | SIP carrier accounts, phone numbers, and PSTN calling |
+| `email` | Verified senders, and email batches reviewed row by row before sending |
+| `integrations` | External services and MCP servers attached to agents |
+| `observability` | Workspace execution, cost, and latency analytics |
+| `webhooks` | Webhook subscriptions and delivery logs |
+| `secrets` | Workspace secret storage for tools |
+| `byok` | Your own API key for each AI provider |
+| `catalog` | Provider, model, avatar, and voice catalogs |
+| `billing` | Prepaid credits: the balance, its ledger, and buying more |
+| `copilot` | AgentCoPilot, ToolCoPilot and TaskCoPilot conversations |
+| `schemas` | Full definitions of the large request types an AI builder's tool arguments defer to |
+| `service` | Liveness of the API itself |
+
+## What is not here
+
+Sign-in, workspaces, members and roles, personal access tokens, and payments live
+on a **separate control host** and are not part of this reference. They are global
+rather than regional, which is why they are not on a region's API at all: a
+`404` from a regional base URL for one of those paths means you are aimed at the
+wrong host.
+
+You never need those endpoints to integrate. Create a token in the dashboard,
+point a client at a region, and everything below is reachable. The generated
+SDKs and the MCP server cover exactly this regional surface for the same reason.
+
+<CardGroup cols={2}>
+  <Card title="Authentication" href="/api-reference/authentication">
+    Bearer tokens, roles, and which operations need which.
+  </Card>
+  <Card title="Errors" href="/api-reference/errors">
+    The one error envelope, every status code, and what to retry.
+  </Card>
+  <Card title="SDKs" href="/sdks/overview">
+    TypeScript and Python clients generated from this document.
+  </Card>
+</CardGroup>

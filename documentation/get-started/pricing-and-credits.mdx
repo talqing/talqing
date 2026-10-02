@@ -1,0 +1,245 @@
+---
+title: "Pricing and credits"
+description: "One platform fee — per minute on calls, per answered message on text. Provider spend goes to your own accounts, never through us."
+---
+
+There are two kinds of money on this platform and blurring them is the fastest way to misread a bill.
+
+**Provider spend** is what OpenAI, Deepgram, ElevenLabs, Anam and the rest charge for the models your agent runs. It goes to **your** accounts, on **your** [provider keys](/get-started/provider-keys), at whatever rates you have negotiated. Talqing reports it on every call so you can see where the money went, and **collects none of it**. Debiting it here would charge you a second time for what your provider already billed you.
+
+**The platform fee** is what Talqing charges. It is a flat rate — per minute on a call, per answered message on text — it is the only thing debited from your credit balance, and there is nothing else.
+
+## The platform fee
+
+| Channel | Fee | Charged on |
+| --- | --- | --- |
+| `voice` | **$0.0035 per minute** | Phone calls and web voice calls |
+| `video` | **$0.01 per minute** | Web video calls with an [avatar](/agents/video-avatars) |
+| `text` | **$0.0001 per answered message** | [Chats](/channels/text-conversations) — over the API, Telegram and WhatsApp |
+
+Minutes are the call's own duration, billed to the second and priced per minute. There is no per-call minimum, no connection fee and no monthly charge.
+
+On text, **an answered message is one the agent finished replying to**. A message superseded by a newer one before the agent answered, and one whose turn failed, are free. Time is not billed at all: a chat that sits open for a week costs nothing until somebody writes.
+
+### The fee is waived on a failed call
+
+A call that never worked does not earn us a margin. When a call ends for one of these reasons the platform fee is **not charged** — your provider spend on it still stands, because those providers were paid regardless:
+
+`error`, `stale`, `job_shutdown`, `job crashed`, `orphaned`, `unknown`, `avatar_start_failed`, `invalid_dispatch_metadata`, `missing_dispatch_metadata`, `unknown_tenant`, `missing_published_definition`, `rejected`, `insufficient_credits`, and any reason ending in `_failed`.
+
+<Warning>
+A call that connected and went badly is not a failed call. A caller who hangs up after two seconds, an agent that answered a voicemail, a conversation that achieved nothing — all of those completed, and all of them are charged. Only the reasons listed above waive the fee. See [close reasons](/observability/close-reasons).
+</Warning>
+
+A call with **no** close reason at all is treated as a normal completion and charged. That is deliberate: the failure list is explicit, with no substring guessing.
+
+## Credits
+
+Credits are a prepaid balance in USD that the platform fee is drawn against.
+
+**There is one balance per region.** It is a regional record, like everything else a workspace owns, so you can hold $50 in India and $0 in the United States — and in that state, calls in the United States are refused while calls in India run. Nothing transfers between regions. Every balance, ledger and banner in the dashboard is labelled with the region it belongs to; see [regions](/get-started/regions).
+
+### Reading the balance
+
+Any member can read it. `GET /v1/billing/credits` returns this region's balance, what it buys at today's rates, the warning threshold and the packs on sale.
+
+<CodeGroup>
+```bash cURL
+curl https://api.in.talqing.com/v1/billing/credits \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const credits = await talqing.billing.credits.get();
+
+console.log(credits.balance, credits.voice_minutes_remaining);
+```
+
+```python Python
+credits = talqing.billing.credits.get()
+
+print(credits["balance"], credits["voice_minutes_remaining"])
+```
+</CodeGroup>
+
+```json
+{
+  "balance": 42.5,
+  "currency": "USD",
+  "voice_minutes_remaining": 12142,
+  "video_minutes_remaining": 4250,
+  "low_balance_threshold": 2.0,
+  "packs": [
+    { "id": "usd_20", "amount": 20.0, "voice_minutes": 5714 },
+    { "id": "usd_50", "amount": 50.0, "voice_minutes": 14285 }
+  ],
+  "topup_status": null
+}
+```
+
+`voice_minutes_remaining` and `video_minutes_remaining` are the balance divided by that channel's platform fee. They say how much *fee* you can still pay, not what a call will cost you all in — your provider spend is on top and is not counted here.
+
+### The signup credit
+
+The workspace created for you at your **first sign-in** is granted **$10 in every region**. That is enough platform fee for roughly 2,800 minutes of voice, so the fee side of your first calls costs you nothing. Your provider bills are still your own.
+
+It is granted once. A second workspace you create yourself starts at **$0 in every region** — the grant belongs to the account you signed up with, not to each workspace you go on to make.
+
+### Buying more
+
+Credit is sold in fixed packs. The pack id is the amount.
+
+| Pack id | Amount |
+| --- | --- |
+| `usd_20` | $20 |
+| `usd_50` | $50 |
+| `usd_100` | $100 |
+| `usd_200` | $200 |
+| `usd_500` | $500 |
+| `usd_1000` | $1000 |
+
+There is no arbitrary amount and no subscription. **Only an ADMIN can buy** — spending the workspace's money is an admin act, the same as storing a provider key.
+
+Starting a purchase returns a hosted checkout URL to open in a browser; the card details never touch Talqing. In the dashboard this is **Settings → Billing**.
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/billing/credits/checkout \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "pack": "usd_50" }'
+```
+
+```typescript TypeScript
+const checkout = await talqing.billing.credits.checkout({
+  creditCheckoutRequest: { pack: "usd_50" },
+});
+
+console.log(checkout.checkout_url, checkout.topup_id);
+```
+
+```python Python
+checkout = talqing.billing.credits.checkout(pack="usd_50")
+
+print(checkout["checkout_url"], checkout["topup_id"])
+```
+</CodeGroup>
+
+<Warning>
+**The credit lands in the region whose API you called.** Nothing in the request names a region — buy from `https://api.in.talqing.com` and the money is in India. There is no transfer between regions, so a pack bought in the wrong one has to be spent there.
+</Warning>
+
+The pack credits exactly what it says. Currency conversion, tax and processor fees all move what we *receive* and none of them touch what you are credited.
+
+After paying, the payment processor returns you to the billing page. If the credit has not appeared yet, reading the balance again is what applies it — `topup_status` on that response tells you whether the processor has confirmed the payment (`pending`, `paid`, `failed`, `cancelled`, `refunded`) so you can tell "still waiting on the card" from "paid, landing now".
+
+### The low-balance warning
+
+Below **$2** the dashboard shows a low-credit banner. **It warns and never blocks.** Calls keep running and new ones keep starting until the balance actually reaches zero. The threshold is served with the balance rather than hard-coded in the browser, so `low_balance_threshold` is always the real one.
+
+## Running out
+
+The whole check is `balance > 0`. There is no reservation, no forecast of what a call might cost and no floor — only whether there is anything left at all.
+
+**Starting a new call is refused.** It is checked when you mint a web call token, when you place an outbound call, when a batch dials, and when an inbound phone call arrives.
+
+| Where | What you get |
+| --- | --- |
+| `POST /v1/calls/token` (web call) | **HTTP 402** |
+| `POST /v1/calls/outbound` | **HTTP 402** |
+| `POST /v1/chats` | **HTTP 402** |
+| A Telegram or WhatsApp message that would start a chat, or a message to a chat that has sat idle | The agent does not run and nothing is sent. Over the API the turn returns `status: "error"` with the message below |
+| An inbound phone call | The call is refused at the door and recorded with `close_reason: "insufficient_credits"` |
+| A running call batch | It **pauses**, and says why. See below |
+
+The `402` body is the standard [error envelope](/api-reference/errors):
+
+```json
+{
+  "detail": {
+    "message": "This workspace is out of credits. Add credits in Settings → Billing to start new calls. Calls already in progress are unaffected.",
+    "errors": []
+  }
+}
+```
+
+A refused call reads back with `close_reason: "insufficient_credits"` and is itself never charged — it is on the waived list, so being out of credit cannot push you further into debt.
+
+**A call already running is never interrupted**, and a chat in active use is not checked on every message. Nobody is cut off mid-sentence because a balance crossed zero. The consequence is that the balance can end up slightly negative — by that one call's own fee — and the ledger is signed, so **the next top-up pays the debt off first**.
+
+**A batch pauses rather than fails.** When a running [call batch](/telephony/batch-calling) finds no credit, that dialling pass does nothing and the batch stays `running` with its reason shown on the batch page. Add credit and it resumes on its own, with no button to press. The check is per pass, never per recipient, so nobody burns a retry attempt on a call that was never dialled.
+
+## The ledger
+
+Every movement of the balance is a row, newest first, each carrying the balance it produced and a pointer to what caused it. `GET /v1/billing/credits/ledger`.
+
+| Kind | What it is | Points at |
+| --- | --- | --- |
+| `signup_grant` | The one-time grant on the workspace created at your first sign-in | Nothing — the kind is the whole explanation |
+| `purchase` | A credit pack you bought | The top-up |
+| `usage` | A call's platform fee, debited when it ends — or a chat's, debited as it goes | The call or chat |
+| `refund` | A payment reversed by the processor | The top-up |
+| `adjustment` | A manual correction, with a note saying why | Its note |
+
+<CodeGroup>
+```bash cURL
+curl -G https://api.in.talqing.com/v1/billing/credits/ledger \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "limit=50"
+```
+
+```typescript TypeScript
+const page = await talqing.billing.credits.ledger({ limit: 50 });
+
+for (const entry of page.items) {
+  console.log(entry.created_at, entry.kind, entry.amount, entry.balance_after);
+}
+```
+
+```python Python
+page = talqing.billing.credits.ledger(limit=50)
+
+for entry in page["items"]:
+    print(entry["created_at"], entry["kind"], entry["amount"], entry["balance_after"])
+```
+</CodeGroup>
+
+A `usage` row is written only when there is a fee to take: a failed call moves the balance by nothing, and a ledger a customer reads should not be full of rows saying we took nothing. A long chat can have several `usage` rows, each for the messages answered since the last one; they add up to the chat's fee and never exceed it. Re-pricing a call — an [analysis backfill](/observability/call-analysis), say — cannot debit it twice.
+
+## Estimating what an agent costs per minute
+
+The platform fee is fixed and known. Provider spend is not, and it is almost always the larger number, so estimate it before you run anything at volume.
+
+**In the dashboard**, the agent editor's right rail shows a live per-minute estimate for the current draft, broken into `STT`, `LLM`, `TTS` (or `Realtime`), `Avatar` and `Platform`. It moves as you change models, so it is the fastest way to compare two stacks.
+
+**Over the API**, `GET /v1/catalog` serves both halves of the arithmetic: each entry's real provider rates, and a `cost_estimate_usage_per_minute` block giving the quantities a spoken minute is assumed to use — 800 input and 250 output tokens of language model, 900 characters of speech, 60 seconds of streaming speech-to-text (20 for a batch model, since it only ever sees the caller's own utterances).
+
+Worked through for a common English stack — Deepgram `nova-3-general`, OpenAI `gpt-5.4-mini`, Deepgram `aura-2`:
+
+| Line | Rate | Per minute |
+| --- | --- | --- |
+| Speech-to-text | $0.0000967 per audio second × 60 | $0.0058 |
+| Language model | $0.75 / 1M in × 800, $4.50 / 1M out × 250 | $0.0017 |
+| Text-to-speech | $0.00003 per character × 900 | $0.0270 |
+| **Your provider spend** | | **≈ $0.035** |
+| **Talqing's platform fee** | voice | **$0.0035** |
+
+So roughly four cents a minute, of which about a third of a cent is ours. Swap the voice for ElevenLabs `eleven_flash_v2_5` at $0.00005 per character and the total goes to about $0.056 — the platform fee does not move.
+
+A text agent is estimated **per message** instead: the catalog's `cost_estimate_usage_per_text_message` block assumes 800 input and 250 output tokens of language model per reply, and `platform_fee_per_message` adds the $0.0001.
+
+These are estimates from assumed quantities, not a quote. What you are actually billed comes from the tokens, characters and seconds each provider metered on the real call, and you can read all of it per call. See [costs](/observability/costs).
+
+## Next
+
+<CardGroup cols={2}>
+<Card title="Provider keys" href="/get-started/provider-keys">
+  The other half of the bill, and the one we never touch.
+</Card>
+<Card title="Costs" href="/observability/costs">
+  What one call actually cost, line by line.
+</Card>
+<Card title="Regions" href="/get-started/regions">
+  Why the balance is per region and what that means in practice.
+</Card>
+</CardGroup>

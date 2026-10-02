@@ -1,0 +1,173 @@
+---
+title: "End call"
+description: "The end_call operation, what has to happen before it, and how to word a goodbye the platform can keep."
+---
+
+`end_call` hangs up. It is how an agent closes a call itself — after the caller
+has said they are done, after a booking is confirmed, or on a branch where there
+is nothing left to do.
+
+```json
+{ "kind": "end_call" }
+```
+
+There is nothing to configure. `config` may be omitted entirely, and an
+`end_call` with any field in it is refused at save.
+
+## Everything the tool must do goes before it
+
+`end_call` is **terminal in its chain**. Nothing may follow it in the top-level
+list or inside a `then`/`else` branch, and saving a tree that puts an operation
+after one is rejected:
+
+```
+tool 'wrap_up' / operations[2] / end_call: terminal `end_call` operation has
+later sibling(s) in the same chain: http. Move them before the `end_call` —
+the session is already closing by the time it returns, so work placed after
+it runs against a conversation that has ended.
+```
+
+That is not a formatting rule. By the time `end_call` returns, the session is
+draining: an HTTP call to log the outcome, a POST that files the lead, a
+`set_variable` that stamps userdata — all of it has to be **above** the
+`end_call`, while there is still a call to do it on.
+
+```json
+[
+  {
+    "kind": "http",
+    "config": {
+      "method": "POST",
+      "url": "https://api.example.com/leads",
+      "headers": { "Authorization": "Bearer {{secrets.CRM_API_KEY}}" },
+      "body": {
+        "phone": "{{system_vars.human_phone_number}}",
+        "outcome": "{{args.outcome}}",
+        "at": "{{system_vars.now}}"
+      }
+    },
+    "silent": true
+  },
+  { "kind": "say", "config": { "text": "Thanks for calling. Goodbye." } },
+  { "kind": "end_call" }
+]
+```
+
+## Wording the goodbye
+
+Put a `say` immediately before the `end_call` if the caller should hear
+something. Word it as **what actually happens: the call ends here.**
+
+<Warning>
+Never say *"let me transfer you"*, *"please hold"* or *"someone will call you
+back"* before an `end_call`. The caller hears a promise and then silence, and
+they will call back angrier than they left.
+
+If you want a transfer, use the [`transfer`](/tools/transfer) operation — there,
+"let me put you through" is a promise the platform keeps. If someone really will
+call back, say so only if something in the same tree actually files that request.
+</Warning>
+
+| Instead of | Say |
+| --- | --- |
+| "Let me transfer you to billing." | "I'll pass this to the billing team and they'll email you today. Thanks for calling." |
+| "Please hold." | "I have everything I need — thanks, and goodbye." |
+| "Someone will call you back." | "I've logged your callback request for this number. Goodbye." (only with the `http` that files it above the `end_call`) |
+
+You do not need `wait_for_playback` on that `say`. `end_call` waits for
+everything outstanding — the model's own speech from before the tool ran, and
+the goodbye the tree queued — before it hangs up, and the agent never says
+anything after it. Ticking the flag adds nothing and can only slow the tree
+down. (The wait is bounded: if a text-to-speech provider stalls for 60 seconds,
+the call is ended anyway rather than hanging.)
+
+## The agent says nothing afterwards
+
+A tool run that reaches `end_call` tells the model nothing at all, whatever the
+tree collected on the way. There is nobody left to narrate it to, so the model
+is not given a chance to add a sentence to a call that is already over.
+
+That also means `silent` is irrelevant on a tool that ends the call — it is
+already silent by the time it matters.
+
+## How the call is recorded
+
+| Channel | What happens | Close reason |
+| --- | --- | --- |
+| Voice / video | The goodbye finishes, then the line drops. | `user_initiated` — "The agent ended the call" |
+| Text | The chat ends: that turn's response says `chat_status: "ended"`, then `on_exit`, analysis and `session.completed` follow. The person's next message starts a new chat. | `end_call` — "The agent ended the conversation" |
+
+<Note>
+`user_initiated` names whichever side called shutdown, which on this platform is
+only ever the `end_call` operation. It means **the agent hung up**, not the
+caller. A caller hanging up is `participant_disconnected`. See
+[close reasons](/observability/close-reasons).
+</Note>
+
+A call ended this way is a completed call: it is billed the platform fee, it is
+eligible for [post-call analysis](/observability/call-analysis), and its
+recording is kept under the usual retention.
+
+## Worked example: qualify, then close
+
+An outbound qualification tool that files the answer and ends the call on one
+branch while carrying on with the conversation on the other. Note that the whole
+"keep going" path lives in the `else` — branches do not rejoin, so there is no
+place after the `if` to put shared work.
+
+```json
+[
+  {
+    "kind": "http",
+    "config": {
+      "method": "POST",
+      "url": "https://api.example.com/leads/{{args.lead_id}}/qualify",
+      "headers": { "Authorization": "Bearer {{secrets.CRM_API_KEY}}" },
+      "body": { "interested": "{{args.interested}}" }
+    },
+    "silent": true
+  },
+  {
+    "kind": "if",
+    "config": { "left": "{{args.interested}}", "op": "eq", "right": false },
+    "then": [
+      {
+        "kind": "say",
+        "config": {
+          "text": "Understood — I won't take up any more of your time. Thanks, and have a good day."
+        }
+      },
+      { "kind": "end_call" }
+    ],
+    "else": [
+      {
+        "kind": "generate_reply",
+        "config": {
+          "instructions": "Thank them, then ask which day next week suits them for a fifteen-minute call."
+        }
+      }
+    ]
+  }
+]
+```
+
+<Note>
+Do not use `end_call` as an error handler. A tool whose HTTP call failed should
+usually let the agent apologise and carry on; hanging up on a caller because
+your API returned a 500 is the worst available outcome. Use `on_error` on the
+failing operation instead — see [the operation tree](/tools/operation-tree).
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Transfer" href="/tools/transfer">
+    Handing the caller to a person instead of hanging up on them.
+  </Card>
+  <Card title="Speech operations" href="/tools/speech-operations">
+    `say`, `generate_reply` and when a line needs `wait_for_playback`.
+  </Card>
+  <Card title="Close reasons" href="/observability/close-reasons">
+    Every reason a call can end, and what each one means.
+  </Card>
+</CardGroup>

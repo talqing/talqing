@@ -1,0 +1,381 @@
+---
+title: "Patterns"
+description: "Six complete operation trees worth starting from, what each costs on a live call, and the three rules behind them."
+---
+
+Every tree here is complete and postable as the `operations` of a real tool. Read
+the "when" and the "what it costs" lines before you paste — the trees are cheap,
+the design decisions are not.
+
+## 1. Lookup then answer
+
+**When.** The most common shape there is: the caller asks something you have to
+fetch, and the agent answers from what came back.
+
+```json
+[
+  {
+    "kind": "say",
+    "config": { "text": "One moment, let me pull that up." }
+  },
+  {
+    "kind": "http",
+    "config": {
+      "method": "GET",
+      "url": "https://api.example.com/accounts/{{args.account_id}}/balance",
+      "headers": { "Authorization": "Bearer {{secrets.BILLING_API_KEY}}" },
+      "timeout": 10
+    },
+    "silent": true,
+    "publish_fields": [
+      { "path": "balance_due", "key": "balance", "store": "tooldata" },
+      { "path": "due_date", "store": "tooldata" }
+    ]
+  },
+  {
+    "kind": "generate_reply",
+    "config": {
+      "instructions": "Tell the caller their outstanding balance is {{tooldata.balance}} and it is due on {{tooldata.due_date}}. One sentence, then ask if they would like to pay now."
+    }
+  }
+]
+```
+
+The `say` is a filler whose whole job is to cover the HTTP latency, so it has no
+`wait_for_playback`: the tree moves on while it plays. The `http` is `silent`, so
+the raw JSON never reaches the model — only the two values you picked out of it.
+
+**What it costs on a live call.** The HTTP round trip, plus one extra model call
+for the `generate_reply`. If the wording never changes, swap the
+`generate_reply` for a `say` and you save that model call and its latency.
+
+## 2. Book, then confirm
+
+**When.** The tool does something irreversible and the caller has to be told
+whether it worked.
+
+```json
+[
+  {
+    "kind": "say",
+    "config": { "text": "Let me get that booked for you." }
+  },
+  {
+    "kind": "http",
+    "config": {
+      "method": "POST",
+      "url": "https://api.example.com/bookings",
+      "headers": { "Authorization": "Bearer {{secrets.BOOKING_API_KEY}}" },
+      "body": {
+        "date": "{{args.date}}",
+        "time": "{{args.time}}",
+        "party_size": "{{args.party_size}}",
+        "phone": "{{system_vars.human_phone_number}}"
+      },
+      "timeout": 15
+    },
+    "silent": true,
+    "publish_fields": [
+      { "path": "confirmed", "store": "tooldata" },
+      { "path": "reference", "store": "tooldata" }
+    ]
+  },
+  {
+    "kind": "if",
+    "config": { "left": "{{tooldata.confirmed}}", "op": "eq", "right": true },
+    "then": [
+      {
+        "kind": "say",
+        "config": {
+          "text": "You're booked for {{args.date}} at {{args.time}}. Your reference is {{tooldata.reference}}."
+        }
+      },
+      {
+        "kind": "set_variable",
+        "config": {
+          "key": "booking_reference",
+          "value": "{{tooldata.reference}}",
+          "store": "userdata"
+        }
+      }
+    ],
+    "else": [
+      {
+        "kind": "generate_reply",
+        "config": {
+          "instructions": "Tell the caller that slot could not be booked, apologise briefly, and ask whether a different time would work."
+        }
+      }
+    ]
+  }
+]
+```
+
+Two things carry the design. The confirmation is a `say`, not a
+`generate_reply`, because a reference number is exactly the thing a model
+paraphrases wrongly. And the reference goes into **`userdata`**, not `tooldata`,
+so the rest of the call — the agent's prompt, another tool, a later turn — still
+knows it after this tool returns.
+
+**What it costs.** One HTTP round trip on the happy path and no model call at
+all: the `say` branch is the whole reply. The failure branch costs one extra
+model call, which is the right place to spend it.
+
+<Note>
+An `if` is terminal in its chain, so anything both branches need is written into
+both. There is no place after the `if` to put shared work.
+</Note>
+
+## 3. Escalation
+
+**When.** The caller needs a person. See [transfer](/tools/transfer) for the
+whole story; this is the shape.
+
+```json
+[
+  {
+    "kind": "say",
+    "config": { "text": "Putting you through to the support team now — one moment." }
+  },
+  {
+    "kind": "transfer",
+    "config": {
+      "destination": "+14155550142",
+      "mode": "cold",
+      "ringing_timeout": 30,
+      "on_failure": "continue"
+    }
+  }
+]
+```
+
+The tree is trivial. The work is in the two fields around it:
+
+- **`description`** — this is the escalation policy, and the only thing deciding
+  when a caller reaches a person. Not "Transfer to a human", but: *"Use only
+  after you have tried to answer the question yourself and the caller has asked
+  for a person, or is clearly distressed. Do not use it for order status,
+  delivery dates or returns — you can answer those."*
+- **`disable_interruptions: true`** on the tool, so a caller saying "hello?" over
+  the ringback cannot cost them the outcome.
+
+Take no arguments, and build **one tool per destination** —
+`transfer_to_billing`, `transfer_to_sales`, `transfer_to_support`.
+
+**What it costs.** The call is over for the agent the moment it connects, and
+lands on the `transferred` close reason. `mode: "warm"` costs a second AI
+conversation on your own provider keys, plus however long the briefing takes,
+and it holds the caller for all of it.
+
+## 4. Guard, then continue
+
+**When.** There is a precondition, and the tool should bail out early rather than
+do half the work.
+
+Because an `if` is terminal, an early exit is written the other way round from
+how you would write it in code: the **guard's failure goes in `then`, and the
+entire rest of the flow goes in `else`.**
+
+```json
+[
+  {
+    "kind": "if",
+    "config": { "left": "{{userdata.account_id}}", "op": "exists" },
+    "then": [
+      {
+        "kind": "http",
+        "config": {
+          "method": "POST",
+          "url": "https://api.example.com/accounts/{{userdata.account_id}}/tickets",
+          "headers": { "Authorization": "Bearer {{secrets.SUPPORT_API_KEY}}" },
+          "body": { "summary": "{{args.summary}}" },
+          "timeout": 15
+        },
+        "silent": true,
+        "publish_fields": [{ "path": "ticket_number", "key": "ticket", "store": "tooldata" }]
+      },
+      {
+        "kind": "say",
+        "config": {
+          "text": "I've raised ticket {{tooldata.ticket}} for you. Someone from support will pick it up today."
+        }
+      }
+    ],
+    "else": [
+      {
+        "kind": "generate_reply",
+        "config": {
+          "instructions": "Tell the caller you need to find their account before raising a ticket, and ask for the email address on the account."
+        }
+      }
+    ]
+  }
+]
+```
+
+Here the happy path is in `then` because the guard is written positively
+("account exists"). Write it whichever way reads better — what matters is that
+the flow lives inside a branch, since nothing can follow the `if`.
+
+`exists` is true when the value is not null, not an empty string, and not an
+empty list or object.
+
+**What it costs.** Nothing when the guard passes: the comparison is local. The
+guard is also the cheapest place to stop — one wasted model call beats one
+wasted booking.
+
+## 5. Business hours in a `code` operation
+
+**When.** Any time-of-day or day-of-week decision. Do **not** try to do this with
+an `if`: `gt` and `lt` need two numbers, so comparing `"7:26 PM"` against
+`"09:00"` fails the operation rather than quietly taking the `else`.
+
+```json
+[
+  {
+    "kind": "code",
+    "config": {
+      "source_ts": "export default async function handler(input) {\n  // system_vars.now is ISO 8601 in the agent's own timezone,\n  // e.g. \"2026-08-30T19:26:11+05:30\". Read the wall clock straight\n  // off the string — the sandbox's own clock runs in UTC.\n  const [date, clock] = input.system_vars.now.split(\"T\");\n  const minutes = Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3, 5));\n  const weekday = new Date(`${date}T00:00:00Z`).getUTCDay(); // 0 = Sunday\n  const open =\n    (weekday >= 1 && weekday <= 5 && minutes >= 540 && minutes < 1080) ||\n    (weekday === 6 && minutes >= 600 && minutes < 840);\n  return { open, opens_next: weekday === 6 ? \"Monday at 9am\" : \"9am tomorrow\" };\n}\n",
+      "timeout": 5
+    },
+    "silent": true,
+    "publish_fields": [
+      { "path": "open", "store": "tooldata" },
+      { "path": "opens_next", "store": "tooldata" }
+    ]
+  },
+  {
+    "kind": "if",
+    "config": { "left": "{{tooldata.open}}", "op": "eq", "right": true },
+    "then": [
+      {
+        "kind": "say",
+        "config": { "text": "The team is in — let me put you through." }
+      },
+      {
+        "kind": "transfer",
+        "config": { "destination": "+14155550142", "mode": "cold" }
+      }
+    ],
+    "else": [
+      {
+        "kind": "generate_reply",
+        "config": {
+          "instructions": "Tell the caller the office is closed and opens {{tooldata.opens_next}}. Offer to take a message."
+        }
+      }
+    ]
+  }
+]
+```
+
+Written out, the script is:
+
+```ts
+export default async function handler(input) {
+  // system_vars.now is ISO 8601 in the agent's own timezone,
+  // e.g. "2026-08-30T19:26:11+05:30". Read the wall clock straight
+  // off the string — the sandbox's own clock runs in UTC.
+  const [date, clock] = input.system_vars.now.split("T");
+  const minutes = Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3, 5));
+  const weekday = new Date(`${date}T00:00:00Z`).getUTCDay(); // 0 = Sunday
+  const open =
+    (weekday >= 1 && weekday <= 5 && minutes >= 540 && minutes < 1080) ||
+    (weekday === 6 && minutes >= 600 && minutes < 840);
+  return { open, opens_next: weekday === 6 ? "Monday at 9am" : "9am tomorrow" };
+}
+```
+
+Two things that trip people up. A `code` operation has **no template syntax** —
+write `input.system_vars.now`, never `{{system_vars.now}}`, because braces inside
+the TypeScript are neither substituted nor flagged. And the agent must have a
+`timezone` set, or the clock system variables do not resolve at all; publish
+refuses a tree that reads one without it.
+
+**What it costs.** A round trip to the sandbox, in the tens of milliseconds. It
+is by far the cheapest way to make a time decision, and the only correct one.
+
+## 6. Silent logging
+
+**When.** The tool records something and the caller should never know it ran — a
+disposition, an analytics event, a CRM touch.
+
+```json
+[
+  {
+    "kind": "http",
+    "config": {
+      "method": "POST",
+      "url": "https://api.example.com/events",
+      "headers": { "Authorization": "Bearer {{secrets.ANALYTICS_API_KEY}}" },
+      "body": {
+        "event": "{{args.event}}",
+        "phone": "{{system_vars.human_phone_number}}",
+        "at": "{{system_vars.now}}"
+      }
+    },
+    "silent": true,
+    "background_execution": true
+  }
+]
+```
+
+`background_execution` detaches the request: the tree returns immediately and the
+caller waits for nothing. Nothing is published — a detached operation has no
+result to publish out of, and pairing `background_execution` with
+`publish_fields` is refused at publish. A failure only reaches the logs.
+
+Tick `silent` as well. Silence is derived from the tree, and an operation left at
+the default `silent: false` keeps the tool out of the derived-silent case — the
+model would then be handed a bare `"Done."` and would say something about it.
+
+<Warning>
+A fully silent tool means the agent says **nothing** in the turn it was called.
+That is right when the tool is wired as a
+[lifecycle hook](/agents/lifecycle-hooks) or called alongside another tool. If
+the model might call this one on its own while the caller is waiting for an
+answer, add a `generate_reply` after it.
+</Warning>
+
+**What it costs.** Nothing measurable on the call. This is the one operation the
+author cannot observe on a live call, which is what makes the
+[test run](/tools/testing-and-publishing) worth doing — a test runs a background
+operation in the chain so you can see it work.
+
+## The three rules behind all of this
+
+**One meaningful capability per tool.** `book_appointment` that checks
+availability, books and confirms beats `check_availability` +
+`create_booking` + `send_confirmation` called in sequence, because sequencing is
+the part the model gets wrong. Chain the steps in the tree, where the order is
+yours.
+
+**One tool per transfer destination.** Never one tool that branches on a
+department argument. The model picks between named tools far more reliably than
+it fills in an enum, every destination gets its own description and therefore its
+own escalation policy, and the tool list ends up reading like the org chart.
+
+**Routing the model should decide belongs on the agent, not in a tree.** If the
+caller can ask for a desk — "I want to talk about my bill" — put the destination
+on the agent's [`handoffs`](/teams/handoffs) field: one line per edge, and the
+model routes it. The [`handoff` operation](/tools/handoff-operation) is for the
+case where the *tree* decides, after a lookup or inside an `if`. Building a tool
+whose only job is to let the model choose a destination is re-implementing
+`handoffs` with more moving parts.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Testing and publishing" href="/tools/testing-and-publishing">
+    Run any of these against your real endpoints before you publish.
+  </Card>
+  <Card title="The operation tree" href="/tools/operation-tree">
+    The eleven kinds, `on_error`, and why branches do not rejoin.
+  </Card>
+  <Card title="Transfer" href="/tools/transfer">
+    The escalation recipe in full.
+  </Card>
+  <Card title="Templating and data" href="/tools/templating-and-data">
+    `tooldata` vs `userdata`, and how `publish_fields` resolve.
+  </Card>
+</CardGroup>

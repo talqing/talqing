@@ -1,0 +1,276 @@
+---
+title: "Team patterns"
+description: "Four multi-agent designs with the config to build them, and the constraints that shape a team in practice."
+---
+
+Four designs that come up repeatedly, each with the configuration that builds
+it. Every hop here is a [handoff](/teams/handoffs) — agent to agent. Handing the
+caller to a person is a [transfer](/tools/transfer), and the two are never
+interchangeable.
+
+## 1. Front desk to specialists
+
+The default shape. One triage agent answers, works out what the caller needs and
+routes; the specialists do the work.
+
+**The front desk** carries one handoff per desk and a prompt that says what it
+does *not* answer:
+
+```json
+{
+  "name": "Front desk",
+  "channel": "voice",
+  "prompt": "You are the front desk for Northwind. Find out what the caller needs in one or two questions and pass them to the right desk. Do not answer billing or technical questions yourself, even if you think you know the answer - the desks have the account and the tools.",
+  "greeting": "Thanks for calling Northwind. What can I help you with?",
+  "handoffs": [
+    {
+      "name": "Billing",
+      "agent_id": "b41c7a29-6f2b-4c7a-9c1e-1d2a8f0b41c7",
+      "description": "invoices, refunds, payment questions, card details, anything about what the caller has been charged",
+      "context": "summary",
+      "message": "Let me put you through to billing."
+    },
+    {
+      "name": "Technical support",
+      "agent_id": "7d2e5a04-91c3-4f68-b0aa-2c53e7d19f80",
+      "description": "broken devices, setup problems, error messages, anything that is not working",
+      "context": "summary",
+      "recent_turns": 3,
+      "message": "One moment, connecting you to technical support."
+    },
+    {
+      "name": "Renewals",
+      "agent_id": "c8e07b16-4a25-4d90-b7e3-91f2a6d0c845",
+      "description": "renewing, upgrading, downgrading or cancelling an existing plan",
+      "context": "summary",
+      "message": "Let me bring in the renewals desk."
+    }
+  ]
+}
+```
+
+Three descriptions that do not overlap is most of the work. If billing says
+"payments" and renewals says "plan changes", a caller asking to change their
+card and their plan in one sentence is a coin flip — put the card in billing's
+description explicitly, as above.
+
+**Each specialist's prompt** should say what its desk does, its own rules and
+its own tool use, and should **not** repeat the routing policy. It has already
+been chosen; a specialist that re-litigates which desk the caller wants sends
+them round again. Two things it should carry instead:
+
+- What to do with something outside its remit — which is pattern 2 below.
+- A line telling it not to re-introduce the company. The caller has heard the
+  greeting once, and the target speaks its own greeting on arrival. Either give
+  the specialist a short greeting that assumes the handover ("Billing here — I
+  can see your account"), or give it none at all and let it open by answering.
+
+## 2. Returning to the front desk
+
+A specialist that discovers it has the wrong caller hands back. There is nothing
+special about the return edge — it is an ordinary `handoffs` entry on the
+specialist, pointing at the front desk:
+
+```json
+{
+  "handoffs": [
+    {
+      "name": "Front desk",
+      "agent_id": "3f9a1c72-58b4-4a1e-9f27-6d0c5b8e4a13",
+      "description": "anything that is not a billing question - technical problems, plan changes, or a caller who has finished with billing and needs something else",
+      "context": "none",
+      "recent_turns": 2,
+      "message": "Let me take you back to the front desk."
+    }
+  ]
+}
+```
+
+**`context: "none"` with a small `recent_turns` is what makes the return cheap.**
+The front desk's job is to route, and routing needs the last thing the caller
+said, not the billing detour it just sat through. Under `transcript` the front
+desk would re-read the whole specialist conversation on every turn — and then
+route on it, which is worse than useless: it now knows a great deal about a
+question that has been answered.
+
+Two things to know about return edges:
+
+- **The specialist's edge counts as an edge**, so the expressive and media rules
+  apply to it in both directions.
+- **Loops are capped at 25 handoffs per call.** If a caller can bounce between
+  two desks, the descriptions overlap. Fix the descriptions rather than relying
+  on the cap, which the caller hears as *"I'm sorry, I can't pass you to another
+  assistant again on this call."*
+
+## 3. Conditional routing on a lookup
+
+Tier, entitlement and ownership are facts about the account, not judgements
+about what the caller said. Look them up and route on the answer, in a
+[`handoff` operation](/teams/conditional-handoffs) inside a tool.
+
+The agent carries both mechanisms at once:
+
+```json
+{
+  "name": "Front desk",
+  "channel": "voice",
+  "prompt": "You are the front desk for Northwind. As soon as you know what the caller needs, call route_by_account with a one-sentence reason. If it hands the call on, you are done; if it does not, help them yourself.",
+  "tools": [{ "tool_id": "9a4f0c31-2d67-4b58-a0e9-5c8137b2ef46" }],
+  "handoffs": [
+    {
+      "name": "Billing",
+      "agent_id": "b41c7a29-6f2b-4c7a-9c1e-1d2a8f0b41c7",
+      "description": "invoices, refunds, payment questions and card details",
+      "context": "summary"
+    }
+  ]
+}
+```
+
+`route_by_account` is the tool built on
+[conditional handoffs](/teams/conditional-handoffs): it looks the account up and,
+*if* it is enterprise, hands to the account manager. Billing stays on
+`handoffs`, because which desk a billing question belongs to is exactly the
+judgement the model is good at.
+
+The order matters in the prompt. A tool that may end the turn by handing over
+should be called before the agent starts answering, not after.
+
+## 4. A cast assembled per call
+
+Reach for [`agent_team`](/teams/agent-teams-on-a-call) when the cast genuinely
+differs per request: a marketplace where the specialist is the seller's own
+generated agent, an outbound campaign where each region's closer is picked from
+your own data, a demo that composes an agent from a form.
+
+```json
+{
+  "to": "+919812345670",
+  "from_phone_number_id": "5c19b2a8-0f43-4a1d-9f60-3e7d2b4c8a91",
+  "userdata": { "name": "Priya", "region": "west" },
+  "agent_team": {
+    "members": [
+      { "name": "Opener", "agent_id": "3f9a1c72-58b4-4a1e-9f27-6d0c5b8e4a13" },
+      { "name": "Closer", "agent_id": "c8e07b16-4a25-4d90-b7e3-91f2a6d0c845" }
+    ]
+  }
+}
+```
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/calls/outbound \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "to": "+919812345670",
+    "from_phone_number_id": "5c19b2a8-0f43-4a1d-9f60-3e7d2b4c8a91",
+    "userdata": { "name": "Priya", "region": "west" },
+    "agent_team": {
+      "members": [
+        { "name": "Opener", "agent_id": "3f9a1c72-58b4-4a1e-9f27-6d0c5b8e4a13" },
+        { "name": "Closer", "agent_id": "c8e07b16-4a25-4d90-b7e3-91f2a6d0c845" }
+      ]
+    }
+  }'
+```
+
+```typescript TypeScript
+const call = await talqing.calls.outbound({
+  outboundCallRequest: {
+    to: "+919812345670",
+    from_phone_number_id: "5c19b2a8-0f43-4a1d-9f60-3e7d2b4c8a91",
+    userdata: { name: "Priya", region: "west" },
+    agent_team: {
+      members: [
+        { name: "Opener", agent_id: "3f9a1c72-58b4-4a1e-9f27-6d0c5b8e4a13" },
+        { name: "Closer", agent_id: "c8e07b16-4a25-4d90-b7e3-91f2a6d0c845" },
+      ],
+    },
+  },
+});
+```
+
+```python Python
+call = talqing.calls.outbound(
+    to="+919812345670",
+    from_phone_number_id="5c19b2a8-0f43-4a1d-9f60-3e7d2b4c8a91",
+    userdata={"name": "Priya", "region": "west"},
+    agent_team={
+        "members": [
+            {"name": "Opener", "agent_id": "3f9a1c72-58b4-4a1e-9f27-6d0c5b8e4a13"},
+            {"name": "Closer", "agent_id": "c8e07b16-4a25-4d90-b7e3-91f2a6d0c845"},
+        ]
+    },
+)
+```
+</CodeGroup>
+
+**`members[0]` answers.** The opener reaches the closer through a `handoffs`
+entry named `Closer` with no `agent_id`, which resolves in this call's roster.
+If nothing reaches a member, the response's `warnings` says so.
+
+If the same two agents run on every call, this is the wrong mechanism — store
+the edge on the opener and dial one `agent_id`.
+
+## The constraints that shape a team
+
+**Expressive delivery must match across every outgoing edge.** A target of an
+agent with `tts.expressive` on must use the same provider, the same model and
+`expressive: true`, or publish refuses it — the target inherits a transcript
+full of tags and a voice that cannot speak them reads them out. Handing off
+*into* an expressive agent is fine. See
+[expressive delivery](/agents/expressive-delivery).
+
+**Keep voice and language consistent unless you mean the change.** Nothing
+enforces this beyond the expressive rule, so a team can hand a caller from one
+voice to a completely different one mid-call — which sounds like being passed to
+a colleague, and is fine if that is what you want and jarring if it is not. If
+the voices do change, have the target's greeting say who it is. If they do not,
+give every member the same `tts` block. The same goes for
+[`language`](/agents/language): a caller who was speaking Hindi to the front desk
+should not be answered in English by billing.
+
+**Every hop costs something.** At the boundary the platform loads the target's
+published definition, its pinned tools and its hooks, and builds
+its models — that is the pause the `message` exists to cover. Under
+`context: "summary"` there is a second pause first, while the source agent writes
+60–100 tokens. After that, the target pays for whatever crossed on every turn it
+takes, on your own provider key. Two hops on a short call are unnoticeable; a
+`transcript` hop late in a long call is the most expensive thing on it. See
+[context policies](/teams/context-policies).
+
+**Recording cannot start part-way through a call.** If the agent that answers
+has recording off and a target has it on, nothing is recorded — publish warns
+about the edge, and the call records a `recording.unavailable` event when it
+actually bites. Recording switching *off* mid-call always works, which is what
+makes "support → payments → support" a usable shape. See
+[recording](/telephony/recording).
+
+## Reading a multi-agent call afterwards
+
+| Question | Where to look |
+| --- | --- |
+| Which agent said this line? | Every transcript item carries its own `agent_id` and `agent_version`, stamped as it was produced. On a call with a handoff these are the only way to tell who said what. |
+| Where did the handovers happen? | The transcript carries an `agent_handoff` item at each one, reading *"Handed off to Billing"*, stamped with the agent taking over. |
+| What actually crossed? | `GET /v1/calls/{session_id}` returns the call's events; each handoff is an `agent.handoff` event carrying the policy, the resolved turn count, how many items the tail came to, and the summary itself. |
+| Which agent answered? | The session. `list_conversation_sessions` names the agent and version that **answered** each call or chat — it deliberately does not move when the call hands off. |
+
+Do not read the session row as "who handled the call". One call is one session,
+and the session names the agent that picked up; per-turn attribution is on the
+items. See [conversations](/observability/conversations) and
+[calls](/observability/calls).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Multi-agent triage" href="/guides/multi-agent-triage">
+    The front desk pattern built end to end, with a number answering.
+  </Card>
+  <Card title="Context policies" href="/teams/context-policies">
+    Choosing what each hop carries.
+  </Card>
+  <Card title="Conversations" href="/observability/conversations">
+    Sessions, items and finding one person's history.
+  </Card>
+</CardGroup>

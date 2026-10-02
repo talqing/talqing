@@ -1,0 +1,141 @@
+---
+title: "Sending and monitoring"
+description: "Send a batch now or on a schedule, pace it, and follow every row to delivered, read and replied."
+---
+
+## Review
+
+The batch page lists every row with its message rendered. Before sending you
+can **edit** a row's cells, its phone number included, **skip** a row, or
+**restore** one you skipped. Tabs filter by where each row is. Click the batch's
+name to rename it, at any time.
+
+## Send
+
+Press **Start sending**. The dialog asks when (now, or at a time) and shows the
+timezone, sending hours, pace and daily cap the batch was created with; change
+any of them there. It says how long the send will take at that pace and cap,
+walking a ramp day by day when the cap is one.
+**Messages can't be recalled once sent.**
+
+Afterwards, **Edit** on the **Sending** card changes the pace, hours or cap
+while a batch is scheduled, sending, paused or completed; changes take effect
+from the next message. Editing a ramp keeps the level it has reached unless you
+change where it starts. While it is scheduled, **Edit** can also move the start time.
+
+While a batch is sending you can **pause** it — it stops before the next
+message — **resume** it, or **cancel** it for good. Pausing a completed batch
+holds rows you add until you resume.
+
+**Deleting.** **Delete batch** in the batch page's menu
+(`DELETE /v1/whatsapp/batches/{batch_id}`) removes a draft, completed, canceled
+or failed batch and its rows for good, with who was messaged and every delivery
+and reply count. A live batch must be canceled first. The conversations it
+started stay. Export the CSV first if you need the record.
+
+## Adding rows later
+
+`POST /v1/whatsapp/batches/{batch_id}/recipients` (**Add recipients** on the
+batch page) appends rows to any batch that is not canceled or failed.
+
+<Warning>
+**On a sending or completed batch, added rows are messaged** at the batch's pace
+and hours, with nobody pressing Send. A completed batch goes back to sending. A
+draft holds them for review, and a paused batch until you resume.
+</Warning>
+
+A number already in the batch, or earlier in the same upload, is skipped. A row
+with a bad phone or a blank mapped cell is kept and skipped with the reason, as
+at create, and comes back in `skipped` with its `recipient_id` so you can fix the
+cell. `row_number` in `skipped` is the row's position in your request.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/whatsapp/batches/5e2b9d14-7c3a-4f80-a1d6-3b9e0c4f7a22/recipients \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "recipients": [{ "input": { "phone": "+919812345678", "first_name": "Arjun" } }] }'
+```
+
+```typescript TypeScript
+const added = await talqing.whatsapp.batches.recipients.add({
+  batch_id: "5e2b9d14-7c3a-4f80-a1d6-3b9e0c4f7a22",
+  addWhatsAppRecipientsRequest: {
+    recipients: [{ input: { phone: "+919812345678", first_name: "Arjun" } }],
+  },
+});
+```
+
+```python Python
+added = talqing.whatsapp.batches.recipients.add(
+    "5e2b9d14-7c3a-4f80-a1d6-3b9e0c4f7a22",
+    recipients=[{"input": {"phone": "+919812345678", "first_name": "Arjun"}}],
+)
+```
+</CodeGroup>
+
+## Statuses
+
+| Row | Meaning |
+| --- | --- |
+| Ready | Will be sent. |
+| Skipped | A person skipped it, or its phone or a mapped cell can't be sent (the reason is shown). |
+| Sent | Accepted by your BSP and on its way. |
+| Delivered | On the recipient's phone. |
+| Read | Opened (only when the recipient has read receipts on). |
+| Failed / Undelivered | Did not arrive. The reason is shown. |
+| Replied | The recipient wrote back after the template. |
+
+Receipts arrive out of order; a row only ever moves forward.
+
+## Common failures
+
+| Shown as | Code | What it means |
+| --- | --- | --- |
+| Not on WhatsApp | `63024`, `1002` | The number has no WhatsApp account. |
+| Not a valid WhatsApp number | `63003` | WhatsApp does not accept the number. |
+| Meta held back this marketing message | `63049`, `131049` | The person hit Meta's marketing limit, or it is a US number. Don't retry today. |
+| WhatsApp refused a variable | `63013` | A value was blank or had a line break or extra spaces. |
+| Opted out | `63033`, `63050` | The person opted out of your messages, or of marketing messages. |
+| Your business can't message this country | `63058` | Meta restricts your business there. |
+
+A batch sends each row once. To try the refused rows again, choose **New batch
+from failed rows** in the batch page's menu: it opens the create form with the
+same sender, template, mapping and pace, and those rows as the list.
+
+## When the batch stops itself
+
+The batch **pauses**, with the reason and what to do at the top of the page, and
+**Resume** carries on from the next row:
+
+| Cause | What to do |
+| --- | --- |
+| The credential is rejected, the sender is inactive, or the business account is refused | Fix the credential or the account, then resume. |
+| WhatsApp rejected, paused or disabled the template | Check the template at your BSP, then resume. |
+| The BSP wallet is empty | Top up, then resume. |
+| WhatsApp is limiting the sender (`63018`, `63038`) | Usually the daily messaging limit. Resume later. |
+| Ten sends failed in a row | Resume once your BSP recovers. |
+| The last 20 messages were all refused on delivery | Check the template and the list, then resume. |
+
+It **fails**, for good, only when no resume could work: the sender was deleted,
+or the person who created the batch left the workspace or can no longer send.
+
+**Deploys and restarts.** A message in flight when Talqing restarts is finished
+and recorded before the worker stops. After a crash, a Twilio row whose outcome
+is unknown is looked up and adopted rather than sent again. Gupshup has no
+lookup, so such a row is marked failed with a note to check before resending — a
+duplicate message to a prospect is worse than a missed one.
+
+## Webhooks
+
+`whatsapp_batch.started`, `.completed`, `.paused` and `.failed` carry the same
+body `GET /v1/whatsapp/batches/{batch_id}` returns. `.completed` fires again
+each time rows added later have all been sent. See
+[webhook events](/api-reference/webhook-events).
+
+## Replies
+
+Replies are answered by the agent on the sender's number, in the same thread as
+the template, with the row's columns in userdata. Each row links to its
+conversation. **Export CSV** on the batch page downloads every row with its
+status, error and timestamps.

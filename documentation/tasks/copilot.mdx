@@ -1,0 +1,70 @@
+---
+title: "TaskCoPilot"
+description: "The builder in the task editor: what it can reach, what it is deliberately not allowed to touch, and how to get good work out of it."
+---
+
+TaskCoPilot sits in the rail beside the task editor and builds the task you have open by talking with you. It writes through the same API operations you would call, so anything it does you could have done yourself — and the editor re-reads the saved config the moment one of its writes lands, so the form and the CoPilot never disagree.
+
+It opens with:
+
+> Tell me what this task should work out and I'll build it — the prompt, the values it takes in, and the fields it has to produce. Everything I change stays a draft until you publish it.
+
+That last clause is the contract, and it is the same one the AgentCoPilot and the ToolCoPilot keep: **it writes drafts and never publishes.** Publishing changes what every run and every live [email batch](/email/overview) does, so it is your call — ask for it and it will run `validate_task` first and tell you what came back.
+
+Its loop while it works is change the draft → `run_task` with `version: "draft"` → read the trace → fix. That is why it can test unpublished work without putting it live.
+
+## What it can reach
+
+| Operation | What it does |
+| --- | --- |
+| `get_task`, `update_task` | Read and edit the task you have open. `update_task` sends only the fields it changes. |
+| `create_task`, `delete_task` | Only when you explicitly ask for a second task. It will not create one to satisfy "make it research a company" — that means configure *this* task — and it will not delete the one you are editing. |
+| `list_tasks` | The workspace's other tasks. |
+| `run_task`, `list_task_runs`, `get_task_run` | Run this task — including `version: "draft"`, which is how it tests unpublished work — and read its history. |
+| `validate_task`, `publish_task` | Pre-flight the draft, and publish it when you ask. |
+| `get_task_version`, `rollback_task_version` | Read a frozen version, or put one back into production. |
+| `get_catalog`, `list_provider_keys` | Which models exist, which `reasoning_effort` each one offers, and which providers you have a key for. |
+| `list_tools`, `get_tool` | Read-only. Which tools exist and which of them are published. |
+| `list_integrations`, `list_integration_mcp_tools` | Which integrations are connected, and what each MCP server actually offers. |
+| `list_faqs` | Read-only. Which [FAQs](/agents/faqs) exist, so it can attach one under `faqs`. It cannot create one or edit its entries. |
+| `list_secrets` | Secret **names** only, so it can reference `{{secrets.NAME}}`. Values never leave the vault. |
+| `describe_schema` | Fetches the full `TaskConfig` shape on demand. |
+
+**There are deliberately no tool writes on that list.** A task's tools are built in the tool editor, where [ToolCoPilot](/tools/copilot) lives and where a tool has a test panel and version history. When your task needs a tool, a secret or an integration that does not exist yet, TaskCoPilot will say so and tell you where to make it, rather than offering to do it from here.
+
+It cannot change anything else in the workspace either: no agents, no provider keys, no integrations.
+
+## What it is good at
+
+Two things in this editor are genuinely hard, and they are what it is pointed at.
+
+**An output worth extracting.** Every field is one flat scalar with a description that *is* the prompt for that value — so the difference between `"Company name"` and `"The company's legal or trading name, as it appears on their own site. Send null if the domain resolves to no company you can identify."` is the difference between a field you can trust and one you cannot. It will push toward a handful of sharply described fields rather than a dozen vague ones, and it knows that five talking points is one `string`, not five fields. See [inputs and output](/tasks/inputs-and-output).
+
+**A prompt that reliably finishes.** It knows the `submit_result` paragraph is generated and will not write a copy of it into your prompt, and it knows the fix for a `no_output` run is the prompt while the fix for a `step_limit` run is a number in Limits. Ask it to read a failed run before you ask it to change anything.
+
+## How to prompt it
+
+- **Say what the task should work out, not how to configure it.** "Research a company from a work email and write me an opening line" gets you a prompt, the input, and the output fields. "Set output[0].name to company_name" gets you one field.
+- **Give it the standard for each value.** "The subject line has to be under 60 characters and name the company" ends up in the field description, which is the only place it can do any good.
+- **Ask it to run and then read the trace.** "Run it with priya@northwind.example and tell me why it left the headcount null" is a better instruction than "make it more accurate".
+- **Name things by name.** Tools, integrations and secrets are in front of it by name; it does not need ids from you.
+- **Ask before anything with a side effect.** A run executes for real. It will run a read-only research task freely and ask first for a task that books, charges, sends or deletes — hold it to that.
+
+## Limits
+
+- **25 model round-trips per turn.** A long build stops with "I hit my step limit for one turn" and picks up where it left off when you tell it to continue. Partial progress is kept, because each write landed as it happened.
+- **It acts as you, with your role.** Everything it does is inside your workspace and inside your permissions. Sending it a message needs the editor role; a viewer can watch the conversation but cannot make it write.
+- **It is never billed.** TaskCoPilot runs on Talqing's own model keys, not on the provider keys your agents and tasks run on, and it produces no session and no charge. A `run_task` it fires does spend your tokens — that is the task running, not the CoPilot.
+- **One task per conversation.** It edits the task whose editor it sits in.
+- **It cannot undo.** There are no task versions, so an edit it makes replaces the previous wording with nothing kept. If you are attached to a prompt, copy it somewhere before you ask for a rewrite.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="AgentCoPilot" href="/agents/copilot">
+    The same builder in the agent editor, where a draft and a publish exist.
+  </Card>
+  <Card title="ToolCoPilot" href="/tools/copilot">
+    Where a task's tools actually get built.
+  </Card>
+</CardGroup>

@@ -1,0 +1,182 @@
+---
+title: "Priority lane"
+description: "Ask a provider to schedule your model's turns ahead of standard traffic, what it costs per model, and where it is refused."
+---
+
+`llm.priority` asks the model provider to run this agent's turns in its premium service tier. It is aimed at one number — the pause between the caller finishing a sentence and the agent starting to speak — and it is the only setting on an agent that changes what a token costs: 1.75x to 2.5x, for as long as it is on.
+
+It exists on `config.llm` and, separately, on `config.llm.fallback`. It does not exist on a `realtime` speech-to-speech model, and it is refused on the post-call analysis model.
+
+## What it buys
+
+Every provider in the catalog schedules priority traffic ahead of standard traffic for a per-token premium, and all three take the request the same way — a `service_tier` parameter on the call Talqing makes for each turn. What that buys is narrower than it sounds: the model starts producing tokens sooner when the provider is busy. It does not make the model think faster, does not change the answer, and does nothing at all to speech-to-text, text-to-speech or the avatar.
+
+**It steadies the worst case rather than speeding up the average.** On a phone call that is the right target, and it is the case Talqing measures a call against: a call whose p95 time to first word crosses 3.5 seconds is flagged with a slow-response issue on its record, however good the average was. To whoever is on the other end, a long enough silence reads as a dropped call rather than as thinking.
+
+The flag exists on a text agent too — the same language models serve all three channels — but nobody is listening to silence in a chat thread, so the same premium buys far less there.
+
+<Warning>
+The lane is best-effort, and no provider guarantees it. Under load a turn can be served at standard speed anyway, and you still pay the premium for it.
+
+Measured on xAI's `grok-4.5` in August 2026, the lane moved the median time to first token from 1.57s to 1.51s — roughly nothing, because there was no queue to jump that day. That is what best-effort looks like when capacity is not scarce. Measure it on your own traffic before you leave it on.
+</Warning>
+
+## The price matrix
+
+USD per 1M tokens, from the provider catalog. These are the rates your provider bills **your own key** — Talqing charges only its platform fee, which the lane does not change. `GET /v1/catalog` is authoritative and carries the same `priority` block per model.
+
+| Provider | Model | Standard (in / cached in / out) | Priority (in / cached in / out) | Multiplier |
+| --- | --- | --- | --- | --- |
+| xai | `grok-4.7` | $2.00 / $0.50 / $6.00 | $4.00 / $1.00 / $12.00 | 2x |
+| xai | `grok-4.6` | $2.00 / $0.50 / $6.00 | $4.00 / $1.00 / $12.00 | 2x |
+| xai | `grok-4.5` | $2.00 / $0.30 / $6.00 | $4.00 / $0.60 / $12.00 | 2x |
+| xai | `grok-4.3` | $1.25 / $0.20 / $2.50 | $2.50 / $0.40 / $5.00 | 2x |
+| openai | `gpt-6-astra` | $10.00 / $1.00 / $50.00 | $20.00 / $2.00 / $100.00 | 2x |
+| openai | `gpt-6-sol` | $2.00 / $0.20 / $10.00 | $4.00 / $0.40 / $20.00 | 2x |
+| openai | `gpt-5.6-sol` | $5.00 / $0.50 / $30.00 | $10.00 / $1.00 / $60.00 | 2x |
+| openai | `gpt-5.6-terra` | $2.00 / $0.20 / $12.00 | $4.00 / $0.40 / $24.00 | 2x |
+| openai | `gpt-5.6-luna` | $0.20 / $0.02 / $1.20 | $0.40 / $0.04 / $2.40 | 2x |
+| openai | `gpt-5.5` | $5.00 / $0.50 / $30.00 | $12.50 / $1.25 / $75.00 | 2.5x |
+| openai | `gpt-5.4` | $2.50 / $0.25 / $15.00 | $5.00 / $0.50 / $30.00 | 2x |
+| openai | `gpt-5.4-mini` | $0.75 / $0.075 / $4.50 | $1.50 / $0.15 / $9.00 | 2x |
+| openai | `gpt-5.4-nano` | $0.20 / $0.02 / $1.25 | **no lane** | — |
+| openai | `gpt-4.1` | $2.00 / $0.50 / $8.00 | $3.50 / $0.875 / $14.00 | 1.75x |
+| openai | `gpt-4.1-mini` | $0.40 / $0.10 / $1.60 | $0.70 / $0.175 / $2.80 | 1.75x |
+| gemini | `gemini-3.8-flash` | $1.50 / $0.15 / $7.50 | $2.70 / $0.27 / $13.50 | 1.8x |
+| gemini | `gemini-3.7-flash` | $1.50 / $0.15 / $7.50 | $2.70 / $0.27 / $13.50 | 1.8x |
+| gemini | `gemini-3.6-flash` | $1.50 / $0.15 / $7.50 | $2.70 / $0.27 / $13.50 | 1.8x |
+| gemini | `gemini-3.5-flash` | $1.50 / $0.15 / $9.00 | $2.70 / $0.27 / $16.20 | 1.8x |
+| gemini | `gemini-3.5-flash-lite` | $0.30 / $0.03 / $2.50 | $0.54 / $0.05 / $4.50 | 1.8x |
+| gemini | `gemini-3.1-flash-lite` | $0.25 / $0.025 / $1.50 | $0.45 / $0.045 / $2.70 | 1.8x |
+
+The premium is not one multiplier the platform applies. It is transcribed per model from each vendor's own premium price list, which is why OpenAI charges 2x across the 5.6 family, 2.5x on `gpt-5.5` and 1.75x on the 4.1 pair. One rate breaks its own pattern: `gemini-3.5-flash-lite` prices cached input at $0.05 rather than the $0.054 an exact 1.8x would give, because $0.05 is what Google publishes.
+
+OpenAI renamed the lane "Fast mode" and takes either spelling on the wire, but the split in what it *answers* is generational: all three GPT-6 models report `fast`, and every GPT-5.x model still reports `priority`, whichever was asked. Billing follows the tier the response confirms, so the catalog records the spelling per model.
+
+### Models with no lane
+
+- **`openai/gpt-5.4-nano`** is absent from OpenAI's premium price list, so the lane is not sold for it. Asking for one is a save error, and the dashboard shows no control on that model.
+- **Every realtime speech-to-speech model.** Setting `config.realtime` clears `stt`, `llm` and `tts` together, so there is no `llm.priority` to set. See [models](/agents/models).
+- **Speech-to-text, text-to-speech and avatar models.** No provider in the catalog sells a premium tier for those, and the field does not exist on those slots.
+
+## What the multiplier applies to
+
+Only the language model's own token spend, on the model the flag is set on. A voice call also pays for speech-to-text, text-to-speech, possibly an avatar, and the platform fee, and none of those move. Whether that makes the lane cheap or ruinous depends entirely on what share of your call the language model already is — read it off the cost breakdown of a real call before you decide.
+
+The premium is also not something Talqing bills you. Under bring-your-own-key the tokens go on your provider invoice; the only thing Talqing debits is the platform fee, which is identical either way. What Talqing does is meter the tokens and report the spend, at the priority rates above, so the number you see reflects what your provider will charge.
+
+## Talqing prices the tier you asked for, not the tier you got
+
+The tier that actually served a turn is not on the wire by the time anything is metered, so a usage row is tagged priority because the agent **requested** the lane for that model. On OpenAI and xAI the response does echo `service_tier` back, so their own invoices settle the difference on their side.
+
+<Warning>
+**Gemini never reports which tier served a turn.** Google validates the `service_tier` parameter — a bad value fails the request outright — but sends nothing back on the response, while documenting an automatic downgrade to standard under load.
+
+So a Gemini turn that Google quietly served at standard speed is invisible here and is still reported at the 1.8x priority rate. If you want the premium you pay for to be verifiable, the lane on OpenAI and xAI models is; on Gemini it is not.
+</Warning>
+
+## Where it is refused
+
+All of these are save errors, checked on every write to the draft rather than waiting for a publish. Per-call configuration is checked by the same rules, so an `agent_override` that switches the lane on for a model without one is rejected when the call is requested. See [validation](/agents/validation).
+
+| Rule | What happens |
+| --- | --- |
+| `llm.priority` on a model whose catalog entry has no lane | Refused: "the model 'openai/gpt-5.4-nano' has no priority lane - turn it off, or pick a model that offers one". |
+| `llm.fallback.priority` on a fallback model with no lane | Refused with the same message, naming it as the failover model. |
+| `analysis.model.priority`, on any model at all | Refused outright: "the call analysis model cannot use the priority lane - analysis runs after the call has ended, so it would cost more and save nobody any wait". |
+| `llm.priority` on an agent that is then switched to `realtime` | Not an error. `llm` is cleared along with `stt` and `tts`, and the flag goes with it. |
+
+The analysis rule is the one people trip over. Post-call analysis reads a finished transcript after everyone has hung up, so a premium lane there would double that spend and shorten nobody's wait; the model that does it is configured separately and always runs standard. See [call analysis](/observability/call-analysis).
+
+[Agent tasks](/tasks/overview) carry the same `llm.priority` field and are checked by the same rules. Nobody waits on a task run in real time either, so it costs the same there and buys correspondingly less.
+
+## The fallback carries its own
+
+`llm.fallback.priority` is a separate flag, validated against the fallback model's own catalog entry. Nothing is copied down from the primary, and that is deliberate: support is not uniform even inside one vendor, so a failover that inherited the primary's flag could ask for a lane its model does not sell.
+
+The practical version: set the lane on the model you expect to run, and leave it off on the one that only runs when the first has failed. A failover that is a little slower is a call that survived. The same rule applies to `reasoning_effort` and `builtin_tools` — see [model fallbacks](/agents/model-fallbacks).
+
+## Priority or thinking
+
+`reasoning_effort` and `priority` both act on the pause before the agent speaks, from opposite ends, and they are not interchangeable.
+
+- `reasoning_effort` decides **how many tokens the model spends** before its first visible one. Raising it always makes the pause longer.
+- `priority` decides **how quickly the provider gets round to you**. It does not reduce the thinking.
+
+So the order matters. If first-token time is high on nearly every turn, that is thinking, and the lane will not fix it — lower the effort instead; unset already means the fastest value the model offers. If most turns are quick and a handful are slow, that is a queue, and the lane is the lever pointed at it.
+
+Raising the effort while the lane is on compounds: more tokens on the same turn, every one of them at the premium rate. Get the answer acceptable at the lowest effort the model will accept, then decide about the lane. See [thinking and provider tools](/agents/reasoning-and-builtin-tools).
+
+## Deciding whether it is worth it
+
+<Steps>
+  <Step title="Baseline it with the lane off">
+    Take a batch of real calls on the agent as it stands and read the **LLM first token** stage — on a call, in the health band above the transcript and per turn beside each agent message; across a date range, in the latency section of the observability dashboard. Note the average and, more importantly, how many turns sit far above it. See [calls](/observability/calls).
+  </Step>
+  <Step title="Turn it on and publish">
+    The flag lands on the draft. Live traffic keeps running the published version until you publish again — see [versions](/agents/versions).
+  </Step>
+  <Step title="Run comparable traffic">
+    The same agent, the same hours, enough calls that a handful of slow ones is a pattern rather than an accident. Provider queues vary by time of day, so a morning against an evening tells you about the hour, not the lane.
+  </Step>
+  <Step title="Compare the tail, then the bill">
+    Expect the average to move a little and the slow turns to thin out. If neither happens, the lane bought nothing on your traffic and you are paying up to 2.5x for it.
+  </Step>
+</Steps>
+
+Every LLM line that ran in the lane is tagged `priority` in the cost breakdown, on the call and in the workspace cost view, and the observability response totals it separately as `priority_cost` — so what the lane cost you over a range is one figure rather than a subtraction you have to do yourself. See [costs](/observability/costs).
+
+The agent editor's per-minute cost estimate also prices the switch: it recalculates against the priority rates the moment you flip it, before you save anything.
+
+## Setting it
+
+In the dashboard it is a **Priority processing** toggle in the Models card, directly under the model it applies to, with that exact model's multiplier in its help text. A model with no lane shows no toggle at all. The fallback model has its own toggle inside the fallback block.
+
+Over the API, send just that field. `llm` merges key by key, so the model and everything else on it stay as they are.
+
+<CodeGroup>
+```bash cURL
+AGENT_ID=0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30
+
+curl -s -X PATCH "https://api.in.talqing.com/v1/agents/$AGENT_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"config": {"llm": {"priority": true}}}'
+
+curl -s -X POST "https://api.in.talqing.com/v1/agents/$AGENT_ID/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const agent_id = "0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30";
+
+await talqing.agents.update({
+  agent_id,
+  updateAgentRequest: { config: { llm: { priority: true } } },
+});
+await talqing.agents.publish({ agent_id });
+```
+
+```python Python
+agent_id = "0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30"
+
+talqing.agents.update(agent_id, config={"llm": {"priority": True}})
+talqing.agents.publish(agent_id)
+```
+</CodeGroup>
+
+The fallback needs its own line — `config.llm.fallback.priority` — and only when the agent has a fallback model at all. To try the lane on a single call without touching the agent, set it in `agent_override` on the request that starts the call; see [per-call configuration](/agents/per-call-configuration).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Thinking and provider tools" href="/agents/reasoning-and-builtin-tools">
+    The other lever on the pause before the agent speaks, and the one to reach for first.
+  </Card>
+  <Card title="Models" href="/agents/models">
+    Every model, its flags and its standard price.
+  </Card>
+  <Card title="Costs" href="/observability/costs">
+    Reading provider spend against the platform fee, line by line.
+  </Card>
+</CardGroup>

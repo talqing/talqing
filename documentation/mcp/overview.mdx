@@ -1,0 +1,56 @@
+---
+title: "MCP server"
+description: "One tool per API endpoint, plus the platform knowledge our own CoPilot works from, handed to your coding agent."
+---
+
+Talqing ships an MCP server, `@talqing/mcp`. Point Claude Code, Codex or any other MCP client at it and your coding agent builds, publishes and operates agents on Talqing without leaving the terminal.
+
+The server hands your client two things. The first is **one tool per API endpoint** — 158 of them, covering everything a workspace is built out of. The second is the **same platform knowledge our own in-product CoPilot is prompted with**: how an agent is put together, draft and published, the operation tree, lifecycle hooks, channels and model selection. Your client receives that automatically as server instructions, so anything the [CoPilot](/agents/copilot) can build, your coding agent can build.
+
+Both are generated from the same registry the CoPilot binds its own tools from, so the two surfaces cannot drift apart. An endpoint that exists is a tool; a rule the CoPilot follows is a rule your client is told.
+
+## What you get
+
+| Area | What your agent can do |
+| --- | --- |
+| Agents | Create, read, update and delete an agent; validate it; publish it; read a past version and roll back to it |
+| Agent tasks | Write a task's inputs, output shape and model stack; run it; read the run's output, trace, steps and cost |
+| FAQs | Write a list of question-and-answer pairs, add, fix and remove entries, and attach it to an agent or task |
+| Tools | Author a tool, its `json_schema` and its [operation tree](/tools/operation-tree); run the draft for real; validate; publish; roll back |
+| Integrations and triggers | Connect a provider, list what its MCP server exposes, bind an inbound event to a text agent |
+| Carrier accounts | Read what each carrier requires, record credentials, provision the SIP trunk, list the numbers the account owns |
+| Phone numbers | Import, provision, assign a published agent, unassign, change per-number settings, read `readiness` |
+| Secrets, provider keys and webhooks | Store a workspace secret; add or rotate a BYOK provider key; subscribe to events, rotate a signing secret, replay deliveries |
+| Running agents | Place one outbound call; create and steer a call batch or an email batch; open a text conversation and talk to an agent; mint the token a browser needs to join a web call |
+| Reading it back | Calls with transcript, every tool call and its output, per-stage latency and cost; conversations and the sessions inside them; workspace volume, spend and response time per day |
+| Catalog | Every valid `provider`/`model` pair with what it supports, the voice and avatar galleries, an ElevenLabs voice's own tuning |
+
+The full list, with the HTTP call each one maps to, is on [tools](/mcp/tools).
+
+## Who it is for
+
+- You already work inside a coding agent, and want the voice agent written in the same session as the API its tools will call.
+- You are testing changes against a real workspace and would rather say what you want than assemble a config by hand.
+- You are debugging: *read the last five failed calls and tell me why* is a question the server can answer, because `get_call` returns the transcript, the tool calls and the per-stage latency of a call that already happened.
+
+## It is your API, with your permissions
+
+The server adds nothing and hides nothing. Every call it makes is a call you could make yourself with the same token: the same operations, the same workspace, the same role. A view-only member gets the read operations and a clear 403 on the rest, exactly as in the dashboard. Four areas are out of reach by design, and [permissions](/mcp/permissions) says which and why.
+
+`TALQING_BASE_URL` names a [region](/get-started/regions), and everything the server can reach belongs to that one — an agent, its calls, its phone numbers and its credit balance. One token reaches every region, so working in another one is the same token and a different base URL.
+
+If you want to see it work before reading further, [the coding-agent quickstart](/get-started/quickstart-coding-agent) is four prompts from an empty workspace to a published agent with a tool attached.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Setup" href="/mcp/setup">
+    Install and configure it for your client, and verify it works.
+  </Card>
+  <Card title="Recipes" href="/mcp/recipes">
+    Prompts that produce a published agent, a live phone line and a campaign.
+  </Card>
+  <Card title="Tools" href="/mcp/tools">
+    Every operation, how arguments map to HTTP, and the deferred schemas.
+  </Card>
+</CardGroup>

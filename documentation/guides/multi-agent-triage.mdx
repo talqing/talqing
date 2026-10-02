@@ -1,0 +1,1202 @@
+---
+title: "Multi-agent triage"
+description: "A front desk that greets every caller and routes to billing, technical support and sales, each with its own prompt and tools."
+---
+
+You will build four agents on one phone number: a front desk that greets the caller, works out what they need in a question or two and hands them on, plus three specialists that each hold one job, one prompt and one set of tools. You will also add one route the model does not decide — a lookup that sends a caller with an open ticket straight to technical support.
+
+The example is Northwind Tools. Every hop here is a [handoff](/teams/handoffs) — agent to agent, on the same call. Handing the caller to a **person** is a [transfer](/tools/transfer), and the two are never interchangeable.
+
+## Should you split at all?
+
+Splitting is not free. Every hop pauses the call while the target is built, and the target then pays for whatever context crossed on **every turn it takes**, on your own provider key. One agent has neither cost.
+
+| Split when | Do not split when |
+| --- | --- |
+| One prompt is holding three policies and picking between them badly | Two agents' prompts would differ by a paragraph. That is one agent with a better prompt |
+| The desks want different models, voices or languages | You only want the tool list shorter. Attach fewer tools |
+| A tool must be reachable from one desk and not another — the refund tool on billing, and nowhere the front desk can call it | The routing is a lookup rather than a judgement. That is one agent and a [conditional route](/teams/conditional-handoffs), which is step 4 below |
+
+Three desks is about the point where it pays. Below that, the descriptions overlap and the caller gets passed around.
+
+## What you need
+
+| | Why |
+| --- | --- |
+| Provider keys for the models each agent names | Every agent on the call runs on your own keys. See [provider keys](/get-started/provider-keys) |
+| An HTTPS endpoint that looks an account up by phone number, and a bearer token for it | For the conditional route in step 4 |
+| An HTTPS endpoint that reads an invoice, and a bearer token for it | For billing's tool |
+| A [workspace secret](/platform/secrets) named `NORTHWIND_API_KEY` holding that token | Both tools read it as `{{secrets.NORTHWIND_API_KEY}}`, and publish fails on a secret that does not exist |
+| A phone number for an account executive, in full international format | Sales transfers to a person |
+| A carrier number and a Talqing token | See [phone numbers](/telephony/phone-numbers) |
+
+<Steps>
+
+<Step title="Build and publish the three specialists">
+
+**Publish these first.** A handoff edge whose target has no published version is refused when you publish the front desk, so the graph is built leaves-first.
+
+Each specialist gets a short prompt covering one desk, and — this is the part people leave out — a line telling it **not** to re-litigate which desk the caller wants. It has already been chosen. A specialist that re-routes sends the caller round the loop.
+
+### Billing
+
+```text
+You are the billing desk at Northwind Tools. The caller has already been
+passed to you by the front desk, so do not introduce the company again and do
+not ask what they are calling about if you can already see it.
+
+You handle invoices, refunds, payment questions, card details and anything
+about what the caller has been charged.
+
+RULES
+- Ask for the invoice number before you look anything up, and read it back.
+- Say an amount only if it came back from look_up_invoice. Never estimate one.
+- Never read a card number back, and never ask for one.
+- If the caller asks about something that is not billing, hand them back to
+  the front desk rather than trying to help.
+
+TOOLS
+- look_up_invoice: say "let me pull that invoice up, one moment" before you
+  call it, then answer in your own words.
+
+SPEAKING
+- Two or three sentences per turn. Let the caller cut in.
+- No markdown, no lists, no emoji and no JSON in what you say.
+- Say amounts as words: "two thousand four hundred rupees", never "Rs 2400".
+- Say dates as "Thursday the ninth of April", never "09/04".
+- Read an invoice number back one character at a time, in groups.
+```
+
+Its invoice lookup is defined **inline**. On an agent that is a shorthand: the write creates the tool, publishes it at v1, and stores its id in place, so an agent and its tools arrive in one request. It is not a second kind of tool — read the config back and you will find a `tool_id`.
+
+Save the prompt above as `billing-prompt.txt`, then:
+
+<CodeGroup>
+```bash cURL
+jq -n --rawfile prompt billing-prompt.txt '{
+    "config": {
+      "prompt": $prompt,
+      "name": "Billing desk",
+      "channel": "voice",
+      "language": "en",
+      "timezone": "Asia/Kolkata",
+      "greeting": "Billing here. I can see your account - what is the question?",
+      "stt": { "provider": "deepgram", "model": "flux-general-en" },
+      "llm": { "provider": "openai", "model": "gpt-5.4" },
+      "tts": { "provider": "deepgram", "model": "aura-2", "voice": "aura-2-thalia-en" },
+      "tools": [
+        {
+          "tool": {
+            "name": "look_up_invoice",
+            "description": "Read one invoice: what it is for, the amount, whether it has been paid, and whether a refund has been issued against it. Use it once the caller has given you an invoice number.",
+            "json_schema": {
+              "type": "object",
+              "properties": {
+                "invoice_number": {
+                  "type": "string",
+                  "description": "The invoice number the caller read out, in the form INV-88213. Ask for it and read it back before calling this tool."
+                }
+              },
+              "required": ["invoice_number"]
+            },
+            "operations": [
+              {
+                "kind": "http",
+                "config": {
+                  "method": "GET",
+                  "url": "https://api.northwind.example/v1/invoices/{{args.invoice_number}}",
+                  "headers": { "Authorization": "Bearer {{secrets.NORTHWIND_API_KEY}}" },
+                  "timeout": 8
+                },
+                "silent": true,
+                "publish_fields": [
+                  { "path": "amount_due", "key": "invoice_amount", "store": "userdata" },
+                  { "path": "status", "key": "invoice_status", "store": "userdata" },
+                  { "path": "issued_on", "key": "invoice_issued_on", "store": "tooldata" }
+                ]
+              },
+              {
+                "kind": "generate_reply",
+                "config": {
+                  "instructions": "Tell the caller invoice {{args.invoice_number}} was issued on {{tooldata.invoice_issued_on}}, is {{userdata.invoice_status}}, and has {{userdata.invoice_amount}} outstanding. Say the amount and the date in words. Then ask what they would like to do about it."
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }' \
+| curl -sS https://api.in.talqing.com/v1/agents \
+    -H "Authorization: Bearer $TALQING_API_KEY" \
+    -H "Content-Type: application/json" \
+    --data @-
+```
+
+```typescript TypeScript
+import { readFileSync } from "node:fs";
+
+const billing = await talqing.agents.create({
+  createAgentRequest: {
+    config: {
+      name: "Billing desk",
+      channel: "voice",
+      language: "en",
+      timezone: "Asia/Kolkata",
+      prompt: readFileSync("billing-prompt.txt", "utf8"),
+      greeting: "Billing here. I can see your account - what is the question?",
+      stt: { provider: "deepgram", model: "flux-general-en" },
+      llm: { provider: "openai", model: "gpt-5.4" },
+      tts: { provider: "deepgram", model: "aura-2", voice: "aura-2-thalia-en" },
+      tools: [
+        {
+          tool: {
+            name: "look_up_invoice",
+            description:
+              "Read one invoice: what it is for, the amount, whether it has been paid, and whether a refund has been issued against it. Use it once the caller has given you an invoice number.",
+            json_schema: {
+              type: "object",
+              properties: {
+                invoice_number: {
+                  type: "string",
+                  description:
+                    "The invoice number the caller read out, in the form INV-88213. Ask for it and read it back before calling this tool.",
+                },
+              },
+              required: ["invoice_number"],
+            },
+            operations: [
+              {
+                kind: "http",
+                config: {
+                  method: "GET",
+                  url: "https://api.northwind.example/v1/invoices/{{args.invoice_number}}",
+                  headers: { Authorization: "Bearer {{secrets.NORTHWIND_API_KEY}}" },
+                  timeout: 8,
+                },
+                silent: true,
+                publish_fields: [
+                  { path: "amount_due", key: "invoice_amount", store: "userdata" },
+                  { path: "status", key: "invoice_status", store: "userdata" },
+                  { path: "issued_on", key: "invoice_issued_on", store: "tooldata" },
+                ],
+              },
+              {
+                kind: "generate_reply",
+                config: {
+                  instructions:
+                    "Tell the caller invoice {{args.invoice_number}} was issued on {{tooldata.invoice_issued_on}}, is {{userdata.invoice_status}}, and has {{userdata.invoice_amount}} outstanding. Say the amount and the date in words. Then ask what they would like to do about it.",
+                },
+              },
+            ],
+          },
+        },
+      ],
+    },
+  },
+});
+
+await talqing.agents.publish({ agent_id: billing.id });
+```
+
+```python Python
+from pathlib import Path
+
+billing = talqing.agents.create(
+    config={
+        "name": "Billing desk",
+        "channel": "voice",
+        "language": "en",
+        "timezone": "Asia/Kolkata",
+        "prompt": Path("billing-prompt.txt").read_text(),
+        "greeting": "Billing here. I can see your account - what is the question?",
+        "stt": {"provider": "deepgram", "model": "flux-general-en"},
+        "llm": {"provider": "openai", "model": "gpt-5.4"},
+        "tts": {"provider": "deepgram", "model": "aura-2", "voice": "aura-2-thalia-en"},
+        "tools": [
+            {
+                "tool": {
+                    "name": "look_up_invoice",
+                    "description": (
+                        "Read one invoice: what it is for, the amount, whether it has been "
+                        "paid, and whether a refund has been issued against it. Use it once "
+                        "the caller has given you an invoice number."
+                    ),
+                    "json_schema": {
+                        "type": "object",
+                        "properties": {
+                            "invoice_number": {
+                                "type": "string",
+                                "description": (
+                                    "The invoice number the caller read out, in the form "
+                                    "INV-88213. Ask for it and read it back before calling "
+                                    "this tool."
+                                ),
+                            }
+                        },
+                        "required": ["invoice_number"],
+                    },
+                    "operations": [
+                        {
+                            "kind": "http",
+                            "config": {
+                                "method": "GET",
+                                "url": "https://api.northwind.example/v1/invoices/{{args.invoice_number}}",
+                                "headers": {"Authorization": "Bearer {{secrets.NORTHWIND_API_KEY}}"},
+                                "timeout": 8,
+                            },
+                            "silent": True,
+                            "publish_fields": [
+                                {"path": "amount_due", "key": "invoice_amount", "store": "userdata"},
+                                {"path": "status", "key": "invoice_status", "store": "userdata"},
+                                {"path": "issued_on", "key": "invoice_issued_on", "store": "tooldata"},
+                            ],
+                        },
+                        {
+                            "kind": "generate_reply",
+                            "config": {
+                                "instructions": (
+                                    "Tell the caller invoice {{args.invoice_number}} was issued "
+                                    "on {{tooldata.invoice_issued_on}}, is "
+                                    "{{userdata.invoice_status}}, and has "
+                                    "{{userdata.invoice_amount}} outstanding. Say the amount and "
+                                    "the date in words. Then ask what they would like to do "
+                                    "about it."
+                                )
+                            },
+                        },
+                    ],
+                }
+            }
+        ],
+    }
+)
+
+talqing.agents.publish(billing["id"])
+```
+</CodeGroup>
+
+### Technical support
+
+Same shape, with no tool: the troubleshooting facts it needs are in its prompt.
+
+```text
+You are the technical support desk at Northwind Tools. The caller has already
+been passed to you by the front desk, so do not introduce the company again.
+
+You handle tools that will not start, will not charge, throw an error code, or
+were set up wrong.
+
+TROUBLESHOOTING
+- Will not start: check the battery is pushed fully home until it clicks, then
+  try a second battery if they have one.
+- Will not charge: a flashing red light on the charger means the battery is
+  too hot or too cold. Leave it at room temperature for an hour and try again.
+- Error E1 is overheating: let the tool cool for fifteen minutes. E2 is a
+  jammed motor: remove the battery and clear the chuck or blade.
+- Anything else, or a fault that survives these steps, is a warranty repair.
+
+Answer only from the lines above. If they do not cover it, say so plainly and
+offer to raise it with an engineer. Never guess at a fix that involves opening
+a tool or a battery.
+
+RULES
+- Ask for the model number on the tool before you diagnose anything. It is on
+  the plate near the cable.
+- One instruction at a time. Wait for the caller to do it before you give the
+  next one.
+- If the caller starts asking about a charge or a refund, hand them to
+  billing.
+
+SPEAKING
+- Two or three sentences per turn. Let the caller cut in.
+- No markdown, no lists, no emoji and no JSON in what you say.
+- Read a model number back one character at a time: "N W - D - two one zero".
+- Say error codes character by character, never as a word.
+```
+
+<CodeGroup>
+```bash cURL
+jq -n --rawfile prompt technical-prompt.txt '{
+    "config": {
+      "prompt": $prompt,
+      "name": "Technical support desk",
+      "channel": "voice",
+      "language": "en",
+      "timezone": "Asia/Kolkata",
+      "greeting": "Technical support. What is the tool doing?",
+      "stt": { "provider": "deepgram", "model": "flux-general-en" },
+      "llm": { "provider": "openai", "model": "gpt-5.4" },
+      "tts": { "provider": "deepgram", "model": "aura-2", "voice": "aura-2-thalia-en" }
+    }
+  }' \
+| curl -sS https://api.in.talqing.com/v1/agents \
+    -H "Authorization: Bearer $TALQING_API_KEY" \
+    -H "Content-Type: application/json" \
+    --data @-
+```
+
+```typescript TypeScript
+const technical = await talqing.agents.create({
+  createAgentRequest: {
+    config: {
+      name: "Technical support desk",
+      channel: "voice",
+      language: "en",
+      timezone: "Asia/Kolkata",
+      prompt: readFileSync("technical-prompt.txt", "utf8"),
+      greeting: "Technical support. What is the tool doing?",
+      stt: { provider: "deepgram", model: "flux-general-en" },
+      llm: { provider: "openai", model: "gpt-5.4" },
+      tts: { provider: "deepgram", model: "aura-2", voice: "aura-2-thalia-en" },
+    },
+  },
+});
+
+await talqing.agents.publish({ agent_id: technical.id });
+```
+
+```python Python
+technical = talqing.agents.create(
+    config={
+        "name": "Technical support desk",
+        "channel": "voice",
+        "language": "en",
+        "timezone": "Asia/Kolkata",
+        "prompt": Path("technical-prompt.txt").read_text(),
+        "greeting": "Technical support. What is the tool doing?",
+        "stt": {"provider": "deepgram", "model": "flux-general-en"},
+        "llm": {"provider": "openai", "model": "gpt-5.4"},
+        "tts": {"provider": "deepgram", "model": "aura-2", "voice": "aura-2-thalia-en"},
+    }
+)
+
+talqing.agents.publish(technical["id"])
+```
+</CodeGroup>
+
+### Sales
+
+Sales does not close on the call — it qualifies and puts the caller through to a person, so its one tool is an argument-free transfer with the escalation policy in the description.
+
+```text
+You are the sales desk at Northwind Tools. The caller has been passed to you
+by the front desk and may not have said much yet, so start by finding out what
+they need.
+
+GOAL
+Find out three things and nothing more: what they want to buy or fit out,
+roughly how many, and when they need it. Then put them through to an account
+executive.
+
+RULES
+- One question at a time. Wait for the answer.
+- Do not quote a price, a discount or a lead time. Say the account executive
+  will go through those.
+- Do not take card details, ever.
+- If it turns out they are an existing customer with a problem rather than a
+  purchase, say so and hand them back to the front desk.
+
+TOOLS
+- transfer_to_account_executive: once you have all three answers, or as soon
+  as the caller asks for a person.
+
+SPEAKING
+- Warm and quick. Under two sentences per turn.
+- No markdown, no lists, no emoji and no JSON in what you say.
+- Say quantities and dates as words.
+```
+
+<CodeGroup>
+```bash cURL
+jq -n --rawfile prompt sales-prompt.txt '{
+    "config": {
+      "prompt": $prompt,
+      "name": "Sales desk",
+      "channel": "voice",
+      "language": "en",
+      "timezone": "Asia/Kolkata",
+      "greeting": "Sales desk - what are you looking to buy?",
+      "stt": { "provider": "deepgram", "model": "flux-general-en" },
+      "llm": { "provider": "openai", "model": "gpt-5.4-mini" },
+      "tts": { "provider": "deepgram", "model": "aura-2", "voice": "aura-2-thalia-en" },
+      "tools": [
+        {
+          "tool": {
+            "name": "transfer_to_account_executive",
+            "description": "Put the caller through to an account executive. Use it once you know what they want, roughly how many and when - or immediately if they ask for a person, say they are ready to order, or ask for a quote. Do not use it for a support question or a billing question.",
+            "json_schema": {},
+            "disable_interruptions": true,
+            "operations": [
+              {
+                "kind": "say",
+                "config": { "text": "Let me speak to an account executive first and bring you in - one moment." }
+              },
+              {
+                "kind": "transfer",
+                "config": {
+                  "destination": "+912248900177",
+                  "mode": "warm",
+                  "ringing_timeout": 30,
+                  "on_failure": "continue"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }' \
+| curl -sS https://api.in.talqing.com/v1/agents \
+    -H "Authorization: Bearer $TALQING_API_KEY" \
+    -H "Content-Type: application/json" \
+    --data @-
+```
+
+```typescript TypeScript
+const sales = await talqing.agents.create({
+  createAgentRequest: {
+    config: {
+      name: "Sales desk",
+      channel: "voice",
+      language: "en",
+      timezone: "Asia/Kolkata",
+      prompt: readFileSync("sales-prompt.txt", "utf8"),
+      greeting: "Sales desk - what are you looking to buy?",
+      stt: { provider: "deepgram", model: "flux-general-en" },
+      llm: { provider: "openai", model: "gpt-5.4-mini" },
+      tts: { provider: "deepgram", model: "aura-2", voice: "aura-2-thalia-en" },
+      tools: [
+        {
+          tool: {
+            name: "transfer_to_account_executive",
+            description:
+              "Put the caller through to an account executive. Use it once you know what they want, roughly how many and when - or immediately if they ask for a person, say they are ready to order, or ask for a quote. Do not use it for a support question or a billing question.",
+            json_schema: {},
+            disable_interruptions: true,
+            operations: [
+              {
+                kind: "say",
+                config: {
+                  text: "Let me speak to an account executive first and bring you in - one moment.",
+                },
+              },
+              {
+                kind: "transfer",
+                config: {
+                  destination: "+912248900177",
+                  mode: "warm",
+                  ringing_timeout: 30,
+                  on_failure: "continue",
+                },
+              },
+            ],
+          },
+        },
+      ],
+    },
+  },
+});
+
+await talqing.agents.publish({ agent_id: sales.id });
+```
+
+```python Python
+sales = talqing.agents.create(
+    config={
+        "name": "Sales desk",
+        "channel": "voice",
+        "language": "en",
+        "timezone": "Asia/Kolkata",
+        "prompt": Path("sales-prompt.txt").read_text(),
+        "greeting": "Sales desk - what are you looking to buy?",
+        "stt": {"provider": "deepgram", "model": "flux-general-en"},
+        "llm": {"provider": "openai", "model": "gpt-5.4-mini"},
+        "tts": {"provider": "deepgram", "model": "aura-2", "voice": "aura-2-thalia-en"},
+        "tools": [
+            {
+                "tool": {
+                    "name": "transfer_to_account_executive",
+                    "description": (
+                        "Put the caller through to an account executive. Use it once you "
+                        "know what they want, roughly how many and when - or immediately if "
+                        "they ask for a person, say they are ready to order, or ask for a "
+                        "quote. Do not use it for a support question or a billing question."
+                    ),
+                    "json_schema": {},
+                    "disable_interruptions": True,
+                    "operations": [
+                        {
+                            "kind": "say",
+                            "config": {
+                                "text": "Let me speak to an account executive first and bring you in - one moment."
+                            },
+                        },
+                        {
+                            "kind": "transfer",
+                            "config": {
+                                "destination": "+912248900177",
+                                "mode": "warm",
+                                "ringing_timeout": 30,
+                                "on_failure": "continue",
+                            },
+                        },
+                    ],
+                }
+            }
+        ],
+    }
+)
+
+talqing.agents.publish(sales["id"])
+```
+</CodeGroup>
+
+That transfer is `warm`: the caller waits on hold music while the agent briefs the account executive on a separate line, and only then puts the two together. It costs a second AI conversation on your own keys, and the person answering can decline — in which case the caller comes back to the sales agent. The `say` in front of it is worded for `warm`; before a `cold` transfer the same line would be a lie. See [transfer](/tools/transfer).
+
+Publish all three before going on.
+
+</Step>
+
+<Step title="Build the front desk">
+
+The front desk carries one `handoffs` entry per desk. Each entry becomes **one tool the model can call**, named `handoff_to_<name>`, and the model routes on that entry's `description` and nothing else.
+
+Write each description as **what belongs there**, never as an instruction to the model:
+
+| Write this | Not this |
+| --- | --- |
+| `invoices, refunds, payment questions, card details and anything about what the caller has been charged` | `Use this when the caller has a billing problem` |
+| `a tool that will not start, will not charge, shows an error code, or was set up wrong` | `Hand off to technical support when appropriate` |
+| `buying anything new - a quote, a bulk order, fitting out a site, or a product they do not own yet` | `Call this for sales enquiries` |
+
+Descriptions that do not overlap are most of the work. If billing says "payments" and sales says "orders", a caller asking about a payment for an order they have not placed is a coin flip. Put the ambiguous words in exactly one description, deliberately.
+
+The front desk's own prompt is short, and most of it is about what it does **not** answer. An agent with three handoff tools and a prompt inviting it to be helpful will answer the billing question badly instead of routing it.
+
+```text
+You are the front desk at Northwind Tools, which sells power tools. Your only
+job is to find out which desk the caller needs and pass them to it.
+
+First, call route_by_open_ticket. If it hands the call on, you are done. If it
+does not, carry on below.
+
+Find out what the caller needs in one question, two at most, and then hand
+them over. Do not answer a billing, technical or sales question yourself, even
+when you think you know the answer - the desks have the account and the tools,
+and you have neither.
+
+If the caller says two things at once, ask which they want dealt with first
+and route on that.
+
+SPEAKING
+- One or two sentences per turn. Let the caller cut in.
+- No markdown, no lists, no emoji and no JSON in what you say.
+- Do not say the word transfer, and do not name the desk you are sending them
+  to twice.
+```
+
+Save it as `front-desk-prompt.txt`, then create it.
+
+<Note>
+The `tools` entry below names `route_by_open_ticket`, which **step 4 builds**. Attaching an unpublished tool is rejected at save, so if you are working straight through, either build and publish that tool first or leave `tools` out of this write and add it when you get there.
+</Note>
+
+<CodeGroup>
+```bash cURL
+jq -n --rawfile prompt front-desk-prompt.txt '{
+    "config": {
+      "prompt": $prompt,
+      "name": "Northwind front desk",
+      "channel": "voice",
+      "language": "en",
+      "timezone": "Asia/Kolkata",
+      "greeting": "Thanks for calling Northwind. What can I help you with?",
+      "stt": { "provider": "deepgram", "model": "flux-general-en" },
+      "llm": { "provider": "openai", "model": "gpt-5.4-mini" },
+      "tts": { "provider": "deepgram", "model": "aura-2", "voice": "aura-2-thalia-en" },
+      "tools": [{ "tool_id": "2d70b6e9-5c14-4f83-a096-7b3e1d8c40a5" }],
+      "handoffs": [
+        {
+          "name": "Billing",
+          "agent_id": "b41c7a29-6f2b-4c7a-9c1e-1d2a8f0b41c7",
+          "description": "invoices, refunds, payment questions, card details and anything about what the caller has been charged",
+          "context": "transcript",
+          "message": "Let me put you through to billing."
+        },
+        {
+          "name": "Technical support",
+          "agent_id": "7d2e5a04-91c3-4f68-b0aa-2c53e7d19f80",
+          "description": "a tool that will not start, will not charge, shows an error code, or was set up wrong",
+          "context": "transcript",
+          "message": "One moment, connecting you to technical support."
+        },
+        {
+          "name": "Sales",
+          "agent_id": "e5b83f27-0d61-4a94-b7c2-8f130a6d5c49",
+          "description": "buying anything new - a quote, a bulk order, fitting out a site, or a product the caller does not own yet",
+          "context": "none",
+          "recent_turns": 2,
+          "message": "Let me bring in the sales desk."
+        }
+      ],
+      "analysis": {
+        "enabled": true,
+        "summary": true,
+        "outcome": {
+          "prompt": "The caller reached the desk that could deal with their question, and that desk dealt with it or put them through to a person. A caller routed to the wrong desk, or bounced between desks, is a failure."
+        },
+        "fields": [
+          {
+            "name": "desk",
+            "type": "string",
+            "description": "Which desk finally handled the call: billing, technical, sales, or front_desk if it never handed over. Use exactly one of those four words. The handover markers in the transcript do not name the desk, so work it out from what the agent said when it took over and which tools it called."
+          },
+          {
+            "name": "reroutes",
+            "type": "integer",
+            "description": "How many times the call moved between agents after the first handoff. 0 on a call that went to one desk and stayed there."
+          },
+          {
+            "name": "reason_for_call",
+            "type": "string",
+            "description": "Why the caller rang, in five words or fewer. Null if the call ended before they said."
+          }
+        ]
+      }
+    }
+  }' \
+| curl -sS https://api.in.talqing.com/v1/agents \
+    -H "Authorization: Bearer $TALQING_API_KEY" \
+    -H "Content-Type: application/json" \
+    --data @-
+```
+
+```typescript TypeScript
+const frontDesk = await talqing.agents.create({
+  createAgentRequest: {
+    config: {
+      name: "Northwind front desk",
+      channel: "voice",
+      language: "en",
+      timezone: "Asia/Kolkata",
+      prompt: readFileSync("front-desk-prompt.txt", "utf8"),
+      greeting: "Thanks for calling Northwind. What can I help you with?",
+      stt: { provider: "deepgram", model: "flux-general-en" },
+      llm: { provider: "openai", model: "gpt-5.4-mini" },
+      tts: { provider: "deepgram", model: "aura-2", voice: "aura-2-thalia-en" },
+      tools: [{ tool_id: route.id }],
+      handoffs: [
+        {
+          name: "Billing",
+          agent_id: billing.id,
+          description:
+            "invoices, refunds, payment questions, card details and anything about what the caller has been charged",
+          context: "transcript",
+          message: "Let me put you through to billing.",
+        },
+        {
+          name: "Technical support",
+          agent_id: technical.id,
+          description:
+            "a tool that will not start, will not charge, shows an error code, or was set up wrong",
+          context: "transcript",
+          message: "One moment, connecting you to technical support.",
+        },
+        {
+          name: "Sales",
+          agent_id: sales.id,
+          description:
+            "buying anything new - a quote, a bulk order, fitting out a site, or a product the caller does not own yet",
+          context: "none",
+          recent_turns: 2,
+          message: "Let me bring in the sales desk.",
+        },
+      ],
+      analysis: {
+        enabled: true,
+        summary: true,
+        outcome: {
+          prompt:
+            "The caller reached the desk that could deal with their question, and that desk dealt with it or put them through to a person. A caller routed to the wrong desk, or bounced between desks, is a failure.",
+        },
+        fields: [
+          {
+            name: "desk",
+            type: "string",
+            description:
+              "Which desk finally handled the call: billing, technical, sales, or front_desk if it never handed over. Use exactly one of those four words. The handover markers in the transcript do not name the desk, so work it out from what the agent said when it took over and which tools it called.",
+          },
+          {
+            name: "reroutes",
+            type: "integer",
+            description:
+              "How many times the call moved between agents after the first handoff. 0 on a call that went to one desk and stayed there.",
+          },
+          {
+            name: "reason_for_call",
+            type: "string",
+            description:
+              "Why the caller rang, in five words or fewer. Null if the call ended before they said.",
+          },
+        ],
+      },
+    },
+  },
+});
+```
+
+```python Python
+front_desk = talqing.agents.create(
+    config={
+        "name": "Northwind front desk",
+        "channel": "voice",
+        "language": "en",
+        "timezone": "Asia/Kolkata",
+        "prompt": Path("front-desk-prompt.txt").read_text(),
+        "greeting": "Thanks for calling Northwind. What can I help you with?",
+        "stt": {"provider": "deepgram", "model": "flux-general-en"},
+        "llm": {"provider": "openai", "model": "gpt-5.4-mini"},
+        "tts": {"provider": "deepgram", "model": "aura-2", "voice": "aura-2-thalia-en"},
+        "tools": [{"tool_id": route["id"]}],
+        "handoffs": [
+            {
+                "name": "Billing",
+                "agent_id": billing["id"],
+                "description": (
+                    "invoices, refunds, payment questions, card details and anything about "
+                    "what the caller has been charged"
+                ),
+                "context": "transcript",
+                "message": "Let me put you through to billing.",
+            },
+            {
+                "name": "Technical support",
+                "agent_id": technical["id"],
+                "description": (
+                    "a tool that will not start, will not charge, shows an error code, or "
+                    "was set up wrong"
+                ),
+                "context": "transcript",
+                "message": "One moment, connecting you to technical support.",
+            },
+            {
+                "name": "Sales",
+                "agent_id": sales["id"],
+                "description": (
+                    "buying anything new - a quote, a bulk order, fitting out a site, or a "
+                    "product the caller does not own yet"
+                ),
+                "context": "none",
+                "recent_turns": 2,
+                "message": "Let me bring in the sales desk.",
+            },
+        ],
+        "analysis": {
+            "enabled": True,
+            "summary": True,
+            "outcome": {
+                "prompt": (
+                    "The caller reached the desk that could deal with their question, and "
+                    "that desk dealt with it or put them through to a person. A caller "
+                    "routed to the wrong desk, or bounced between desks, is a failure."
+                )
+            },
+            "fields": [
+                {
+                    "name": "desk",
+                    "type": "string",
+                    "description": (
+                        "Which desk finally handled the call: billing, technical, sales, or "
+                        "front_desk if it never handed over. Use exactly one of those four "
+                        "words. The handover markers in the transcript do not name the desk, "
+                        "so work it out from what the agent said when it took over and which "
+                        "tools it called."
+                    ),
+                },
+                {
+                    "name": "reroutes",
+                    "type": "integer",
+                    "description": (
+                        "How many times the call moved between agents after the first "
+                        "handoff. 0 on a call that went to one desk and stayed there."
+                    ),
+                },
+                {
+                    "name": "reason_for_call",
+                    "type": "string",
+                    "description": (
+                        "Why the caller rang, in five words or fewer. Null if the call "
+                        "ended before they said."
+                    ),
+                },
+            ],
+        },
+    }
+)
+```
+</CodeGroup>
+
+### Why each edge carries what it does
+
+`context` decides what the target starts from, and it is the field that costs the most money on a team. Justify every edge rather than taking the default three times.
+
+| Edge | Policy | Why | What the target then pays on every turn |
+| --- | --- | --- | --- |
+| Front desk → Billing | `transcript` | The handover happens two or three turns in, so "everything so far" **is** two or three turns. Asking for a summary here would buy a pause before the handoff and a shorter version of something already short | Two or three turns |
+| Front desk → Technical support | `transcript` | Same, and the desk needs the caller's exact words about what the tool is doing — a summary loses "it clicks twice and stops" | Two or three turns |
+| Front desk → Sales | `none` with `recent_turns: 2` | Sales runs its own qualification from the top and does not want the triage framing in its context. The two-turn tail is what tells it what the caller actually asked for | Two turns, and nothing else |
+| Technical support → Billing | `summary` with `recent_turns: 3` | This hop happens twenty turns in, after a diagnostic. `transcript` would make billing re-read the whole thing on every reply it gives | Roughly a paragraph, plus three turns |
+| Billing → Front desk | `none` with `recent_turns: 2` | The front desk's job is to route, and routing needs the last thing the caller said, not the billing detour. Under `transcript` it would route on a question that has already been answered | Two turns |
+
+Two rules the API enforces rather than ignores: `recent_turns` is **refused** under `transcript`, which already carries every turn, and `summary_prompt` is refused outside `summary`. Under `summary`, the source agent writes the summary itself as an argument on the `handoff_to_*` tool — there is no second model call, but the caller waits through 60 to 100 tokens before the handover happens. Full rules in [context policies](/teams/context-policies).
+
+<Warning>
+**`summary` is not a privacy boundary.** It narrows what the target model is shown and guarantees nothing: the tail always crosses, `userdata` crosses regardless, the full transcript is still recorded, and a later `transcript` hop shows that agent the whole call including the part `summary` scoped away. If a fact must not reach the next agent, do not let the first agent hold it.
+</Warning>
+
+### The handover message
+
+`message` is queued **before** the target is built, which is the whole point of it: building the target loads its definition and compiles its prompt, tools and voice, and the caller should hear "connecting you to billing" during that pause rather than after it. It always finishes playing before the target's own greeting.
+
+On a cascade agent it is spoken verbatim. Leave it out and the handover is silent, which is fine when the target has a greeting of its own — but then the caller hears two seconds of nothing followed by a new voice, so say something.
+
+</Step>
+
+<Step title="Let a specialist hand back">
+
+A specialist that discovers it has the wrong caller hands back. There is nothing special about a return edge — it is an ordinary `handoffs` entry on the specialist, pointing at the front desk:
+
+<CodeGroup>
+```bash cURL
+BILLING=b41c7a29-6f2b-4c7a-9c1e-1d2a8f0b41c7
+
+curl -sS -X PATCH "https://api.in.talqing.com/v1/agents/$BILLING" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"config": {"handoffs": [{
+    "name": "Front desk",
+    "agent_id": "3f9a1c72-58b4-4a1e-9f27-6d0c5b8e4a13",
+    "description": "anything that is not a billing question - a tool that is not working, buying something new, or a caller who has finished with billing and needs something else",
+    "context": "none",
+    "recent_turns": 2,
+    "message": "Let me take you back to the front desk."
+  }]}}'
+
+curl -sS -X POST "https://api.in.talqing.com/v1/agents/$BILLING/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+await talqing.agents.update({
+  agent_id: billing.id,
+  updateAgentRequest: {
+    config: {
+      handoffs: [
+        {
+          name: "Front desk",
+          agent_id: frontDesk.id,
+          description:
+            "anything that is not a billing question - a tool that is not working, buying something new, or a caller who has finished with billing and needs something else",
+          context: "none",
+          recent_turns: 2,
+          message: "Let me take you back to the front desk.",
+        },
+      ],
+    },
+  },
+});
+
+await talqing.agents.publish({ agent_id: billing.id });
+```
+
+```python Python
+talqing.agents.update(
+    billing["id"],
+    config={
+        "handoffs": [
+            {
+                "name": "Front desk",
+                "agent_id": front_desk["id"],
+                "description": (
+                    "anything that is not a billing question - a tool that is not working, "
+                    "buying something new, or a caller who has finished with billing and "
+                    "needs something else"
+                ),
+                "context": "none",
+                "recent_turns": 2,
+                "message": "Let me take you back to the front desk.",
+            }
+        ],
+    },
+)
+
+talqing.agents.publish(billing["id"])
+```
+</CodeGroup>
+
+Only `handoffs` is sent; billing's invoice lookup and the rest of its config are kept. `handoffs` is a list, so it replaces whole — see [updating an agent](/agents/overview#updating-an-agent).
+
+Give technical support the same edge, plus one to billing with `summary` and `recent_turns: 3` for the long-call hop in the table above. Nothing prevents a routing cycle and no single edge can detect one; what stops it is a per-call cap of **25 handoffs**, after which the model is handed a line to relay: *"I'm sorry, I can't pass you to another assistant again on this call."* If you are anywhere near that cap, two descriptions overlap.
+
+</Step>
+
+<Step title="Route on a lookup instead of on the model">
+
+Whether a caller has an open ticket is a fact about their account, not a judgement about what they said. Facts belong in a tool tree. The [`handoff` operation](/teams/conditional-handoffs) is the same move as an edge on the agent, except the **tree** decides.
+
+This tool assumes your endpoint answers `200` with all three keys on every response — `open_ticket_id` and `open_ticket_summary` as empty strings when there is nothing open. That matters: `publish_fields` fails the operation when a path is missing **or null**, so an endpoint that omits a key on the quiet path breaks the tool on exactly the calls it is meant to pass through.
+
+```json
+{
+  "name": "route_by_open_ticket",
+  "description": "Check whether the caller already has an open support ticket, and send them straight to technical support if they do. Call it once, as the very first thing you do on every call, before you ask the caller anything.",
+  "json_schema": {},
+  "operations": [
+    {
+      "kind": "http",
+      "config": {
+        "method": "GET",
+        "url": "https://api.northwind.example/v1/accounts/lookup",
+        "query": { "phone": "{{system_vars.human_phone_number}}" },
+        "headers": { "Authorization": "Bearer {{secrets.NORTHWIND_API_KEY}}" },
+        "timeout": 5
+      },
+      "on_error": "continue",
+      "silent": true,
+      "publish_fields": [
+        { "path": "customer_name", "key": "name", "store": "userdata" },
+        { "path": "open_ticket_id", "key": "ticket_id", "store": "tooldata" },
+        { "path": "open_ticket_summary", "key": "ticket_summary", "store": "tooldata" }
+      ]
+    },
+    {
+      "kind": "if",
+      "config": { "left": "{{tooldata.ticket_id}}", "op": "neq", "right": "" },
+      "then": [
+        {
+          "kind": "handoff",
+          "config": {
+            "target_agent_id": "7d2e5a04-91c3-4f68-b0aa-2c53e7d19f80",
+            "context": "summary",
+            "summary": "The caller rang the main line. There is already an open ticket on their account: {{tooldata.ticket_summary}}. They have not been asked anything yet.",
+            "recent_turns": 1,
+            "message": "I can see an open ticket on your account - let me take you straight to technical support."
+          }
+        }
+      ],
+      "else": [
+        {
+          "kind": "generate_reply",
+          "config": {
+            "instructions": "There is no open ticket on this caller's account. Ask, in one short question, what they are calling about."
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+Four things that tree is doing on purpose:
+
+- **`on_error: "continue"` on the lookup** is what stops a flaky endpoint taking the front desk down with it. A failed operation publishes nothing, so `{{tooldata.ticket_id}}` resolves to empty, the `if` takes its `else`, and the caller gets an ordinary greeting instead of an apology.
+- **`context: "summary"` here takes a value, not a request.** The tree runs *after* the model's tool call, so there is no argument being written at that moment to take a summary from. Point it at something real — a template over `tooldata`, as above, or fixed prose. A `summary` under any other context is an error.
+- **The `if` is terminal and branches do not rejoin.** Nothing may follow it in the same chain, so anything both paths need goes before it or into both branches.
+- **The `else` speaks.** No operation in this tree can return a response, so the tool is silent by derivation — without the `generate_reply` the agent would fall quiet after the lookup. Adding a `generate_reply` that states what to say is the right way to break that silence; there is no flag to untick.
+
+`POST` it to `/v1/tools`, `validate` it — `target_agent_id` must already be published, which is why the specialists came first — and `publish` it before attaching it to the front desk. The examples in step 2 call the created tool `route`. Then publish the front desk.
+
+</Step>
+
+<Step title="Keep the team sounding like one company, then go live">
+
+Every agent above shares `language`, `stt`, `tts` and its voice. That is not laziness — it is the difference between a caller being passed to a colleague and a caller wondering whether the line dropped.
+
+| Constraint | Enforced? | What happens |
+| --- | --- | --- |
+| Same channel, and same pipeline — both cascade, or both realtime | **Error at publish** | There is no media path from a `voice` agent to a `text` one, and swapping a speech-to-speech socket for an STT/LLM/TTS stack mid-call would mean rebuilding the media graph |
+| Out of an [expressive](/agents/expressive-delivery) agent, every target uses the **same** provider, model and `expressive: true` | **Error at publish** | The target inherits a transcript full of delivery tags and starts writing its own; a voice that cannot speak them reads them out. Handing off *into* an expressive agent is fine, so the rule is transitive — one expressive agent puts its whole downstream graph on one voice |
+| Same voice and language across desks | **Nothing checks this** | A team can hand a caller from one voice to a completely different one mid-call. Either give every member the same `tts` block, or have each target's greeting say who it is |
+| Recording on across the team | **Warning at publish** | Recording cannot *start* part-way through a call, so if the agent that answers has it off, nothing is recorded even where a target has it on. Switching off mid-call always works |
+
+Validate every agent, then publish, then put the front desk on the number. **The agent assigned to a number is the one that answers** — the specialists are reached only through handoffs and are never assigned to anything.
+
+<CodeGroup>
+```bash cURL
+for A in b41c7a29-6f2b-4c7a-9c1e-1d2a8f0b41c7 \
+         7d2e5a04-91c3-4f68-b0aa-2c53e7d19f80 \
+         e5b83f27-0d61-4a94-b7c2-8f130a6d5c49 \
+         3f9a1c72-58b4-4a1e-9f27-6d0c5b8e4a13; do
+  curl -sS -X POST "https://api.in.talqing.com/v1/agents/$A/validate" \
+    -H "Authorization: Bearer $TALQING_API_KEY"
+  curl -sS -X POST "https://api.in.talqing.com/v1/agents/$A/publish" \
+    -H "Authorization: Bearer $TALQING_API_KEY"
+done
+
+curl -sS https://api.in.talqing.com/v1/telephony/phone-numbers/1f6c9a34-8d07-4b52-9e18-3a5c07d2b4f9/assign \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "3f9a1c72-58b4-4a1e-9f27-6d0c5b8e4a13"}'
+```
+
+```typescript TypeScript
+for (const id of [billing.id, technical.id, sales.id, frontDesk.id]) {
+  const check = await talqing.agents.validate({ agent_id: id });
+  if (check.errors.length) throw new Error(`${id}: ${check.errors.join("; ")}`);
+  console.log(id, check.warnings);
+  await talqing.agents.publish({ agent_id: id });
+}
+
+const number = await talqing.telephony.phoneNumbers.assign({
+  number_id: "1f6c9a34-8d07-4b52-9e18-3a5c07d2b4f9",
+  assignPhoneNumberRequest: { agent_id: frontDesk.id },
+});
+console.log(number.readiness); // "live"
+```
+
+```python Python
+for agent_id in (billing["id"], technical["id"], sales["id"], front_desk["id"]):
+    check = talqing.agents.validate(agent_id)
+    if check["errors"]:
+        raise SystemExit(f"{agent_id}: " + "; ".join(check["errors"]))
+    print(agent_id, check["warnings"])
+    talqing.agents.publish(agent_id)
+
+number = talqing.telephony.phone_numbers.assign(
+    "1f6c9a34-8d07-4b52-9e18-3a5c07d2b4f9",
+    agent_id=front_desk["id"],
+)
+print(number["readiness"])  # "live"
+```
+</CodeGroup>
+
+<Note>
+A handoff edge names a stored agent and enters it at whatever version is published **at that moment** — unlike `config.tools`, which pins at the source agent's publish. So republishing a specialist reaches the very next handoff with nothing to republish on the front desk, and a specialist you break is broken for every agent pointing at it.
+</Note>
+
+Post-call analysis runs on the agent that **answered** — the front desk — using its spec and its own language model, over the whole call including every desk. That is why the `analysis` block sits on the front desk and not on the specialists.
+
+</Step>
+
+</Steps>
+
+## Test it
+
+Test one hop at a time, and test the hop, not the desk.
+
+**Run the routing tool on its own.** `POST /v1/tools/{tool_id}/run` executes the draft for real against your endpoint.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/tools/2d70b6e9-5c14-4f83-a096-7b3e1d8c40a5/run \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"timezone": "Asia/Kolkata"}'
+```
+
+```typescript TypeScript
+const run = await talqing.tools.run({
+  tool_id: route.id,
+  runToolRequest: { timezone: "Asia/Kolkata" },
+});
+console.log(run.ok, run.handed_off, run.tooldata);
+run.steps.forEach((step) => console.log(step));
+```
+
+```python Python
+run = talqing.tools.run(route["id"], timezone="Asia/Kolkata")
+print(run["ok"], run["handed_off"], run["tooldata"])
+for step in run["steps"]:
+    print(step)
+```
+</CodeGroup>
+
+That proves the URL, the secret and the publish paths. It will always take the `else` branch, because `{{system_vars.human_phone_number}}` is empty outside a phone call — the same is true on a web call and in the dashboard test panel. Prove the `then` branch by ringing the number from a phone that has an open ticket.
+
+**Walk each hop in the browser.** The agent editor's test panel runs the **latest published version**, so republish after every edit. Say one sentence per desk and check it lands: *"my card was charged twice"*, *"the drill won't charge"*, *"I want to kit out a new site"*. Then say something ambiguous on purpose — *"I've got a problem with an order"* — and see which way it goes. That sentence is the one your descriptions have to settle.
+
+<Note>
+The sales desk's transfer cannot be exercised from a web call: `transfer` is phone-only and fails on a web session with *"transfer is only available on phone calls"*, after which the agent apologises and carries on. Test it by ringing the number.
+</Note>
+
+**Ring the number and read the call back.** `GET /v1/calls/{session_id}` returns the whole thing:
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/calls/9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+| jq '{
+    team: [.team[].name],
+    handoffs: [.events[] | select(.type == "agent.handoff") | .payload],
+    who_said_what: [.transcript[] | {type, agent_version, role, text}]
+  }'
+```
+
+```typescript TypeScript
+const call = await talqing.calls.get({ session_id });
+
+for (const item of call.transcript) {
+  if (item.type === "agent_handoff") console.log("handover:", item.text);
+  if (item.type === "function_call") console.log(item.agent_id, "called", item.metadata.data);
+}
+
+console.log(call.session.analysis?.outcome, call.session.analysis?.fields);
+```
+
+```python Python
+call = talqing.calls.get(session_id)
+
+for item in call["transcript"]:
+    if item["type"] == "agent_handoff":
+        print("handover:", item["data"])
+    if item["type"] == "function_call":
+        print(item["agent_id"], "called", item["data"])
+
+print(call["session"]["analysis"]["outcome"], call["session"]["analysis"]["fields"])
+```
+</CodeGroup>
+
+## What to watch in the first week
+
+**Which agent said each line.** Every transcript item stamps its own `agent_id` and `agent_version` as it was produced. The session names only the agent that **answered** and never moves, so on a call with a handoff these stamps are the only way to tell who said what. `GET /v1/conversations/{conversation_id}/sessions` is deliberately the same: it names the agent that picked up, not the one that did the work. See [conversations](/observability/conversations).
+
+**Where the handovers are, and what crossed.** The transcript carries an `agent_handoff` item at each boundary. Beside it, `events` carries an `agent.handoff` entry with the policy, the resolved `recent_turns`, `tail_items` — how many messages the tail actually came to, usually more than `recent_turns` because a turn can hold several — the summary itself, `summary_fallback`, and `via`, which is `handoffs` for an edge on the agent and `operation` for the conditional route above.
+
+**Telling a mis-route from a bad prompt.** These look identical in a summary and are completely different problems, and the transcript separates them in one glance:
+
+| What you see | What it is | The fix |
+| --- | --- | --- |
+| The `handoff_to_*` call happens on a turn where the caller clearly said which desk they wanted, and it goes to the wrong one | A **routing** problem. Two descriptions overlap on the words the caller used | Move the ambiguous words into exactly one `description`. Nothing else changes |
+| The right desk was reached and then answered badly, or asked for something the caller already said | A **prompt or context** problem on the specialist | Read what actually crossed on that edge. If the target asked the caller to repeat something, the policy carried too little; if it re-read a resolved question, too much |
+| The caller bounces between two desks | Both, and it will hit the 25-hop cap | Two descriptions claim the same ground, or a specialist's prompt lets it re-litigate the routing. Add "do not decide which desk the caller needs" to the specialist |
+| A handover that takes noticeably longer than the others | The edge is on `summary`, and the source is writing 60–100 tokens before the tool returns | Only pay that where the call is long enough to be worth summarizing |
+
+**The `reroutes` field.** Any call above 1 is worth opening. Read those before you read the failures — a caller who reached the right desk on the third try counts as a success and is still a bad call.
+
+## Where this falls short
+
+**Routing quality is a description-writing problem, and it is iterative.** There is no model, threshold or confidence score to turn up. The model reads three descriptions and picks one, so the only lever is the wording — and the loop is: read the transcripts where it chose wrong, find the caller's exact phrase, and put that phrase in one description. Change one description at a time; changing three at once means you cannot tell which fixed it. A description that has grown into three sentences of instructions is a sign the split itself is wrong.
+
+**Every hop costs latency, and it stacks.** At the boundary the platform loads the target's published definition, its pinned tools and its hooks, and builds its models — that pause is what the `message` exists to cover. Under `summary` there is a second pause first, while the source writes the summary. Then the target's `on_enter` hook runs to completion before it says a word. Two hops on a short call are unnoticeable; three hops with `summary` on each is a call that feels slow, and the caller has no idea why. Watch `snapshot.response_latency.p95_ms` on multi-agent calls specifically.
+
+**There is no way to test a routing change before it faces real callers.** No staging environment, no simulated caller, no test suite that replays past calls against a new set of descriptions — none of that exists here. The closest thing is real and worth using: place a call against the **draft** rather than the published version by passing `agent_version: "draft"` on a call token or an outbound dial, so you can hear an edit without publishing it over what live callers are getting. Beyond that, change one description, publish, and read the next twenty calls.
+
+Two smaller limits. `summary` is not a privacy boundary — see the warning above — so a team is not a way to keep one desk from seeing another's conversation. On **text** a handoff lasts for the rest of the chat: whichever agent was last handed the conversation answers every later message, until the chat ends. See [chats](/channels/text-conversations).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Team patterns" href="/teams/patterns">
+    The same four designs as reference, with the constraints that shape them.
+  </Card>
+  <Card title="Context policies" href="/teams/context-policies">
+    What each hop carries, what it costs, and what crossed on a real call.
+  </Card>
+  <Card title="Conditional handoffs" href="/teams/conditional-handoffs">
+    The `handoff` operation in full, and when the tree should decide.
+  </Card>
+  <Card title="Inbound support line" href="/guides/inbound-support-line">
+    The single-agent version, with a lookup, an escalation and a number.
+  </Card>
+</CardGroup>

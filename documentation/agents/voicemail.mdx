@@ -1,0 +1,96 @@
+---
+title: "Voicemail detection"
+description: "Hang up on, or leave a message for, an outbound call that reaches an answering machine."
+---
+
+With **voicemail detection** on, an agent that places a call and reaches an
+answering machine stops talking to it: it leaves your message, if you wrote one,
+and hangs up. The call ends as `voicemail`, and a [batch](/telephony/batch-calling)
+calls that person again later.
+
+Turn it on in the agent editor under **Voicemail**, or set `voicemail_detection`
+on the config. It is **off by default**, and **`voice` agents only** — only a
+voice agent places calls.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `enabled` | `false` | Whether the agent watches for voicemail on calls it places. |
+| `message` | `null` | Spoken word for word, then the agent hangs up. `null` hangs up without one. Takes the same `{{userdata.…}}`, `{{vars.…}}` and `{{system_vars.…}}` substitutions as the greeting. |
+
+<CodeGroup>
+```bash cURL
+curl -X PATCH https://api.in.talqing.com/v1/agents/81399608-4930-4ff1-9281-f1f4932d1999 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"config": {"voicemail_detection": {"enabled": true, "message": "Hi {{vars.name}}, this is Maya from Brightside Dental about your appointment tomorrow. Please call us back."}}}'
+```
+
+```typescript TypeScript
+await talqing.agents.update({
+  agent_id: "81399608-4930-4ff1-9281-f1f4932d1999",
+  updateAgentRequest: {
+    config: {
+      voicemail_detection: {
+        enabled: true,
+        message: "Hi {{vars.name}}, this is Maya from Brightside Dental about your appointment tomorrow. Please call us back.",
+      },
+    },
+  },
+});
+```
+
+```python Python
+talqing.agents.update(
+    "81399608-4930-4ff1-9281-f1f4932d1999",
+    config={
+        "voicemail_detection": {
+            "enabled": True,
+            "message": "Hi {{vars.name}}, this is Maya from Brightside Dental about your appointment tomorrow. Please call us back.",
+        },
+    },
+)
+```
+</CodeGroup>
+
+## How it decides
+
+The agent's own model decides. On a call it placed, the agent is given a
+`voicemail_detected` tool, and it calls it when what it hears is a recorded
+greeting — "leave a message after the tone", "the person you are calling is not
+available", a full mailbox — rather than a person.
+
+That means **a person who picks up hears the greeting with no delay**, and
+detection costs nothing extra: it is the same model reading the same turn it was
+going to answer anyway. The trade is that the model decides from what it hears:
+it is told to wait for the machine's greeting to finish, but a greeting with a
+long pause in it can make it act early, and the start of the message can then
+be lost before the mailbox records.
+
+It is only offered where a machine can answer: **outbound phone calls, and
+[media streams](/channels/media-streams) whose platform says the call is
+outbound**. An inbound call, a web call and a chat never see the tool.
+
+## What you see afterwards
+
+| | |
+| --- | --- |
+| `close_reason` | `voicemail` — "The call reached voicemail, so the agent hung up". |
+| `status` | `completed`. The call connected and ran, so it is **billed like any other call**. It is short: the machine's greeting, and your message. |
+| Transcript | The machine's greeting as a caller turn, the `voicemail_detected` tool call, and your message. |
+| Batches | The recipient is **not reached**: it is dialled again after `retry_after_minutes` while `max_attempts` allows, like a missed call, and the batch counts it under `counts.voicemail`. With a message set, each retry that reaches the machine leaves it again — set `max_attempts` to `1` if once is enough. |
+
+## Writing the message
+
+Keep it short and complete on its own: who is calling, why, and what to do next.
+A mailbox may cut a long message off, and nobody can ask a recording what you
+meant.
+
+A message is spoken with the agent's voice. On a
+[realtime model](/agents/realtime), which cannot read a script word for word, the
+model is asked to say it and may reword it slightly.
+
+<Note>
+**The recording notice does not belong here.** `{{consent.notice}}` is refused in
+the message: a voicemail is left only when nobody answered, and the notice lives
+in the [greeting](/telephony/recording), which every call speaks first.
+</Note>

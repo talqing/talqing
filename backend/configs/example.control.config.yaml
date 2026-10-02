@@ -1,0 +1,207 @@
+# Template for the CONTROL plane's configs/{env}.control.config.yaml —
+# everything control reads, and nothing a region reads. The real files are
+# gitignored and dockerignored because they hold secrets; this one is committed,
+# so KEEP IT FREE OF REAL CREDENTIALS. Every value below is either a placeholder
+# or a non-secret default.
+#
+#   cp configs/example.control.config.yaml configs/local.control.config.yaml
+#   # fill in every {{TOKEN}}, then:
+#   echo "ENV=local.control" >> backend/.env
+#
+# There are TWO templates, because there are two shapes: this one and
+# configs/example.region.config.yaml. Control holds the identity database, the
+# session SIGNING key, the payment credentials and the region list; it holds no
+# data-plane DSN, no LiveKit, no storage and no tenant secrets key. Shipping the
+# wrong half is refused at boot, by name.
+#
+# Unfilled values are written as {{TOKEN}} and nothing else. That is the one
+# pattern every guard greps for — the deploy script refuses to ship a file that
+# still contains one, and a bare `TODO` alongside it.
+#
+# The file loaded is decided by ENV, which names both the environment and the
+# node: `local.control`, `dev.control`, `prod.control`. `env:` below must match
+# its head, and there is deliberately no `region:` key here — control serves
+# every region and is in none of them.
+#
+# Generating the secrets marked below:
+#   session_signing_key  NOT openssl — macOS ships LibreSSL, whose genpkey has no
+#                        ed25519 at all ("Algorithm ed25519 not found"). Writes
+#                        both halves; the PUBLIC one goes in every region's config:
+#     python3 -c "from cryptography.hazmat.primitives import serialization as s; from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as K; k=K.generate(); open('session_signing_key.pem','wb').write(k.private_bytes(s.Encoding.PEM,s.PrivateFormat.PKCS8,s.NoEncryption())); open('session_verify_key.pem','wb').write(k.public_key().public_bytes(s.Encoding.PEM,s.PublicFormat.SubjectPublicKeyInfo))"
+#   oauth_state_key      python -c "import secrets; print(secrets.token_urlsafe(48))"
+#   internal_token       openssl rand -hex 32  — ONE per region, and the SAME
+#                        value goes in that region's own `control.internal_token`
+#   passwords            python -c "import secrets; print(secrets.token_hex(32))"
+
+env: local
+
+security:
+  session_cookie_name: talqing_session
+  # The domain the session cookie is scoped to, and it is what makes the cookie
+  # reach a region at all: one issued by api.control.talqing.com is never sent
+  # to api.in.talqing.com without it. SameSite=Lax keeps working because every
+  # host shares this domain.
+  #
+  # **Scope it as narrowly as every host in the environment allows**, because a
+  # cookie is keyed by (name, domain, path) and nothing else: two environments
+  # that both claim `talqing.com` hold ONE cookie between them, so signing into
+  # dev signs you out of prod and dev's cookie is sent to prod's API, where it
+  # fails to verify. Dev's hosts are all under `dev.talqing.com`, so that is
+  # dev's answer and `talqing.com` is prod's alone.
+  #
+  # The cost of the value you pick, stated so nobody rediscovers it: the cookie
+  # also goes to every other host under it, marketing site included. Null (local)
+  # is host-only, which is right when there is one host.
+  session_cookie_domain: null
+  # session_cookie_domain: dev.talqing.com   # dev
+  # session_cookie_domain: talqing.com       # prod
+  #
+  # Ed25519, PEM. CONTROL ONLY — this is what mints every session and personal
+  # access token in the deployment, and a region carrying one could forge a
+  # credential for any other region. ESCROW IT: losing it signs nobody out (the
+  # public halves still verify existing tokens) but nobody can sign in again.
+  session_signing_key: |
+    {{SESSION_SIGNING_KEY_PEM}}
+  # Its public half. Control verifies its own sessions too, and a pair that does
+  # not match is refused at boot rather than 401ing every request.
+  session_verify_key: |
+    {{SESSION_VERIFY_KEY_PEM}}
+  # HS256, for the Google login state control mints and reads back itself. It
+  # never crosses a host, so each node generates its own — a region's is a
+  # different value for a different flow.
+  oauth_state_key: "{{OAUTH_STATE_KEY}}"
+
+app:
+  # Control's own public URL. Nothing here reads it — the Google login redirect
+  # is `oauth.google.login_redirect_uri` below — but a node that cannot say where
+  # it answers is one nobody can debug from its config alone.
+  api_public_url: http://localhost:8001
+  # api_public_url: https://api.control.talqing.com    # prod
+  #
+  # There is no `code_exec_url` here, and that is structural rather than an
+  # omission: tenant tool code runs in a region, and a control config naming a
+  # code-exec is refused at boot.
+  #
+  # Where a login lands and where the payment processor sends a buyer back. One
+  # dashboard build serves every region, so this is region-agnostic.
+  dashboard_public_url: http://localhost:3000
+  # The browser calls BOTH hosts from the dashboard's origin, so this list is in
+  # both configs.
+  cors_origins:
+    - http://localhost:3000
+  cors_origin_regex: "^http://(localhost|127\\.0\\.0\\.1):[0-9]+$"
+
+# Every region this deployment serves. CONFIGURATION, NOT A TABLE: the list
+# changes when we stand a region up, which is a deploy, never at runtime, and
+# nothing but us ever writes it. Same reasoning and the same place as
+# billing.packs. Served to the dashboard by GET /v1/regions, so adding a region
+# needs no dashboard deploy.
+#
+# There is no enablement and no per-region status. Every region serves every
+# organization, its data-plane rows are created lazily the first time that
+# organization does something there, and the switcher offers all of them.
+#
+# Validated at boot: slugs unique, EXACTLY ONE default, and no country claimed
+# by two regions.
+regions:
+  - slug: in
+    # What a person reads in the switcher and in every empty state. `in` is not
+    # a label — and with no enablement, an unused region looks exactly like a
+    # wiped one unless the screen says which region it is empty in.
+    name: India (Bangalore)
+    api_url: http://localhost:8000
+    # api_url: https://api.in.talqing.com               # prod
+    # Where CONTROL reaches this region, when that differs from the address a
+    # browser uses. In production it does not — one name serves both — so this
+    # stays unset there. Locally the region's API is `localhost:8000` to the
+    # browser and `api:8000` on the compose bridge, and without this the credit
+    # push is the one part of the design local cannot rehearse.
+    internal_url: http://api:8000
+    # ONE SECRET PER REGION, used in BOTH directions: control accepts it from
+    # this region on /internal/*, and sends it back to push credit. It must be
+    # THE SAME STRING as that region's own `control.internal_token` — two
+    # different values 401 every authenticated request in that region.
+    internal_token: "{{IN_INTERNAL_TOKEN}}"
+    # Rotating it is a two-sided edit on two droplets deployed minutes apart, so
+    # for the length of a rotation the other value is accepted too. Blank
+    # normally.
+    # previous_internal_token: "{{IN_PREVIOUS_INTERNAL_TOKEN}}"
+    # ISO 3166-1 alpha-2 codes whose visitors open their FIRST workspace here.
+    # The country crosses the wire from the dashboard, not a region slug, so
+    # pointing a new region at a set of countries is one edit here.
+    countries: [IN]
+  - slug: us
+    name: United States (San Francisco)
+    api_url: https://api.us.talqing.com
+    # The same string as the `us` region's own `control.internal_token`.
+    internal_token: "{{US_INTERNAL_TOKEN}}"
+    # Empty is normal, not a gap: a country in no list falls to the default.
+    countries: []
+    # Where a workspace is created when the visitor's country is unknown, and
+    # where the dashboard opens with no stored preference. Exactly one region
+    # carries it.
+    default: true
+
+# One database, never sharded, and it is the only store whose loss is
+# unrecoverable: every user, organization, membership, access token and payment
+# record, shared by every region. Back it up.
+#
+# There is NO `data:` block here. Control never opens a data plane, and having
+# no DSN for one is what makes that structural rather than a promise.
+postgres:
+  control:
+    dsn: postgresql://talqing:{{PG_PASSWORD}}@control-pg:5432/talqing_control
+    pool_min_size: 1
+    # A per-process ceiling. Control runs one uvicorn process against one
+    # database and has no pgbouncer in front of it — the proxy exists for
+    # voice-worker, which forks a job process per call and never amortizes its
+    # connections. Leave TALQING_PG_PROXY unset on the control droplet.
+    pool_max_size: 10
+
+# The dashboard login half of the shared Google OAuth app. The Calendar
+# integration's redirect_uri is in each REGION's config — one Google client, two
+# URIs, both registered.
+oauth:
+  google:
+    client_id: ""
+    client_secret: ""
+    login_redirect_uri: http://localhost:8001/v1/auth/google/callback
+
+# Prepaid credits. The BALANCE is regional and lives in each region's data
+# plane; control owns the payment, the signup grant and the packs' product ids.
+#
+# Test and live are two separate Dodo environments — different API keys, webhook
+# secrets and product ids. `mode` derives the API host, so a live key can never
+# be pointed at the test host by a hand-edited URL, and `mode: live` is refused
+# outright when env is local.
+#
+# ONE webhook endpoint serves the whole deployment, at
+# {api_public_url}/v1/billing/dodo/webhook, subscribed to payment.succeeded,
+# payment.failed, payment.cancelled, refund.succeeded and dispute.lost. Dodo has
+# one business and a payment carries no notion of our regions, so a per-region
+# endpoint is not merely unnecessary — it is not expressible.
+billing:
+  # What an organization created at a first sign-in starts with, PER REGION —
+  # every region grants, so one signup costs this times the number of regions
+  # above. 0 (the default) turns the grant off. An organization a member creates
+  # themselves always starts at $0, whatever this says.
+  signup_grant_usd: "0"
+  # Below this the dashboard warns; it never blocks. In both configs, because a
+  # region renders the warning against its own balance.
+  low_balance_warning_usd: "2"
+  dodo:
+    mode: test
+    api_key: ""
+    webhook_secret: ""       # the whsec_… value from Dodo's webhook page
+  # One entry per pack on sale. Amounts are quoted so they reach Decimal exactly
+  # rather than through a float, and each must equal the amount its id names.
+  # A non-empty list with a blank api_key is refused at startup — on control,
+  # which is the only node that can sell them.
+  packs: []
+  # packs:
+  #   - { id: usd_20,   amount: "20",   dodo_product_id: pdt_… }
+  #   - { id: usd_50,   amount: "50",   dodo_product_id: pdt_… }
+  #   - { id: usd_100,  amount: "100",  dodo_product_id: pdt_… }
+  #   - { id: usd_200,  amount: "200",  dodo_product_id: pdt_… }
+  #   - { id: usd_500,  amount: "500",  dodo_product_id: pdt_… }
+  #   - { id: usd_1000, amount: "1000", dodo_product_id: pdt_… }

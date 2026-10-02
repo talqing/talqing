@@ -1,0 +1,212 @@
+---
+title: "Close reasons"
+description: "Every value close_reason can take, which bucket it belongs to, the sentence we show for it, and what to do about it."
+---
+
+`close_reason` is the most specific fact Talqing holds about how a run ended. It
+appears on the call record, in the `session.completed` webhook, as a filter on
+`GET /v1/calls`, and — grouped into buckets — on the observability `endings`
+chart.
+
+Every surface also serves `close_reason_label`, the plain sentence for that
+value. Read it rather than mapping the strings yourself: there are more than
+fifty of them, written from five places, and a second copy of the list goes stale
+the first time one is added.
+
+<Warning>
+**`user_initiated` means the agent ended the call, not the caller.** The name
+comes from the underlying media stack, where it identifies whoever asked for
+shutdown — and on this platform that is only ever the `end_call` operation. The
+caller hanging up is **`participant_disconnected`**. Reading `user_initiated` at
+face value gets the actor exactly backwards, and it is the single most common
+misreading of this field.
+</Warning>
+
+## The buckets
+
+A bucket answers "who owns the fix". It never replaces the reason — every
+surface keeps the raw string beside it.
+
+| Bucket | Who owns it |
+| --- | --- |
+| `normal` | Nobody. Somebody chose to end it: the caller, the agent, or your own API call. |
+| `transferred` | Nobody. Its own bucket rather than a kind of `normal`, because folding escalations into completions hides the rate at which your agent gives up. |
+| `caller_unreachable` | The dial list. We reached the carrier and the carrier could not reach the person. |
+| `carrier_fault` | The trunk. Your carrier configuration, or the carrier itself. |
+| `configuration` | You. The call arrived and there was nothing valid to run. |
+| `platform` | Us. |
+| `other` | Anything this reference does not list. Shown **raw** rather than hidden, so a reason a future release adds is legible on arrival instead of invisible until somebody updates a table. |
+
+They are ordered as above on every chart: what went right, then outward through
+the parties who could fix what went wrong.
+
+### The fee column
+
+**waived** means the platform fee was not charged for that call. Provider cost
+is still yours — the providers ran and billed your key regardless. See
+[costs](/observability/costs).
+
+Note that the bucket and the fee are **not** the same question. One reason in
+the `platform` bucket is still charged the fee, and it is marked below.
+
+## `normal`
+
+| Reason | What we show | Fee | What to do |
+| --- | --- | --- | --- |
+| `participant_disconnected` | The caller hung up | charged | Nothing. **The caller** ended the call. |
+| `user_initiated` | The agent ended the call | charged | Nothing — **the agent hung up**, through an `end_call` operation. If it is happening too early, read [debugging agents](/observability/debugging-agents). |
+| `end_call` | The agent ended the conversation | charged | Nothing. The chat counterpart of the above. |
+| `task_completed` | The agent finished what it was doing and ended the call | charged | Nothing. |
+| `silence_timeout` | The caller stayed silent, so the agent said goodbye and hung up | charged | Nothing, unless callers are being cut off while thinking — raise `silence.timeout`. See [silence and call length](/agents/silence-and-call-length). |
+| `max_duration` | The call reached its time limit, so the agent said goodbye and hung up | charged | Raise `max_duration_seconds` if real calls need longer. |
+| `api_end` | Ended through the API | charged | Nothing. You ended the chat with `POST /v1/chats/{id}/end`. |
+| `replaced` | A newer chat with this contact took its place | charged | Nothing. A new chat started for the same contact and agent, or the channel's trigger now names another agent. |
+
+## `transferred`
+
+| Reason | What we show | Fee | What to do |
+| --- | --- | --- | --- |
+| `transferred` | The caller was handed to a human | charged | Nothing. A successful escalation, still billed and still eligible for post-call analysis. Read `session.transfer` for the destination and the outcome. See [transfers](/telephony/transfers). |
+
+## `caller_unreachable`
+
+Every reason here but `voicemail` is read off the carrier's own SIP response to
+an outbound dial. None of them is a fault in your agent.
+
+| Reason | What we show | Fee | What to do |
+| --- | --- | --- | --- |
+| `voicemail` | The call reached voicemail, so the agent hung up | charged | Nothing. The agent's [voicemail detection](/agents/voicemail) heard a machine, left its message if it has one, and hung up. The call connected, so it is billed; a batch re-dials it on the same terms as `sip_busy_failed`. |
+| `sip_busy_failed` | The line was busy | waived | Try later. An outbound batch re-dials this when `max_attempts` is above 1 — the default is 1, so by default it does not. |
+| `sip_no_answer_failed` | The phone rang and nobody picked up | waived | Try later. Re-dialled by a batch on the same terms as `sip_busy_failed`. |
+| `sip_user_unavailable_failed` | Nobody answered | waived | Try later. Re-dialled by a batch on the same terms as `sip_busy_failed`. |
+| `sip_connection_timeout_failed` | The call rang without ever connecting | waived | Try later. Re-dialled by a batch on the same terms as `sip_busy_failed`. |
+| `sip_declined_failed` | The person declined the call | waived | Stop calling this number. A batch never re-dials it, whatever `max_attempts` says — somebody said no. |
+| `sip_unallocated_failed` | That number is not in service | waived | Remove the number from your list. A batch never re-dials it, whatever `max_attempts` says. |
+
+## `carrier_fault`
+
+A run of these across different numbers is a trunk problem, not a phone list —
+which is why they count toward an outbound batch's circuit breaker, and a run of
+busy signals does not. Ten consecutive failures from this bucket, `configuration`,
+`platform` or `other` stop the batch. See
+[batch calling](/telephony/batch-calling).
+
+| Reason | What we show | Fee | What to do |
+| --- | --- | --- | --- |
+| `sip_trunk_config_failed` | The trunk is not configured correctly | waived | Check the carrier account and, on Exotel, that the console setup step is done. See [carrier accounts](/telephony/carrier-accounts). |
+| `sip_sip_trunk_failure_failed` | The phone trunk failed | waived | Check the carrier account's credentials and status; then the carrier's own status page. |
+| `sip_dial_failed` | The outbound call could not be dialled | waived | The carrier refused before a leg existed, and gave no code we recognise. Check credentials and the caller ID on the number. |
+| `sip_dispatch_failed` | No agent could be dispatched to the call | waived | Confirm a published voice agent is assigned to the number. See [phone numbers](/telephony/phone-numbers). |
+| `sip_media_failure_failed` | The audio path broke mid-call | waived | Usually transient. A pattern of it is worth raising with your carrier. |
+| `sip_join_failure_failed` | The call could not join the room | waived | Transient. Retry. |
+| `sip_signal_close_failed` | The carrier dropped its signalling connection | waived | Transient. A pattern of it is a carrier-side issue. |
+| `sip_state_mismatch_failed` | The carrier and the platform disagreed about the call's state | waived | Transient. Retry. |
+| `sip_migration_failed` | The call failed while moving between servers | waived | Transient. Retry. |
+| `sip_participant_disconnected_failed` | The phone leg dropped, and the carrier gave no reason | waived | Transient. This is also where an unrecognised carrier disconnect lands. |
+| `sip_duplicate_identity_failed` | Two legs claimed the same identity on this call | waived | Raise it with support with the call id. |
+| `sip_caller_unidentified_failed` | No caller number — the call was refused | waived | The inbound call arrived with no caller ID. Nothing to fix on your side. |
+| `whatsapp_caller_unidentified_failed` | WhatsApp did not say who was calling, so the call was refused | waived | Twilio sent the call with no caller. Nothing to fix on your side. |
+
+## `configuration`
+
+These are yours to fix, and every one of them is fixable.
+
+| Reason | What we show | Fee | What to do |
+| --- | --- | --- | --- |
+| `missing_published_definition` | The agent has never been published | waived | Publish the agent. A draft cannot answer a call. See [versions](/agents/versions). |
+| `unpublished_agent_failed` | The agent has never been published | waived | The same thing, from the telephony path. Publish the agent. |
+| `insufficient_credits` | This workspace was out of credits, so the call was not answered | waived | Top up. Inbound calls resume immediately, and a paused batch resumes on its own. See [pricing and credits](/get-started/pricing-and-credits). |
+| `whatsapp_calling_off` | Calls are turned off on this WhatsApp number, so the call was refused | waived | The number's calls trigger, or its integration, was off — usually a call placed just after calls were turned off, before WhatsApp hid the call button. See [WhatsApp calls](/channels/whatsapp-calls). |
+| `prepare_failed` | The agent could not start | waived | The definition would not compile for this call. Run `validate` on the agent. See [validation](/agents/validation). |
+| `agent_start_failed` | The agent could not start - see the error below | waived | It compiled and then died before its first word — most often two attached tools presenting the same name to the model. Read `session.error` on the call, which says which. |
+| `avatar_start_failed` | The avatar never joined, so the call was ended | waived | Check the Anam provider key and the avatar chosen on the agent. See [video avatars](/agents/video-avatars). |
+| `rejected` | The call was refused before the agent ran | waived | The call was turned away at the door. Check the number's assignment and the agent's channel. |
+| `sip_account_missing_failed` | No telephony account was attached to the number | waived | Reattach the carrier account to the phone number. |
+| `sip_outbound_config_failed` | The agent or phone number for this call is no longer usable | waived | Something the call depended on changed mid-run — the agent was unpublished or deleted, or the carrier account is no longer ready. This is the reason an outbound batch records when its own agent or number stops working. |
+| `sip_outbound_missing_dial_failed` | The outbound call had no number to dial | waived | The request carried no destination. Check what created the call. |
+| `invalid_sip_direction_failed` | The call's direction did not match the number's setup | waived | The number is not enabled for the direction the call used. Check its inbound and outbound flags. |
+| `invalid_dispatch_metadata` | The call arrived with unusable routing data | waived | Raise it with support with the call id. |
+| `missing_dispatch_metadata` | The call arrived with no routing data | waived | Raise it with support with the call id. |
+| `unknown_tenant` | The call did not resolve to a workspace | waived | Raise it with support with the call id. |
+
+## `platform`
+
+Ours. Every one of these is a call you paid for in reputation, and the one
+marked **charged** is where the platform fee was still taken — the fee
+waiver list and this bucket are separate questions and not copies of each other.
+
+| Reason | What we show | Fee | What to do |
+| --- | --- | --- | --- |
+| `error` | The call ended on an error | waived | Read `session.error` on the call. Raise it with support if it repeats. |
+| `stale` | The call was ended after the process running it stopped reporting | waived | Only outbound batch calls reach this, four hours after they started, so a dead worker cannot wedge a campaign. The call was never priced and emitted no `session.completed`. |
+| `job_shutdown` | The worker shut down mid-call | waived | Transient, around a deploy. |
+| `job crashed` | The worker crashed | waived | Raise it with support with the call id. |
+| `avatar_disconnected` | The avatar dropped out of the call | **charged** | Check the Anam provider key and quota. The call itself continued as far as it could. |
+| `conversation_bind_failed` | The call could not be attached to a conversation | waived | Raise it with support with the call id. |
+| `unknown` | The call ended for a reason nothing recorded | waived | Raise it with support with the call id. |
+| `sip_agent_error_failed` | The agent errored on the phone leg | waived | Read `session.error`. |
+| `sip_server_shutdown_failed` | The media server shut down mid-call | waived | Transient, around a deploy. |
+| `sip_room_deleted_failed` | The call's room was deleted underneath it | waived | Raise it with support with the call id. |
+| `sip_room_closed_failed` | The call's room closed underneath it | waived | Raise it with support with the call id. |
+| `sip_participant_removed_failed` | The phone leg was removed from the call | waived | Raise it with support with the call id. |
+| `sip_duplicate_call_failed` | The same call arrived twice | waived | Nothing — the duplicate was refused and the real call ran. |
+
+## `other`
+
+Not a list. `other` is what a reason this reference does not name buckets as,
+and the raw string is shown beside it rather than being folded into a generic
+label. That is deliberate: a default that absorbed a new failure would make it
+invisible until somebody remembered to update the mapping.
+
+A reason with no sentence of its own is de-underscored and capitalized — so an
+unrecognised `some_new_reason` reads as `Some new reason`. A terminal call that
+recorded no reason at all reads as **No ending was recorded**.
+
+## Chats
+
+A chat ends only when something ends it, so it has three reasons, all `normal`:
+
+| Reason | When |
+| --- | --- |
+| `end_call` | A tool ran an `end_call` operation, so the agent ended the chat itself. |
+| `api_end` | You ended it with `POST /v1/chats/{id}/end`. |
+| `replaced` | A new chat started for the same contact and agent, or a channel trigger was pointed at a different agent. |
+
+A chat is charged per answered message whichever way it ended. See
+[chats](/channels/text-conversations).
+
+## Filtering by reason
+
+`GET /v1/calls?close_reason=…` takes the exact string.
+
+<CodeGroup>
+```bash cURL
+curl -G https://api.in.talqing.com/v1/calls \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "close_reason=sip_busy_failed" \
+  --data-urlencode "limit=50"
+```
+
+```typescript TypeScript
+const page = await talqing.calls.list({
+  close_reason: "sip_busy_failed",
+  limit: 50,
+});
+
+for (const call of page.items) {
+  console.log(call.to_e164, call.close_reason_label);
+}
+```
+
+```python Python
+from talqing import paginate
+
+for call in paginate(talqing.calls.list, close_reason="sip_busy_failed"):
+    print(call["to_e164"], call["close_reason_label"])
+```
+</CodeGroup>
+
+To see them ranked rather than filtered, read `endings` from
+`GET /v1/observability` — every distinct reason in the range with its bucket,
+its session count and how many of those failed. See
+[observability](/observability/overview).

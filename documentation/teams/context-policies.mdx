@@ -1,0 +1,231 @@
+---
+title: "Context policies"
+description: "What the next agent starts from: transcript, summary or none, plus recent_turns and summary_prompt."
+---
+
+`context` on a handoff decides **what the next agent starts from**. It is the
+single most consequential field on a multi-agent call: it sets what the target
+can answer without asking again, and it sets what you pay on every turn the
+target then takes.
+
+It uses the same three words as an agent's own
+[`conversation.context`](/agents/conversation-memory), because it is the same
+question asked about the next **agent** rather than about the next **call**.
+
+```json
+{
+  "name": "Billing",
+  "agent_id": "b41c7a29-6f2b-4c7a-9c1e-1d2a8f0b41c7",
+  "description": "invoices, refunds, payment questions",
+  "context": "summary",
+  "recent_turns": 2,
+  "summary_prompt": "A short summary for billing: what {{userdata.name}} is asking about, what you have already checked, and what is still open."
+}
+```
+
+## `transcript` — everything said so far
+
+The default. The target inherits the whole conversation and needs no
+configuration at all. It knows what the caller said forty turns ago and can pick
+up anything.
+
+It also **pays for all of it on every turn it takes**, on your own provider key.
+A long call handed to a second agent is a long context re-read on every one of
+that agent's replies. On a five-turn call that is nothing; on a twenty-minute
+support call it is the largest line on the bill.
+
+`recent_turns` and `summary_prompt` are refused here rather than ignored —
+`transcript` already carries every turn, so a turn count is a misunderstanding
+worth an error:
+
+```text
+recent_turns does not apply to context 'transcript', which already carries every
+turn - use context 'summary' or 'none'
+```
+
+## `summary` — a summary this agent writes
+
+Under `summary`, the generated `handoff_to_*` tool takes exactly one argument:
+the summary. **This** agent writes it, as that argument, in the same turn as the
+decision to hand over.
+
+That is what makes the mode cheap. There is no second LLM call and no summarizer
+model — so a realtime speech-to-speech agent can use it too, which it could not
+if the platform had to run a separate pass. What it costs is a **pause before
+the handoff**: the agent writes 60–100 tokens before the tool returns, and the
+caller waits through it. What it buys is a short, focused context that the
+source agent chose, instead of forty turns the target re-reads on every turn.
+
+The target receives one system message, headed by where the text came from, and
+then the verbatim tail:
+
+```text
+Front desk has just handed you this conversation. This is their summary of what
+happened before the last few messages you can see below. The caller has already
+told Front desk all of it, so do not ask them to repeat any of it and do not
+read it back to them.
+```
+
+<Note>
+The summary argument is marked required on the tool, which is a request rather
+than a guarantee. If the model calls the tool with nothing in it, the handoff
+still happens and the target is handed **the full transcript** instead — the
+caller notices nothing. The call's `agent.handoff` event records it as
+`summary_fallback`.
+</Note>
+
+## `none` — only its own instructions
+
+The target starts with its system prompt and its tools, and no
+history at all unless you opt into a tail with `recent_turns`. With no tail it
+is told plainly that it has not been told what came before, and opens by
+introducing itself briefly and asking what the caller needs.
+
+Reach for it when the target's job does not depend on the conversation so far: a
+survey agent at the end of a support call, a payment step, a language-specific
+desk that starts over.
+
+## `recent_turns` — the verbatim tail
+
+<ParamField path="recent_turns" type="integer | null" default="null">
+  How many recent turns cross **verbatim**, alongside the summary or in place of
+  one. 1 to 10.
+</ParamField>
+
+The tail is what tells the target **what is being asked right now**. A summary
+says what the call has been about; the tail says what the caller just said.
+
+**A turn starts at a user message and runs until the next one.** A turn in which
+the agent called a tool and replied twice crosses whole — the platform counts
+turns, not messages, so a tail is never cut in half.
+
+**Tool calls themselves never cross.** The source agent's raw tool results are
+*knowledge*, and knowledge belongs in the summary — a raw balance payload in the
+tail is the same fact twice, in a worse format.
+
+Leave it out and each policy answers for itself:
+
+- Under `summary`, the tail defaults to **two** turns.
+- Under `none`, the tail defaults to **none**.
+
+Under `summary` the tail can be sized down to one turn but **not switched off**:
+1 is the minimum, and there is no 0. A summary with no tail leaves the target
+knowing the history and not the question.
+
+Under `none` the tail is opt-in, and `{"context": "none", "recent_turns": 3}` is
+a real and useful combination — the last three turns and nothing else, with no
+pause to write a summary. It is the cheapest useful handoff there is.
+
+Past ten turns the honest answer is `transcript`, which is why the maximum is 10.
+
+## `summary_prompt` — what this agent is asked to write
+
+<ParamField path="summary_prompt" type="string | null" default="null">
+  Replaces the platform's default line. Only under `context: "summary"`.
+</ParamField>
+
+`summary_prompt` is the **description of the tool argument**, so it is literally
+what the agent is asked to write. The default, with the destination's name
+substituted in, is one line naming three buckets:
+
+```text
+A short summary of this conversation for Billing: what the caller wants, what
+you have already done, and what is still open.
+```
+
+Replace it when the target needs something specific — an order number, a
+diagnosis, which options the caller already rejected. It takes
+`{{userdata.…}}`, `{{system_vars.…}}` and `{{vars.…}}`, substituted at build
+time like the `description` and the `message`.
+
+Keep it to a line or two. It sits in the source agent's tool schema on every
+request of the call, and a longer prompt buys a longer pause before the handoff
+— the caller is listening to silence while the agent writes it.
+
+Outside `summary` it is refused:
+
+```text
+summary_prompt only applies to context 'summary', not 'transcript'
+```
+
+## `summary` is not a privacy boundary
+
+**Do not describe it as one, to yourself or to a customer.** It narrows what the
+target model is *shown*. It guarantees nothing.
+
+- **The tail always crosses.** Under `summary` it is at least one turn,
+  verbatim, whatever the summary says.
+- **`userdata` crosses regardless.** It is session state every agent on the call
+  shares, and no context policy touches it — see [userdata](/agents/userdata).
+- **The full transcript is still recorded and still displayed.** Nothing is
+  dropped from the call record, the recording or the dashboard.
+- **A later `transcript` hop shows that agent the whole call**, including the
+  part `summary` scoped away one hop earlier.
+- **The summary is written by an LLM the caller has been talking to**, so it is
+  exactly as trustworthy as anything else that model says. It can be wrong, and
+  it can include something you would rather it did not.
+
+The one thing that does hold: **the source agent's raw tool results do not
+cross.** Whatever the summary says about them, the payloads themselves are not
+in the target's context.
+
+If a fact must not reach the next agent, do not let the first agent hold it. Put
+it behind a tool the second agent has and the first does not.
+
+## Choosing
+
+| | `transcript` | `summary` | `none` |
+| --- | --- | --- | --- |
+| What the target knows | Everything said so far | A summary the source wrote, plus the last 2 turns (configurable, minimum 1) | Its own instructions, plus a tail only if you ask for one |
+| Cost on every target turn | The whole conversation | Roughly a paragraph plus the tail | Nothing, or the tail |
+| Latency at the handoff | None | A pause while the source writes 60–100 tokens | None |
+| Extra LLM calls | None | None | None |
+| Configuration | None | `recent_turns`, `summary_prompt` | `recent_turns` |
+| Reach for it when | The call is short, or the target must be able to answer anything about it | The call is long and the target needs the gist, not the record | The target's job does not depend on what came before |
+
+A reasonable default for a support line: **`summary` outbound** to a specialist
+who needs to know why the caller is there, and **`none` with a small
+`recent_turns` on the way back** to the front desk, which does not need the
+specialist's detour re-read on every turn.
+
+## Seeing what actually crossed
+
+The one fact no config can reconstruct afterwards is how much *actually* crossed
+— an edge asking for five turns on a call that has had two crossed two.
+`GET /v1/calls/{session_id}` returns the call's event trace, and each handoff
+appears there as `agent.handoff`:
+
+```json
+{
+  "type": "agent.handoff",
+  "payload": {
+    "from_agent_name": "Front desk",
+    "to_name": "Billing",
+    "context": "summary",
+    "recent_turns": 2,
+    "tail_items": 3,
+    "summary": "Caller is asking why their March invoice is higher than February's...",
+    "summary_fallback": false,
+    "via": "handoffs"
+  }
+}
+```
+
+`via` is `handoffs` for an edge on the agent and `operation` for a
+[`handoff` operation](/teams/conditional-handoffs). `tail_items` is how many
+messages the tail came to, which is usually more than `recent_turns` because a
+turn can contain several.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Handoffs" href="/teams/handoffs">
+    The rest of the handoff entry, and the rules across a team.
+  </Card>
+  <Card title="Patterns" href="/teams/patterns">
+    Which policy each hop of a real design should use.
+  </Card>
+  <Card title="Conversation memory" href="/agents/conversation-memory">
+    The other `context` field: what a new call knows about earlier ones.
+  </Card>
+</CardGroup>

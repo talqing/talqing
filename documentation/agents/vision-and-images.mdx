@@ -1,0 +1,230 @@
+---
+title: "Vision and images"
+description: "Photos people send an agent, and the screen share it watches during a call. Two capabilities, two sets of rules."
+---
+
+Two different things, and it is worth keeping them apart.
+
+**Images people send** — someone attaches a photo to a web chat or a web call and
+the agent looks at it. There is no setting; whether the agent can read images is
+decided by the model it runs.
+
+**Screen share** — the agent watches the caller's screen live while they share it.
+That one is a setting, `vision_input.screenshare`, and four rules decide whether it
+can be switched on at all.
+
+## Images people send
+
+On a web chat, a web voice call or a web video call, a person can attach a photo and
+the agent sees it. A phone call carries no files, so this is web only.
+
+There is **no field on the agent for it**. Whether an agent can read an image is a
+property of its language model, and the catalog entry's `vision` flag is where that
+is recorded. `GET /v1/catalog` returns it on every `llm` and `realtime` entry.
+
+Every `llm` entry today reads images. Two entries do not, and both are realtime
+speech-to-speech models:
+
+| Entry | `vision` |
+| --- | --- |
+| `xai/grok-voice-think-fast-2.0` | `false` |
+| `xai/grok-voice-think-fast-1.0` | `false` |
+
+Those two are worse than a plain refusal at the provider: xAI's realtime API accepts
+an image without an error, echoes the item back with the image removed, and then
+answers confidently about a photo it never saw. That is why Talqing carries a flag
+rather than trying it and hoping. If image input matters, check `vision` before you
+pick the model — there is nothing to change on the agent afterwards.
+
+Saving an agent whose model cannot read images is a **warning**, not an error. The
+agent is perfectly valid; it cannot do this one thing:
+
+```text
+'xai/grok-voice-think-fast-2.0' cannot read images, so nobody on this agent can
+attach one - pick a model that can if that matters
+```
+
+A separate warning fires when the primary reads images and its `fallback` does not,
+because that failure arrives mid-conversation: the agent reads images until the day
+the primary fails over, and then quietly stops, including for images already sent.
+
+### Limits
+
+| Limit | Value |
+| --- | --- |
+| Images per message | 4, on `POST /v1/chats/{id}/messages` |
+| Images per conversation | 100, over its whole life |
+| Formats | JPEG, PNG or WebP, decided from the pixels rather than from what the sender declared |
+| Size | 10 MB or smaller, measured on the decoded bytes |
+| Transport | A base64 `data:` URL on a text message; a byte stream on a web call |
+| Stored size | Resized so the longest edge is at most 1568px |
+
+Metadata is stripped before the image is stored — EXIF and its GPS tags, the ICC
+profile, PNG text chunks, XMP. Orientation is baked into the pixels first, so a
+portrait photo stays the right way up.
+
+An image and its caption **arrive together and become one turn**: one row, one
+bubble, one message the model reads as a whole. A photo the agent has to reconcile
+with a separate sentence is a worse conversation than the one the sender wrote.
+
+```json
+{
+  "contact_key": "user-42",
+  "client_message_id": "b1c9c8a2-7c4b-4f5e-9a0d-4c1c2a3b4d5e",
+  "message": "Is this the right part?",
+  "images": [
+    { "data_url": "data:image/jpeg;base64,/9j/4AAQSkZJRg...", "filename": "part.jpg" }
+  ]
+}
+```
+
+Sending an image to an agent whose model cannot read one is refused before anything
+is decoded or uploaded. On a web voice or video call the browser gets the answer back
+on the image it tried to send: `this agent's model cannot read images`. That is what
+a `grok-voice-*` agent does today.
+
+On a text message the refusal is a `409` and it names the model —
+`<provider>/<model> cannot read images — pick a model that can`. Every `llm` entry
+reads images today, so a text agent does not hit it; it is the check that catches a
+model added later without vision.
+
+The browser side — attaching a photo mid-call, and what the SDK gives you — is on
+[web call features](/channels/web-call-features).
+
+## Screen share
+
+`vision_input.screenshare` is what the agent *watches* during a call, as opposed to
+the images people send it. Do not confuse it with `vision` on a catalog entry: that
+is what the model **can** do, measured and not configurable, and it is the
+precondition for this.
+
+```json
+{
+  "vision_input": {
+    "screenshare": { "enabled": true, "record": false }
+  }
+}
+```
+
+<ParamField path="vision_input.screenshare.enabled" type="boolean" default="false">
+  Let the agent see the caller's screen while they share it.
+</ParamField>
+
+<ParamField path="vision_input.screenshare.record" type="boolean" default="false">
+  Keep what was shared as a second recording of the call.
+</ParamField>
+
+### What the agent sees
+
+On each of the caller's turns the agent is handed **the single newest frame, and
+only that one**, on a copy of the context that is thrown away after the turn. So the
+model sees exactly one image, forever: the context does not grow, there is nothing
+to prune, and an hour-long call costs the same per turn as its first minute. The
+frame is sent inside a 1280px box, which is the point below which source text in an
+editor stops transcribing reliably.
+
+Each frame is billed as image input on your own language model key, on every turn.
+
+When nobody is sharing, the agent is **told so**, rather than being handed nothing:
+
+```text
+The person is not sharing their screen, so you cannot see anything right now. If
+answering them needs the screen, ask them to click Share screen before you go on. If
+it does not, just answer.
+```
+
+Without that counter-signal a model that has been told it can see a screen invents
+one, specifically and plausibly, the moment somebody hits Stop sharing.
+
+Turning this on also appends a paragraph to the agent's prompt explaining that it
+can see the screen, that the view is live rather than a file it was sent, and that
+it should ask rather than guess when told nobody is sharing. That paragraph is added
+only when the runtime can actually deliver frames — the same stored `voice` config
+reached over a phone number is never told it can see anything.
+
+### Recording it
+
+`record` keeps what was shared as a **1 fps H.264 video** beside the call recording,
+so a call can be replayed with the screen in sync with the audio. It covers the whole
+call: the stretches where nobody was sharing are black, so the timeline lines up with
+the audio rather than jumping. It is stored and purged exactly like the call
+recording, under the same workspace retention policy.
+
+`GET /v1/calls/{session_id}/screen-recording` serves it, and the call detail carries
+a `screen_recording` block alongside `recording`. Its state is `none` on a call where
+screen recording was off and `not_shared` where it was on and nobody shared — only
+one of those is a setting anybody would want to change. See
+[recording](/telephony/recording).
+
+### The four rules
+
+**1. Web voice and video calls only.** A phone call has no screen to share. The same
+agent config over a phone number never offers it: no setting changes, and the
+agent is never told it can see. On a `text` agent the whole `vision_input` block is
+cleared when you save, because a text conversation has no room and no tracks.
+
+**2. Cascade only.** Turning it on with `realtime` set is refused when the agent is
+saved:
+
+```text
+a realtime agent cannot watch a screen share - a speech-to-speech model detects turns
+itself, so there is no moment to hand it the newest frame. Switch to the
+speech-to-text -> LLM -> text-to-speech cascade.
+```
+
+The catalog's `vision` flag does not cover this case: three of the five realtime
+entries can read an image, so a check on that flag alone would wave through exactly
+the models where the frame goes nowhere.
+
+**3. The model must read images — and so must its fallback.** Unlike the warning for
+attached photos, this is an **error** that blocks the save, because here you turned a
+feature on and an agent that cannot see should not publish with it. The message names
+the offending model, and there are two of them: one for the primary language model
+("cannot read images, so it cannot see a screen — pick a model that can, or turn
+screen share off") and one for the fallback ("a failover would leave the agent blind
+to the screen mid-call"). The fallback counts for the same reason it does above: a
+failover mid-interview would stop the agent seeing the screen it has been discussing.
+
+Since every `llm` catalog entry reads images today, in practice you meet rule 2
+before you meet this one. It is the check that catches a model added later without
+vision.
+
+**4. The caller's client has to publish a track.** The dashboard's test call and the
+TypeScript SDK's `useTalqingScreenShare` both do. Your own surface has to call
+`getDisplayMedia` from a click, because the browser requires a user gesture and
+nothing on our side can work around that. An agent can ask for a screen; it can never
+take one. **So the agent asking out loud is what starts the sharing** — write the
+prompt so it asks.
+
+### It turns preemptive generation off
+
+An agent with screen share enabled always runs with
+`turn_handling.preemptive_generation` off, and both its fields are cleared when you
+save. The newest frame mutates the context on every turn — the "nobody is sharing"
+note mutates it too — so every speculative reply would be generated, billed, and then
+discarded because the context it was drafted against no longer matches. This binds
+`voice` and `video` alike. See [turn handling](/agents/turn-handling).
+
+## The two `vision` words
+
+| | Where | What it means | Who sets it |
+| --- | --- | --- | --- |
+| `vision` | A catalog entry, from `GET /v1/catalog` | Whether this model can read an image at all | Talqing, from a probe |
+| `vision_input` | `config` on your agent | What this agent is pointed at during a call | You |
+
+The first is the precondition for the second, which is why publish refuses screen
+share on a model whose entry says `vision: false`.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Web call features" href="/channels/web-call-features">
+    Attaching photos and starting a screen share from your own page.
+  </Card>
+  <Card title="Models" href="/agents/models">
+    The catalog, and reading `vision` before you pick a model.
+  </Card>
+  <Card title="Recording" href="/telephony/recording">
+    Where the screen recording is stored, and for how long.
+  </Card>
+</CardGroup>

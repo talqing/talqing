@@ -1,0 +1,156 @@
+---
+title: "Tools"
+description: "How an operation's arguments map to its HTTP call, the five deferred schemas, and every operation the server exposes."
+---
+
+Every tool on the server is one API endpoint. Its name is the endpoint's operation name, its description is the endpoint's own documentation, and its arguments mirror the HTTP call: **path and query parameters at the top level, the request body under `body`**. Nothing is rewritten in between, so what your agent learns here is true of the API and of the [SDKs](/sdks/overview).
+
+## Arguments mirror the HTTP call
+
+Take `assign_phone_number`. The server describes it to your client as `POST /v1/telephony/phone-numbers/{number_id}/assign`, and its input schema has two properties: `number_id`, the path parameter, and `body`, which keeps the endpoint's own request shape.
+
+```json Arguments
+{
+  "number_id": "9c1f4b8e-7a52-4c0d-b3e6-1d2f8a4c6b90",
+  "body": {
+    "agent_id": "4b7e2a10-5c93-4e18-8f6a-0d3b9c1e5f27"
+  }
+}
+```
+
+That is exactly this call:
+
+```bash
+curl -X POST https://api.in.talqing.com/v1/telephony/phone-numbers/9c1f4b8e-7a52-4c0d-b3e6-1d2f8a4c6b90/assign \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "4b7e2a10-5c93-4e18-8f6a-0d3b9c1e5f27"}'
+```
+
+Keeping the body nested is what makes that mapping unambiguous: a path parameter can never collide with a body field of the same name. Query parameters follow the same rule — `list_calls` takes `agent_id`, `status`, `batch_id`, `start`, `end`, `limit` and `offset` at the top level, because that is where the URL carries them.
+
+Every tool's argument schema is closed at the top level — `additionalProperties: false` — so a client that validates arguments catches an invented path or query parameter before it is sent. What goes under `body` is validated by the API itself, which answers with one [error envelope](/api-reference/errors) naming each field that failed.
+
+## Names
+
+A tool name is the API's operation name, and the SDKs derive their method names from the same map:
+
+| Tool | HTTP | TypeScript / Python |
+| --- | --- | --- |
+| `list_agents` | `GET /v1/agents` | `agents.list` |
+| `publish_agent` | `POST /v1/agents/{agent_id}/publish` | `agents.publish` |
+| `run_task` | `POST /v1/tasks/{task_id}/runs` | `tasks.runs.create` |
+| `get_tool_version` | `GET /v1/tools/{tool_id}/versions/{version}` | `tools.versions.get` |
+
+So a session that starts in your terminal and ends in your application code uses one vocabulary throughout.
+
+## Deferred schemas
+
+Five request types are whole product surfaces: an agent's config, its all-optional override twin, a team of agents, a task's config, and a tool's operation tree. MCP gives no way for tools to share definitions — every tool's input schema has to stand alone — so a type that appears on six endpoints would be carried six times. Inlined, those five accounted for more of the tool surface than everything else on the server put together, and the result did not fit in a 200k-context client at all.
+
+They are deferred instead of duplicated. Wherever one appears as a property, the tool schema carries a placeholder and a pointer, and `describe_schema` serves the real document on demand. The `create_agent` schema, in full, is:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "body": {
+      "type": "object",
+      "properties": {
+        "config": {
+          "type": "object",
+          "description": "Full shape: describe_schema('AgentConfig')."
+        }
+      },
+      "required": ["config"]
+    }
+  },
+  "required": ["body"],
+  "additionalProperties": false
+}
+```
+
+The five:
+
+| Name | What it is |
+| --- | --- |
+| `AgentConfig` | A whole agent definition — what `create_agent` takes, and what an inline `agent` on a call is |
+| `AgentOverride` | The same tree with every field optional — what `update_agent` takes, and how to change one call without republishing |
+| `AgentTeam` | Several agents on one call, handing off to each other |
+| `TaskConfig` | An [agent task](/tasks/overview): its inputs, its output fields and its model stack |
+| `ToolOperations` | The [operation tree](/tools/operation-tree) a custom tool runs |
+
+<Warning>
+**An argument whose description ends in `describe_schema('X')` carries a placeholder, not a shape.** It has to be fetched before anything is written into it, never reconstructed from memory. A config assembled from a model's recollection of what an agent looks like is refused field by field on the first write, and that is the good case — the bad one is a field that validates and means something else.
+</Warning>
+
+These documents compose, so one you fetch may itself defer to another: `AgentTeam` is small because the two documents it is built from defer out of it exactly as they do out of a tool, and `AgentConfig` defers its inline tool's `operations` to `ToolOperations`. Fetch what you need, in the order you need it.
+
+The same documents are served over HTTP at `GET /v1/schemas/{name}`; see [schemas](/api-reference/schemas).
+
+## Read-only and destructive
+
+Every tool is annotated so a client can tell a read from a write before it runs one:
+
+| Annotation | Set on | Count |
+| --- | --- | --- |
+| `readOnlyHint` | Every `GET` | 65 of 158 |
+| `destructiveHint` | Every `DELETE` | 12 of 158 |
+| `idempotentHint` | `GET`, `PUT` and `DELETE` | 78 of 158 |
+| `openWorldHint` | Nothing — the server reaches one API and no other host | 0 of 158 |
+
+A client that renders approval prompts uses these to decide what to wave through. `readOnlyHint` is derived from the HTTP method, not from what the operation feels like, so read it as "this cannot change anything", not as "this is free": `get_call` is read-only and returns a transcript, while `run_tool` is a `POST` that calls your endpoints for real. [Permissions](/mcp/permissions) has the list worth approving by hand.
+
+## Everything available
+
+158 operations, by area.
+
+| Area | Count | Operations |
+| --- | --- | --- |
+| Agents | 9 | `list_agents`, `create_agent`, `get_agent`, `update_agent`, `delete_agent`, `validate_agent`, `publish_agent`, `get_agent_version`, `rollback_agent_version` |
+| Tools | 10 | `list_tools`, `create_tool`, `get_tool`, `patch_tool`, `delete_tool`, `validate_tool`, `run_tool`, `publish_tool`, `get_tool_version`, `rollback_tool_version` |
+| Agent tasks | 12 | `list_tasks`, `create_task`, `get_task`, `update_task`, `delete_task`, `run_task`, `list_task_runs`, `get_task_run`, `validate_task`, `publish_task`, `get_task_version`, `rollback_task_version` |
+| FAQs | 8 | `list_faqs`, `create_faq`, `get_faq`, `update_faq`, `delete_faq`, `create_faq_entries`, `update_faq_entry`, `delete_faq_entry` |
+| Integrations and triggers | 11 | `list_integrations`, `integration_catalog`, `create_integration`, `get_integration`, `patch_integration`, `delete_integration`, `list_integration_mcp_tools`, `list_integration_triggers`, `create_integration_trigger`, `patch_integration_trigger`, `delete_integration_trigger` |
+| Carrier accounts | 8 | `list_telephony_providers`, `list_telephony_accounts`, `create_telephony_account`, `get_telephony_account`, `patch_telephony_account`, `delete_telephony_account`, `provision_telephony_account`, `list_remote_numbers` |
+| Phone numbers | 7 | `list_phone_numbers`, `import_phone_numbers`, `get_phone_number`, `patch_phone_number`, `provision_phone_number`, `assign_phone_number`, `unassign_phone_number` |
+| Media streams | 5 | `list_stream_connections`, `create_stream_connection`, `get_stream_connection`, `patch_stream_connection`, `delete_stream_connection` |
+| Outbound calls and batches | 10 | `create_outbound_call`, `create_call_batch`, `list_call_batches`, `get_call_batch`, `patch_call_batch`, `list_call_batch_recipients`, `add_call_batch_recipients`, `pause_call_batch`, `resume_call_batch`, `cancel_call_batch` |
+| Email batches | 21 | `list_email_senders`, `create_email_batch`, `list_email_batches`, `get_email_batch`, `patch_email_batch`, `pause_email_batch`, `resume_email_batch`, `cancel_email_batch`, `list_email_batch_recipients`, `patch_email_batch_recipient`, `skip_email_batch_recipients`, `restore_email_batch_recipients`, `redraft_email_batch_recipients`, `create_email_send`, `list_email_sends`, `get_email_send`, `patch_email_send`, `pause_email_send`, `resume_email_send`, `cancel_email_send`, `add_email_batch_recipients` |
+| WhatsApp batches | 12 | `list_whatsapp_templates`, `create_whatsapp_batch`, `list_whatsapp_batches`, `get_whatsapp_batch`, `patch_whatsapp_batch`, `pause_whatsapp_batch`, `cancel_whatsapp_batch`, `list_whatsapp_batch_recipients`, `add_whatsapp_batch_recipients`, `patch_whatsapp_batch_recipient`, `skip_whatsapp_batch_recipients`, `restore_whatsapp_batch_recipients` |
+| Web calls and chats | 10 | `calls_token`, `create_chat`, `list_chats`, `get_chat`, `list_chat_items`, `create_chat_message`, `end_chat`, `get_chat_detail`, `rerun_chat_analysis`, `preview_chat_analysis` |
+| Calls and conversations | 11 | `list_calls`, `call_stats`, `get_call`, `preview_call_analysis`, `backfill_call_analysis`, `list_conversations`, `get_conversation`, `list_conversation_items`, `list_conversation_sessions`, `get_conversation_snapshot`, `patch_conversation` |
+| Observability | 1 | `get_observability` |
+| Secrets | 3 | `list_secrets`, `create_secret`, `delete_secret` |
+| Webhooks | 8 | `event_types`, `list_webhooks`, `create_webhook`, `patch_webhook`, `delete_webhook`, `rotate_webhook_secret`, `test_webhook`, `webhook_deliveries` |
+| Catalog and voices | 7 | `get_catalog`, `catalog_avatars`, `catalog_voices`, `add_elevenlabs_voice`, `elevenlabs_voice_settings`, `search_models`, `list_model_hosts` |
+| Provider keys | 3 | `list_provider_keys`, `set_provider_key`, `delete_provider_key` |
+| Schemas | 2 | `describe_schema`, `describe_function` |
+
+## What is not a tool, and what to use instead
+
+Server-sent event streams are not tool-shaped: a tool call returns once, and a stream stays open for minutes. Each one has a polling equivalent, so nothing on the API is unreachable from here.
+
+| Stream | Use instead |
+| --- | --- |
+| `GET /v1/conversations/{conversation_id}/events` — a conversation as it happens | `list_conversation_items` with `order=desc` for the newest page |
+| `POST /v1/chats/{id}/messages` with `stream: true` — a reply as it is generated | `create_chat_message`, which waits for the turn and returns it whole. Expect several items when the agent calls tools |
+
+Three more things are absent for their own reasons:
+
+- **The CoPilots' chat endpoints.** The agent, tool and task CoPilots each have a stream of their own. They are not exposed, because an AI builder must not drive another AI builder — your client is the builder here.
+- **A call's recording file.** `GET /v1/calls/{session_id}/recording` is a redirect to an audio blob, which a tool call cannot hand to a model. `get_call` reports `recording.state`, which is the part an agent can reason about; play or download the file from the dashboard. See [recordings](/observability/recordings).
+- **Inbound provider and carrier webhooks.** Those are callbacks into Talqing, not operations you call.
+
+Four further areas are out of reach on purpose rather than for shape — [permissions](/mcp/permissions) covers those, with the reasoning for each.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Permissions" href="/mcp/permissions">
+    Roles, what the server cannot do, and what to approve by hand.
+  </Card>
+  <Card title="Recipes" href="/mcp/recipes">
+    Prompts that use these operations end to end.
+  </Card>
+</CardGroup>

@@ -1,0 +1,468 @@
+---
+title: "Call analysis"
+description: "One model call reads the finished transcript and writes a summary, an outcome and the fields you asked for onto the call."
+---
+
+Post-call analysis reads a call's finished transcript — speech, tool calls and
+tool results — and writes back three things: a short summary, a verdict on
+whether the call achieved its purpose, and any named values you asked it to
+extract. It is configured on the agent, under `config.analysis`, and it is on
+by default.
+
+It is what makes a list of calls answerable. Without it you have durations and
+close reasons; with it you have "47 calls, 31 booked, and here are the six
+where the caller asked for a refund".
+
+## What it costs and where it runs
+
+<Note>
+**On text, analysis runs when the [chat](/channels/text-conversations) ends** —
+the agent's `end_call`, or `POST /v1/chats/{id}/end` — and is on by default,
+exactly as on a call. A chat has no inactivity timeout, so one nobody ends is
+never analysed. Wherever this page says *call*, a chat behaves the same; read
+its result on `GET /v1/chats/{id}`.
+</Note>
+
+| Fact | Value |
+| --- | --- |
+| Model | **The agent's own LLM**, unless `analysis.model` names another. A realtime agent has no chat model, so it falls back to the first catalog LLM from the same provider. |
+| Provider key | None beyond what the agent already needed. That is the point of inheriting the agent's model — analysis being on by default must never make an OpenAI-only workspace bring an xAI key. |
+| When | In-process during call finalize, between sealing the call and pricing it. |
+| Billing | The analysis tokens land in the same billing pass as the call, on your own provider key. Budget roughly **5%** on top of a call's cost. There is no separate later charge. |
+| Timeout | 30 seconds, hard. A run that exceeds it is `failed` and the call is unaffected. |
+| Requests | One. The summary, the outcome and every field come back in a single JSON reply, because the transcript is nearly all of the input and asking per field would resend it once each. |
+
+Nothing analysis does can break a call. It runs after the caller has hung up
+and it never raises into the finalize path.
+
+## The configuration
+
+```json
+{
+  "analysis": {
+    "enabled": true,
+    "summary": true,
+    "outcome": {
+      "prompt": "The caller's appointment was booked and they were told the date and time."
+    },
+    "fields": [
+      {
+        "name": "appointment_date",
+        "type": "string",
+        "description": "The date booked, as YYYY-MM-DD. Null if no appointment was made."
+      },
+      {
+        "name": "callback_requested",
+        "type": "boolean",
+        "description": "True only if the caller explicitly asked to be called back."
+      },
+      {
+        "name": "party_size",
+        "type": "integer",
+        "description": "How many people the booking is for. Null if never stated."
+      }
+    ]
+  }
+}
+```
+
+<ParamField path="enabled" type="boolean" default="true">
+  Analyse calls after they end.
+</ParamField>
+
+<ParamField path="summary" type="boolean" default="true">
+  Write two or three sentences saying why the person called, what the agent did
+  and how it ended. This is the `summary` shown on the calls list.
+</ParamField>
+
+<ParamField path="outcome" type="object">
+  Judge each call. Takes one field, `prompt` (required, non-empty): what a
+  successful call looks like for **this** agent. Leave `outcome` unset and calls
+  are not judged at all — there is deliberately no inferred default, because a
+  success rate whose definition you never wrote is a number you cannot act on.
+</ParamField>
+
+<ParamField path="fields" type="array">
+  Values to pull out of the transcript. Flat, and at most **25**.
+</ParamField>
+
+<ParamField path="model" type="object">
+  An LLM to run the analysis on instead of the agent's own — the same
+  `{ provider, model, reasoning_effort }` shape the agent's `llm` slot takes.
+  Naming one means the workspace must hold that provider's key. The priority
+  lane is refused here: analysis runs after the caller has hung up, so it would
+  cost more and save nobody any waiting.
+</ParamField>
+
+### One extracted field
+
+| Key | Rules |
+| --- | --- |
+| `name` | Required. Must match `^[a-z][a-z0-9_]{0,39}$` — lower-case letters, digits and underscores, starting with a letter, up to 40 characters. It is the key in the API response and in the `session.completed` webhook. |
+| `type` | `string`, `boolean`, `integer` or `number`. Defaults to `string`. There are no objects and no arrays: fields are flat scalars. |
+| `description` | Required, non-empty. **This is the only instruction the model gets about this field.** Say what the value is, what format you want it in, and what to do when the call never mentions it. |
+
+`summary`, `outcome` and `outcome_rationale` are **reserved names**. They are
+built-in outputs, so a field of the same name would be unreachable; using one is
+a save-time error. So is defining the same name twice.
+
+Every field is nullable. A call that never mentions the value comes back `null`,
+by design — a required scalar pushes a model into inventing one, which is the
+failure that matters here. A value the model answers in a shape the field
+cannot hold also comes back `null` rather than costing you the rest of the
+reply.
+
+### Setting it
+
+Send the `analysis` block alone; the rest of the agent is kept, and `fields` is a
+list, so it is sent whole. Then publish — analysis runs from the published
+version. See [updating an agent](/agents/overview#updating-an-agent).
+
+<CodeGroup>
+```bash cURL
+curl -X PATCH https://api.in.talqing.com/v1/agents/8f2b41c7-6d90-4a3e-b512-0c7a9e34d118 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "analysis": {
+        "enabled": true,
+        "summary": true,
+        "outcome": { "prompt": "An appointment was booked and confirmed aloud." },
+        "fields": [
+          {
+            "name": "appointment_date",
+            "type": "string",
+            "description": "The date booked, as YYYY-MM-DD. Null if no appointment was made."
+          }
+        ]
+      }
+    }
+  }'
+```
+
+```typescript TypeScript
+const agent_id = "8f2b41c7-6d90-4a3e-b512-0c7a9e34d118";
+
+await talqing.agents.update({
+  agent_id,
+  updateAgentRequest: {
+    config: {
+      analysis: {
+        enabled: true,
+        summary: true,
+        outcome: { prompt: "An appointment was booked and confirmed aloud." },
+        fields: [
+          {
+            name: "appointment_date",
+            type: "string",
+            description:
+              "The date booked, as YYYY-MM-DD. Null if no appointment was made.",
+          },
+        ],
+      },
+    },
+  },
+});
+
+await talqing.agents.publish({ agent_id });
+```
+
+```python Python
+agent_id = "8f2b41c7-6d90-4a3e-b512-0c7a9e34d118"
+
+talqing.agents.update(
+    agent_id,
+    config={
+        "analysis": {
+            "enabled": True,
+            "summary": True,
+            "outcome": {"prompt": "An appointment was booked and confirmed aloud."},
+            "fields": [
+                {
+                    "name": "appointment_date",
+                    "type": "string",
+                    "description": "The date booked, as YYYY-MM-DD. Null if no appointment was made.",
+                }
+            ],
+        },
+    },
+)
+
+talqing.agents.publish(agent_id)
+```
+</CodeGroup>
+
+## The outcome is three-valued
+
+`success`, `failure` or `unknown` — and `unknown` is not a bug. A judge that
+cannot say "I don't know" invents a verdict for a wrong number, a hangup on the
+greeting and a call that ended before anything was settled. The model is told
+explicitly that a call which ended too early to tell is `unknown`, not a
+failure.
+
+Read your success rate over the calls that were actually judged, not over every
+call. That is why `GET /v1/calls/stats` reports `judged_calls` beside
+`successful_calls`, and why the observability summary rates `success_rate` over
+`judged_sessions`. See [observability](/observability/overview).
+
+`outcome_rationale` comes back with it: one or two sentences citing what in the
+transcript decided the verdict. It is the field that tells you whether your
+`outcome.prompt` says what you meant.
+
+## Reading the result
+
+`session.analysis` on `GET /v1/calls/{session_id}`, and the identical `analysis`
+object inside a `session.completed` webhook.
+
+<ResponseField name="status" type="string">
+  `none`, `pending`, `completed`, `failed` or `skipped`.
+</ResponseField>
+
+<ResponseField name="skip_reason" type="string | null">
+  Set only when `status` is `skipped`.
+</ResponseField>
+
+<ResponseField name="summary" type="string | null">
+  The prose summary, when `summary` was on.
+</ResponseField>
+
+<ResponseField name="outcome" type="string | null">
+  `success`, `failure` or `unknown`. Null when no `outcome` was configured.
+</ResponseField>
+
+<ResponseField name="outcome_rationale" type="string | null">
+  Why that verdict.
+</ResponseField>
+
+<ResponseField name="fields" type="object">
+  Your extracted values, keyed by field name. Always present; `{}` when no
+  fields were configured. A value the call never established is `null`.
+</ResponseField>
+
+### Every status
+
+| `status` | What happened | What to do |
+| --- | --- | --- |
+| `none` | Analysis is off for this agent (`enabled: false`), so nothing ran and nothing was charged. | Turn it on in the agent's config and publish. |
+| `pending` | Claimed but not finished. On a live call this is normal — analysis runs at the end. On a call that ended a while ago it means the process running it died mid-analysis. | Wait if the call is live. Otherwise re-run it with `backfill_call_analysis`. |
+| `completed` | It ran and wrote its result. | — |
+| `failed` | The model could not be reached, timed out at 30s, or answered with something that was not JSON. The call itself was unaffected. | Re-run it with `backfill_call_analysis`. If it keeps failing, check the provider key for the model analysis resolved to. |
+| `skipped` | A gate refused it before spending anything. `skip_reason` says which. | Read the table below. |
+
+### Every skip reason
+
+A skip is not a failure, and nothing was charged for one.
+
+| `skip_reason` | Why | What to do |
+| --- | --- | --- |
+| `produces_nothing` | Analysis is on but every output is off — no summary, no outcome, no fields. There is nothing for a model call to return. | Turn on the summary, define a success, or add a field. Publishing an agent in this state is refused, so this only appears on calls that ran under an older definition. |
+| `call_failed` | The call ended on a failure reason, so there is no conversation to judge. See [close reasons](/observability/close-reasons). | Nothing. Fix the failure, not the analysis. |
+| `too_short` | Fewer than **two** caller turns. This covers wrong numbers, hangups on the greeting and voicemail beeps — every case where a model would have to invent a verdict from small talk. | Nothing. It is the intended behaviour, and it is why your success rate is not dragged down by calls nobody had. |
+
+A turn counts if the caller said something or sent an image. A call made
+entirely of photos is a call where the caller communicated plenty, and it is
+analysed.
+
+## Trying a definition before you save it
+
+`POST /v1/calls/{session_id}/analysis/preview` runs an analysis definition
+against one past call and returns what it found. **It writes nothing** — not the
+summary, not the outcome, not the fields — which makes it the way to tune an
+extraction prompt without shipping it blind and waiting a day.
+
+It is still a real model call, so it costs one. That is the trade: a few cents
+to find out that `party_size` comes back as `"four"` instead of `4`.
+
+<Warning>
+A preview of a definition with `enabled: false` still runs. The endpoint is
+answering "what *would* this produce", so the toggle's order does not matter.
+</Warning>
+
+Pass `agent_id` to judge against a different agent's prompt. Omit it and the
+call is judged against the definition it actually ran, which is what you want
+when tuning a spec for an agent that already exists. The response carries
+`provider` and `model` so you can see which model produced the result before
+committing to the spec.
+
+<CodeGroup>
+```bash cURL
+curl -X POST \
+  https://api.in.talqing.com/v1/calls/9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1/analysis/preview \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "analysis": {
+      "enabled": true,
+      "summary": true,
+      "outcome": { "prompt": "An appointment was booked and confirmed aloud." },
+      "fields": [
+        {
+          "name": "party_size",
+          "type": "integer",
+          "description": "How many people the booking is for. Null if never stated."
+        }
+      ]
+    }
+  }'
+```
+
+```typescript TypeScript
+const preview = await talqing.calls.analysis.preview({
+  session_id: "9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1",
+  previewAnalysisRequest: {
+    analysis: {
+      enabled: true,
+      summary: true,
+      outcome: { prompt: "An appointment was booked and confirmed aloud." },
+      fields: [
+        {
+          name: "party_size",
+          type: "integer",
+          description: "How many people the booking is for. Null if never stated.",
+        },
+      ],
+    },
+  },
+});
+
+console.log(preview.model, preview.analysis.outcome, preview.analysis.fields);
+```
+
+```python Python
+preview = talqing.calls.analysis.preview(
+    "9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1",
+    analysis={
+        "enabled": True,
+        "summary": True,
+        "outcome": {"prompt": "An appointment was booked and confirmed aloud."},
+        "fields": [
+            {
+                "name": "party_size",
+                "type": "integer",
+                "description": "How many people the booking is for. Null if never stated.",
+            }
+        ],
+    },
+)
+
+print(preview["model"], preview["analysis"]["outcome"], preview["analysis"]["fields"])
+```
+</CodeGroup>
+
+## Re-analysing calls that already happened
+
+`POST /v1/calls/analysis/backfill` applies each call's **saved** agent
+definition to calls that ran under an older one, or were never analysed. It is
+also the only retry path for a `failed` or a stuck `pending` analysis.
+
+| Rule | Detail |
+| --- | --- |
+| Cap | **100 calls** per request. Each one is a model call you pay for, so an unbounded request is an unbounded bill. |
+| Order | Sequential, one at a time. A backfill has nobody waiting on it, and spending your provider's rate limit quickly is a cost rather than a feature. |
+| Refusals | A call still running is a `409` — analysis needs a complete transcript. A call that is not voice or video, or does not exist, is a `404`. |
+| Result | `{ "analysed": n, "skipped": n, "failed": n }`. |
+
+<Warning>
+**Running analysis twice on one call is charged twice.** A re-analysis inserts a
+new usage row rather than replacing the old one — both model calls really
+happened and both spent your provider's tokens — and then re-prices the call, so
+the call's `provider_cost` grows by the second analysis.
+
+The platform fee does not move: a session is debited from your credit balance
+exactly once, ever, and re-pricing cannot change a fee that is a function of
+duration and channel alone. What grows is your own provider bill. Preview first.
+</Warning>
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/calls/analysis/backfill \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"call_ids": ["9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1"]}'
+```
+
+```typescript TypeScript
+const result = await talqing.calls.analysis.backfill({
+  backfillAnalysisRequest: {
+    call_ids: ["9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1"],
+  },
+});
+
+console.log(result.analysed, result.skipped, result.failed);
+```
+
+```python Python
+result = talqing.calls.analysis.backfill(
+    call_ids=["9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1"]
+)
+
+print(result["analysed"], result["skipped"], result["failed"])
+```
+</CodeGroup>
+
+## Analysis is not userdata
+
+Extracted fields are **never** merged into a call's `userdata`, and this is
+deliberate.
+
+| | What it is | Who wrote it |
+| --- | --- | --- |
+| `session.userdata` | What the agent **knew** | Its tools, during the call — a lookup that returned an account id, a booking a calendar confirmed |
+| `session.analysis.fields` | What a reader **inferred** | One model, afterwards, from the transcript alone |
+
+Merging them would let a guess overwrite a tool-confirmed value, with nothing
+downstream able to tell which was which. Read them separately: `userdata` for
+facts the agent acted on, `analysis.fields` for facts you want to report on.
+See [userdata](/agents/userdata).
+
+## Where analysis feeds back into calls
+
+An agent with `conversation.context: "summary"` opens each new call with
+summaries of that person's recent conversations. Those summaries are the ones
+post-call analysis writes — nothing else produces them.
+
+So publishing an agent that asks for `"summary"` while analysis or its summary
+is off is refused:
+
+```
+'include summaries of past conversations' needs call analysis to be writing
+summaries - turn on analysis and its summary, or choose a different conversation
+context
+```
+
+Turn both on, or pick a different context. See
+[conversation memory](/agents/conversation-memory).
+
+## Other refusals at publish
+
+| Error | Cause |
+| --- | --- |
+| `call analysis is on but nothing is switched on to produce - turn on the summary, define what a successful call is, or add a field to extract` | `enabled: true` with no summary, no outcome and no fields. |
+| `call analysis has no model to run on - this agent has no language model to inherit one from, so pick one for analysis or turn analysis off` | Nothing to inherit and no `analysis.model` named. |
+| `the call analysis model cannot use the priority lane - analysis runs after the call has ended, so it would cost more and save nobody any wait` | `priority: true` on `analysis.model`. |
+| `unknown analysis model '<provider>/<model>'` | `analysis.model` names something not in the catalog. |
+
+See [validation](/agents/validation).
+
+## In the dashboard
+
+The call detail page has a **Call analysis** panel: the outcome as a badge, the
+summary, why that verdict, and the extracted fields as a table. When there is
+nothing to show it says which of the reasons above applies rather than rendering
+an empty box.
+
+The reload control in its corner opens a dialog with both operations — **Re-run**
+uses the agent's saved definition and writes the result, and **Try current
+draft** previews the draft you are still editing and writes nothing. Both are
+hidden on a call that is still running and on one whose content has been erased,
+because neither has a finished transcript to read.
+
+<CardGroup cols={2}>
+  <Card title="Calls" href="/observability/calls">
+    The record analysis is written onto, transcript and all.
+  </Card>
+  <Card title="Webhooks" href="/observability/webhooks">
+    Push the summary, outcome and fields to your own systems.
+  </Card>
+</CardGroup>

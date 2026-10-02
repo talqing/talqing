@@ -1,0 +1,667 @@
+---
+title: "Appointment booking"
+description: "A voice agent that reads a real Google Calendar, offers times a caller can actually use, books, and confirms."
+---
+
+You will build a voice agent that answers, works out what the caller wants and when, reads a real Google Calendar for free time, offers a small number of concrete slots, writes the appointment into the calendar and reads it back. It hands the caller to a person when booking is not what they need, and it says something true when the calendar does not answer.
+
+The example is Northside Dental, a two-chair practice on `Asia/Kolkata`. Substitute your own account, calendar address and numbers.
+
+## What you need
+
+| | Why |
+| --- | --- |
+| A Google account that **owns** the calendar being booked | The connected account's scope covers writing to owned calendars only. A calendar merely shared with it can be read and not written |
+| Dashboard access | Google Calendar connects over OAuth, and OAuth providers can only be connected from the dashboard |
+| Provider keys for OpenAI and Deepgram | Or whichever models you pick. See [provider keys](/get-started/provider-keys) |
+| A phone number for the practice, to transfer to | Frozen into the published transfer tool |
+| A carrier number, if it should answer the phone | See [phone numbers](/telephony/phone-numbers). A web test call is enough to build against |
+| `TALQING_API_KEY` exported | A [personal access token](/get-started/authentication) |
+
+<Steps>
+
+<Step title="Connect Google Calendar">
+
+Google Calendar is a **native** integration: nine tools implemented against the Calendar REST API directly, with no vendor-hosted server in between. From the builder's side they behave exactly like any other [MCP integration](/integrations/mcp-servers) — same attachment, same approval, same namespacing.
+
+In the dashboard, go to **Integrations** → **Add integration** → **Google Calendar**, and sign in as the account that owns the calendar. Google asks for seven things: your identity, the list of calendars you have, read access to events, free/busy access, and the ability to create and change events **on calendars this account owns**.
+
+<Warning>
+That last word is the constraint that decides your whole setup. A write to a calendar the connected account can merely see comes back as a `403` or a `404`, and the error tells the model to check `accessRole` with `list_calendars`. If the practice diary lives on a shared calendar, connect the account that owns it — there is no scope that fixes this afterwards.
+</Warning>
+
+OAuth cannot be started from the API. Once you are back on the Integrations page, read the id and confirm what it offers:
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/integrations \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+| jq '.items[] | select(.provider == "google_calendar") | {id, display_name, status, tools_namespace, allowed_tools}'
+
+INTEGRATION=6a2c98f1-4b73-4e05-9d18-0c7f3a5b2e94
+
+curl -sS "https://api.in.talqing.com/v1/integrations/$INTEGRATION/mcp-tools" \
+  -H "Authorization: Bearer $TALQING_API_KEY" | jq '.tools[] | {name, exposed_name}'
+```
+
+```typescript TypeScript
+const page = await talqing.integrations.list();
+const calendar = page.items.find((i) => i.provider === "google_calendar")!;
+console.log(calendar.id, calendar.status, calendar.tools_namespace, calendar.allowed_tools);
+
+const { tools } = await talqing.integrations.mcpTools.list({
+  integration_id: calendar.id,
+});
+tools.forEach((tool) => console.log(tool.exposed_name, "<-", tool.name));
+```
+
+```python Python
+page = talqing.integrations.list()
+calendar = next(i for i in page["items"] if i["provider"] == "google_calendar")
+print(calendar["id"], calendar["status"], calendar["tools_namespace"])
+
+result = talqing.integrations.mcp_tools.list(calendar["id"])
+for tool in result["tools"]:
+    print(tool["exposed_name"], "<-", tool["name"])
+```
+</CodeGroup>
+
+Nine tools come back: `list_calendars`, `list_events`, `search_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `respond_to_event` and `suggest_time`. A fresh connection approves all nine.
+
+</Step>
+
+<Step title="Approve only the tools this agent needs">
+
+A booking agent that always books on the connected account's own primary calendar needs exactly two: **`suggest_time`** to find free periods and **`create_event`** to write the appointment. Approve those two and nothing else.
+
+Narrowing is not tidiness. **Every approved tool is described to the model on every turn** — its name, its purpose and every argument's description — so nine calendar tools is nine schemas in the input tokens of every reply, on your own provider key, and nine similar-sounding options for a model that has one job. On a voice call that shows up as both a slower first token and a model that reaches for `search_events` when it meant `suggest_time`.
+
+While you are there, shorten the namespace. The default is the provider key, which makes the model read `google_calendar_suggest_time`; `calendar` is shorter and just as clear.
+
+<CodeGroup>
+```bash cURL
+curl -sS -X PATCH "https://api.in.talqing.com/v1/integrations/$INTEGRATION" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "allowed_tools": ["suggest_time", "create_event"],
+    "tools_namespace": "calendar"
+  }'
+```
+
+```typescript TypeScript
+await talqing.integrations.update({
+  integration_id: calendar.id,
+  patchIntegrationRequest: {
+    allowed_tools: ["suggest_time", "create_event"],
+    tools_namespace: "calendar",
+  },
+});
+```
+
+```python Python
+talqing.integrations.update(
+    calendar["id"],
+    allowed_tools=["suggest_time", "create_event"],
+    tools_namespace="calendar",
+)
+```
+</CodeGroup>
+
+Three rules about that call, all of which bite in practice:
+
+- **Approval matches the tool's own name.** Filtering happens before the namespace is applied, so you approve `create_event`, never `calendar_create_event`. That is also why changing the namespace later never invalidates an approval.
+- **The prompt must use the exposed name.** After this patch the model sees `calendar_suggest_time` and `calendar_create_event`, and a prompt that says `create_event` describes a tool the model cannot find.
+- **The list replaces wholesale and is live.** It is a set, not an accumulation, and narrowing it reaches every already-published agent on its next turn — there is nothing to republish. The approval belongs to the integration, so it is shared by every agent attached to it.
+
+If you book onto a secondary calendar the account owns, approve `list_calendars` as well and have the prompt resolve the name once; or read the calendar's id out of Google Calendar's own **Settings → Integrate calendar** panel and put it in the prompt, which costs nothing per turn.
+
+</Step>
+
+<Step title="Build the two tools of your own">
+
+Two things the calendar cannot do for you: remember what was booked, and reach a person.
+
+**Recording the booking.** A calendar tool writes to Google and returns its answer to the model; nothing about it lands in the session's state. A small tool of your own does, and it costs one turn of nothing:
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/tools \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "record_booking",
+    "description": "Save the appointment you have just booked. Call it immediately after calendar_create_event has come back successfully, and never before or instead. Do not call it if the booking failed or if the patient has not confirmed a time.",
+    "json_schema": {
+      "type": "object",
+      "properties": {
+        "starts_at": {
+          "type": "string",
+          "description": "The start of the appointment, as a full ISO 8601 timestamp in the practice timezone, for example 2026-09-14T15:30:00+05:30. Copy it from the arguments you sent to calendar_create_event."
+        },
+        "service": {
+          "type": "string",
+          "description": "What the appointment is for, in a few words and in the patient words, for example \"cleaning\" or \"broken filling\"."
+        },
+        "patient_name": {
+          "type": "string",
+          "description": "The full name the patient gave for the appointment, spelled as they said it."
+        },
+        "event_id": {
+          "type": "string",
+          "description": "The id of the event calendar_create_event created. Copy it exactly from that tool result."
+        }
+      },
+      "required": ["starts_at", "service", "patient_name", "event_id"]
+    },
+    "operations": [
+      { "kind": "set_variable", "config": { "key": "booking_starts_at", "value": "{{args.starts_at}}", "store": "userdata" } },
+      { "kind": "set_variable", "config": { "key": "booking_service", "value": "{{args.service}}", "store": "userdata" } },
+      { "kind": "set_variable", "config": { "key": "booking_patient_name", "value": "{{args.patient_name}}", "store": "userdata" } },
+      { "kind": "set_variable", "config": { "key": "booking_event_id", "value": "{{args.event_id}}", "store": "userdata" } }
+    ]
+  }'
+```
+
+```typescript TypeScript
+const record = await talqing.tools.create({
+  createToolRequest: {
+    name: "record_booking",
+    description:
+      "Save the appointment you have just booked. Call it immediately after calendar_create_event has come back successfully, and never before or instead. Do not call it if the booking failed or if the patient has not confirmed a time.",
+    json_schema: {
+      type: "object",
+      properties: {
+        starts_at: {
+          type: "string",
+          description:
+            "The start of the appointment, as a full ISO 8601 timestamp in the practice timezone, for example 2026-09-14T15:30:00+05:30. Copy it from the arguments you sent to calendar_create_event.",
+        },
+        service: {
+          type: "string",
+          description:
+            'What the appointment is for, in a few words and in the patient words, for example "cleaning" or "broken filling".',
+        },
+        patient_name: {
+          type: "string",
+          description: "The full name the patient gave for the appointment, spelled as they said it.",
+        },
+        event_id: {
+          type: "string",
+          description:
+            "The id of the event calendar_create_event created. Copy it exactly from that tool result.",
+        },
+      },
+      required: ["starts_at", "service", "patient_name", "event_id"],
+    },
+    operations: [
+      { kind: "set_variable", config: { key: "booking_starts_at", value: "{{args.starts_at}}", store: "userdata" } },
+      { kind: "set_variable", config: { key: "booking_service", value: "{{args.service}}", store: "userdata" } },
+      { kind: "set_variable", config: { key: "booking_patient_name", value: "{{args.patient_name}}", store: "userdata" } },
+      { kind: "set_variable", config: { key: "booking_event_id", value: "{{args.event_id}}", store: "userdata" } },
+    ],
+  },
+});
+
+await talqing.tools.publish({
+  tool_id: record.id,
+  publishToolRequest: { changelog: "Record the booking into userdata" },
+});
+```
+
+```python Python
+record = talqing.tools.create(
+    name="record_booking",
+    description=(
+        "Save the appointment you have just booked. Call it immediately after "
+        "calendar_create_event has come back successfully, and never before or instead. "
+        "Do not call it if the booking failed or if the patient has not confirmed a time."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "starts_at": {
+                "type": "string",
+                "description": (
+                    "The start of the appointment, as a full ISO 8601 timestamp in the "
+                    "practice timezone, for example 2026-09-14T15:30:00+05:30. Copy it "
+                    "from the arguments you sent to calendar_create_event."
+                ),
+            },
+            "service": {
+                "type": "string",
+                "description": (
+                    'What the appointment is for, in a few words and in the patient '
+                    'words, for example "cleaning" or "broken filling".'
+                ),
+            },
+            "patient_name": {
+                "type": "string",
+                "description": "The full name the patient gave for the appointment, spelled as they said it.",
+            },
+            "event_id": {
+                "type": "string",
+                "description": (
+                    "The id of the event calendar_create_event created. Copy it exactly "
+                    "from that tool result."
+                ),
+            },
+        },
+        "required": ["starts_at", "service", "patient_name", "event_id"],
+    },
+    operations=[
+        {"kind": "set_variable", "config": {"key": "booking_starts_at", "value": "{{args.starts_at}}", "store": "userdata"}},
+        {"kind": "set_variable", "config": {"key": "booking_service", "value": "{{args.service}}", "store": "userdata"}},
+        {"kind": "set_variable", "config": {"key": "booking_patient_name", "value": "{{args.patient_name}}", "store": "userdata"}},
+        {"kind": "set_variable", "config": {"key": "booking_event_id", "value": "{{args.event_id}}", "store": "userdata"}},
+    ],
+)
+
+talqing.tools.publish(record["id"], changelog="Record the booking into userdata")
+```
+</CodeGroup>
+
+No operation in that tree can return a response, so the tool is **silent by derivation**: it saves the four values and the agent says nothing extra on top. What it buys you is threefold. The rest of the call can read `{{userdata.booking_starts_at}}` without asking again. The values are on the call record afterwards, under `session.userdata`. And the tool call itself — its name and every argument — lands in the transcript, which is what [post-call analysis](/observability/call-analysis) reads, so the extraction below has something unambiguous to work from rather than inferring a date out of "half past ten on Thursday".
+
+**Reaching a person.** One tool per destination, argument-free, with the escalation policy in its `description`:
+
+```json
+{
+  "name": "transfer_to_reception",
+  "description": "Put the caller through to a person at the practice. Use it when the caller asks for a person, wants to cancel or move an appointment they already have, is in pain and needs to be seen today, is asking about a bill or a treatment plan, or when a calendar tool has failed and you cannot book. Do not use it because a first choice of time was unavailable - offer another time first.",
+  "json_schema": {},
+  "disable_interruptions": true,
+  "operations": [
+    {
+      "kind": "say",
+      "config": { "text": "Let me put you through to the practice now, one moment." }
+    },
+    {
+      "kind": "transfer",
+      "config": {
+        "destination": "+912261204455",
+        "mode": "cold",
+        "ringing_timeout": 30,
+        "on_failure": "continue"
+      }
+    }
+  ]
+}
+```
+
+`POST` it to `/v1/tools` and publish it exactly as `record_booking` was published; the examples below call the result `transfer`. `on_failure: "continue"` brings the caller back to the agent with a plain-English reason when nobody picks up, rather than dropping them. See [transfer](/tools/transfer).
+
+</Step>
+
+<Step title="Write the prompt">
+
+Everything hard about a booking agent is in the prompt: collecting enough before it touches the calendar, offering times a person can hold in their head, and saying dates in a form a text-to-speech voice will not mangle.
+
+```text
+You are the receptionist for Northside Dental, a two-chair dental practice.
+You take calls from patients who want to book an appointment.
+
+THE CLOCK
+Right now it is {{system_vars.time}} on {{system_vars.date}}, and the exact
+moment is {{system_vars.now}}. The practice runs on Asia/Kolkata and every
+time you say or send is in that timezone. Work out "tomorrow", "next Tuesday"
+and "later this week" from the date above. Never ask the patient what today's
+date is.
+
+BEFORE YOU TOUCH THE CALENDAR
+Collect three things, one question at a time:
+1. The patient's full name.
+2. What the appointment is for, in their own words.
+3. Roughly when they want it - which day or part of the week, and whether
+   morning or afternoon suits better.
+Do not call a calendar tool until you have all three. Guessing a window and
+reading back times the patient cannot use is the main way this call goes
+wrong.
+
+HOW LONG THINGS TAKE
+A check-up or a cleaning is 30 minutes. A filling, an extraction or a first
+visit is 60 minutes. If you are not sure, use 60.
+
+FINDING TIMES
+Say "let me look at the diary, one moment", then call calendar_suggest_time
+with:
+- attendeeEmails: {{vars.clinic_email}} and nothing else
+- startTime and endTime: the window the patient asked for, as full ISO 8601
+  timestamps, never starting earlier than right now
+- timeZone: Asia/Kolkata
+- durationMinutes: the length from the list above
+- preferences: startHour "09:30", endHour "18:00", excludeWeekends true
+
+It returns free periods, not slots. Pick at most TWO start times inside those
+periods, at least two hours apart, and offer only those: "I can do half past
+ten on Thursday morning, or four o'clock on Thursday afternoon - which
+suits?" Never read a list of times out, and never read a period out like "we
+are free from nine until one".
+
+If nothing comes back, say the diary is full for that window, offer the next
+window yourself, and ask if that works.
+
+BOOKING
+When the patient picks a time, read the day, the time and what it is for back
+to them and wait for them to confirm. Then say "booking that in now" and call
+calendar_create_event with:
+- summary: the service, then the patient's name - "Cleaning - Anita Rao"
+- startTime and endTime: the exact slot, as full ISO 8601 timestamps
+- timeZone: Asia/Kolkata
+- description: the number they are calling from, which is
+  {{system_vars.human_phone_number}}
+- no attendees, and no calendarId
+
+As soon as it comes back successfully, call record_booking with the start
+time, the service, the patient's name and the event id it returned. Then tell
+the patient it is booked and say the day and time once more.
+
+WHEN THE CALENDAR FAILS
+If either calendar tool comes back with an error, do not retry it with
+different wording and do not pretend it worked. Say the diary is not
+responding just now, apologise, and offer to put them through to the practice
+so a person can write them in.
+
+TRANSFER
+transfer_to_reception is for a patient who asks for a person, wants to move
+or cancel an appointment they already have, is in pain and needs to be seen
+today, or is calling about anything that is not making a new booking. Follow
+the rules in its own description.
+
+SPEAKING
+- Two or three sentences per turn. Let the patient cut in.
+- No markdown, no lists, no emoji and no JSON in anything you say.
+- Say dates as "Thursday the ninth of April". Never say "09/04", and never
+  read an ISO timestamp aloud.
+- Say times as "half past ten in the morning" or "four in the afternoon".
+  Never say "10:30" or "16:00".
+- Spell a name back when you are not sure you heard it: "that is A, N, I, T,
+  A?"
+- One question per turn. Wait for the answer.
+```
+
+### The clock, and why nothing works without it
+
+`{{system_vars.date}}`, `{{system_vars.time}}` and `{{system_vars.now}}` resolve against the agent's own **`config.timezone`**, an IANA name. Without it, using any of the three is a save error naming the field — so an agent with no timezone cannot be told what day it is, and a model that does not know today's date cannot turn "next Tuesday" into a timestamp. It will invent one.
+
+Two properties of those tokens matter here. In a prompt they are **frozen at the moment the agent starts**, which on a call is the moment it answers — right for one call, wrong for a call that runs past midnight. And `{{system_vars.now}}` is a machine timestamp (`2026-08-19T19:26:59+05:30`): it is there for the model to build arguments from, which is why the prompt above forbids reading one aloud. See [variables](/agents/variables).
+
+### The rules that bite
+
+| Rule | What happens if you ignore it |
+| --- | --- |
+| A `dateTime` needs a UTC offset, **or** a `timeZone` alongside it | The tool refuses the call: *"needs a UTC offset (for example `2026-04-30T10:00:00+05:30`), or set `timeZone` to say which zone the time is in"*. Passing `timeZone` on every call is the reliable habit, because it also overrides any offset the model guessed |
+| An all-day event's end date is **exclusive** | A one-day event on `2026-04-30` ends on `2026-05-01`. Give the same date for both ends and you have not booked a day |
+| Writes only reach calendars the account **owns** | `403` or `404`, with the error telling the model to check `accessRole` |
+| `suggest_time` returns free **periods**, not slots | A wide-open day comes back as one long period. Turning that into two offerable times is the model's job, and the prompt has to say so |
+| A calendar `suggest_time` cannot read is **unknown, not free** | It comes back under `unreadableCalendars`. Reading that as free is how an agent books over somebody's day |
+| A field the event type cannot carry is **dropped**, not refused | Deliberate: a model that attaches an unusable field unprompted, then reads the refusal as something to vary its arguments against, fails a real booking over a field the patient never mentioned |
+
+Let `suggest_time` do the arithmetic. It reads free/busy for every listed address, inverts it, clips the result to your preferred hours **per local day** so it stays correct across a daylight-saving change, and drops anything shorter than `durationMinutes`. A model asked to do that itself from a list of events gets it wrong on the third call of the day.
+
+</Step>
+
+<Step title="Create the agent and publish it">
+
+Save the prompt above as `reception-prompt.txt` and let `jq` fold it into the body, so a multi-line prompt never has to be escaped by hand:
+
+<CodeGroup>
+```bash cURL
+jq -n --rawfile prompt reception-prompt.txt '{
+    "config": {
+      "prompt": $prompt,
+      "name": "Northside Dental reception",
+      "channel": "voice",
+      "language": "en",
+      "timezone": "Asia/Kolkata",
+      "greeting": "Northside Dental, would you like to book an appointment?",
+      "stt": { "provider": "deepgram", "model": "nova-3-general" },
+      "llm": { "provider": "openai", "model": "gpt-5.4-mini" },
+      "tts": { "provider": "deepgram", "model": "aura-2", "voice": "aura-2-thalia-en" },
+      "vars": [
+        {
+          "name": "clinic_email",
+          "description": "The Google account whose free/busy the agent books against.",
+          "default": "reception@northside-dental.example",
+          "required": false
+        }
+      ],
+      "mcps": [{ "integration_id": "6a2c98f1-4b73-4e05-9d18-0c7f3a5b2e94" }],
+      "tools": [
+        { "tool_id": "0c5e39a7-1f84-4b26-8d93-72a0e5c14b68" },
+        { "tool_id": "b7d24f10-9c36-4a58-8e01-3f6b5d072a9c" }
+      ],
+      "analysis": {
+        "enabled": true,
+        "summary": true,
+        "outcome": {
+          "prompt": "An appointment was created in the calendar and the agent read the day and time back to the caller. A call that ended with no booking - because no time suited, because the calendar failed, or because the caller was transferred - is not a success."
+        },
+        "fields": [
+          {
+            "name": "appointment_at",
+            "type": "string",
+            "description": "The start of the appointment that was booked, as YYYY-MM-DD HH:MM in the practice local time. Take it from the record_booking tool call if there was one. Null if nothing was booked."
+          },
+          {
+            "name": "service",
+            "type": "string",
+            "description": "What the caller booked for, in a few words. Null if the call ended before they said."
+          },
+          {
+            "name": "not_booked_reason",
+            "type": "string",
+            "description": "If no appointment was booked, why, in a few words - for example \"no time that suited\", \"calendar error\", \"wanted to reschedule\", \"asked for a person\", \"wrong number\". Null if an appointment was booked."
+          }
+        ]
+      }
+    }
+  }' \
+| curl -sS https://api.in.talqing.com/v1/agents \
+    -H "Authorization: Bearer $TALQING_API_KEY" \
+    -H "Content-Type: application/json" \
+    --data @-
+```
+
+```typescript TypeScript
+import { readFileSync } from "node:fs";
+
+const RECEPTION_PROMPT = readFileSync("reception-prompt.txt", "utf8");
+
+const agent = await talqing.agents.create({
+  createAgentRequest: {
+    config: {
+      name: "Northside Dental reception",
+      channel: "voice",
+      language: "en",
+      timezone: "Asia/Kolkata",
+      prompt: RECEPTION_PROMPT,
+      greeting: "Northside Dental, would you like to book an appointment?",
+      stt: { provider: "deepgram", model: "nova-3-general" },
+      llm: { provider: "openai", model: "gpt-5.4-mini" },
+      tts: { provider: "deepgram", model: "aura-2", voice: "aura-2-thalia-en" },
+      vars: [
+        {
+          name: "clinic_email",
+          description: "The Google account whose free/busy the agent books against.",
+          default: "reception@northside-dental.example",
+          required: false,
+        },
+      ],
+      mcps: [{ integration_id: calendar.id }],
+      tools: [{ tool_id: record.id }, { tool_id: transfer.id }],
+      analysis: {
+        enabled: true,
+        summary: true,
+        outcome: {
+          prompt:
+            "An appointment was created in the calendar and the agent read the day and time back to the caller. A call that ended with no booking - because no time suited, because the calendar failed, or because the caller was transferred - is not a success.",
+        },
+        fields: [
+          {
+            name: "appointment_at",
+            type: "string",
+            description:
+              "The start of the appointment that was booked, as YYYY-MM-DD HH:MM in the practice local time. Take it from the record_booking tool call if there was one. Null if nothing was booked.",
+          },
+          {
+            name: "service",
+            type: "string",
+            description:
+              "What the caller booked for, in a few words. Null if the call ended before they said.",
+          },
+          {
+            name: "not_booked_reason",
+            type: "string",
+            description:
+              'If no appointment was booked, why, in a few words - for example "no time that suited", "calendar error", "wanted to reschedule", "asked for a person", "wrong number". Null if an appointment was booked.',
+          },
+        ],
+      },
+    },
+  },
+});
+
+const check = await talqing.agents.validate({ agent_id: agent.id });
+if (check.errors.length) throw new Error(check.errors.join("\n"));
+await talqing.agents.publish({ agent_id: agent.id });
+```
+
+```python Python
+from pathlib import Path
+
+RECEPTION_PROMPT = Path("reception-prompt.txt").read_text()
+
+agent = talqing.agents.create(
+    config={
+        "name": "Northside Dental reception",
+        "channel": "voice",
+        "language": "en",
+        "timezone": "Asia/Kolkata",
+        "prompt": RECEPTION_PROMPT,
+        "greeting": "Northside Dental, would you like to book an appointment?",
+        "stt": {"provider": "deepgram", "model": "nova-3-general"},
+        "llm": {"provider": "openai", "model": "gpt-5.4-mini"},
+        "tts": {"provider": "deepgram", "model": "aura-2", "voice": "aura-2-thalia-en"},
+        "vars": [
+            {
+                "name": "clinic_email",
+                "description": "The Google account whose free/busy the agent books against.",
+                "default": "reception@northside-dental.example",
+                "required": False,
+            }
+        ],
+        "mcps": [{"integration_id": calendar["id"]}],
+        "tools": [{"tool_id": record["id"]}, {"tool_id": transfer["id"]}],
+        "analysis": {
+            "enabled": True,
+            "summary": True,
+            "outcome": {
+                "prompt": (
+                    "An appointment was created in the calendar and the agent read the day "
+                    "and time back to the caller. A call that ended with no booking - "
+                    "because no time suited, because the calendar failed, or because the "
+                    "caller was transferred - is not a success."
+                )
+            },
+            "fields": [
+                {
+                    "name": "appointment_at",
+                    "type": "string",
+                    "description": (
+                        "The start of the appointment that was booked, as YYYY-MM-DD HH:MM "
+                        "in the practice local time. Take it from the record_booking tool "
+                        "call if there was one. Null if nothing was booked."
+                    ),
+                },
+                {
+                    "name": "service",
+                    "type": "string",
+                    "description": (
+                        "What the caller booked for, in a few words. Null if the call ended "
+                        "before they said."
+                    ),
+                },
+                {
+                    "name": "not_booked_reason",
+                    "type": "string",
+                    "description": (
+                        'If no appointment was booked, why, in a few words - for example '
+                        '"no time that suited", "calendar error", "wanted to reschedule", '
+                        '"asked for a person", "wrong number". Null if an appointment was '
+                        "booked."
+                    ),
+                },
+            ],
+        },
+    }
+)
+
+check = talqing.agents.validate(agent["id"])
+if check["errors"]:
+    raise SystemExit("\n".join(check["errors"]))
+talqing.agents.publish(agent["id"])
+```
+</CodeGroup>
+
+Two notes on that config. **Attaching an MCP integration takes a publish** — `mcps` is frozen into the published version like everything else, so the calendar tools are not in front of the model until you publish, while `allowed_tools` on the integration is live and reaches an already-published agent on its next turn.
+
+And `clinic_email` is declared with a `default`, deliberately. A variable that is `required: true` with no default refuses every session that does not supply one, and an inbound phone call carries no request of ours to supply anything — so assigning that agent to a number is refused outright, and so is publishing it while it is already assigned. Anything an inbound agent needs must have a default. See [variables](/agents/variables).
+
+</Step>
+
+</Steps>
+
+## Test it
+
+**Book something real, then look at the calendar.** Use the agent editor's test panel, which runs the **latest published version** in the browser, and walk the whole path: give a name, a reason, "sometime Thursday morning", and take the first time offered. Then open Google Calendar. Four things to check:
+
+1. The event exists, on the right calendar, at the time the agent said aloud — not an hour off, which is what a missing `timeZone` looks like.
+2. Its title is the service and the name, and its description carries a phone number.
+3. Nobody was emailed. With no attendees, `notificationLevel` defaults to nothing being sent.
+4. The duration matches what the prompt said it should be.
+
+**Then read the call.** `GET /v1/calls/{session_id}` gives the transcript with every tool call and its result inline. Read three things in order:
+
+- the `function_call` items for `calendar_suggest_time` and `calendar_create_event`, and the arguments the model actually chose — this is where a wrong window or a missing `timeZone` shows;
+- `session.userdata`, which should hold the four `booking_*` keys `record_booking` wrote;
+- `session.analysis`, once the call has finished: the summary, `outcome`, `outcome_rationale`, and `appointment_at` matching what is in the calendar.
+
+<Note>
+A **web** test call cannot exercise the transfer: `transfer` is phone-only and fails on a web session, and `{{system_vars.human_phone_number}}` is empty there, so the event description will be blank. Both work on a real phone call. Test the failure path deliberately too — disable the integration for a moment and confirm the agent says the diary is not responding and offers a person, rather than inventing a confirmation.
+</Note>
+
+## What to watch in the first week
+
+**Whether it is offering times or reading lists.** Open five transcripts and look at the turn straight after `calendar_suggest_time`. Two concrete times is the target; a paragraph of availability is a caller who will hang up and ring back. That is a prompt fix, not a model fix.
+
+**The calls with no booking.** `GET /v1/calls?outcome=failure` and read `not_booked_reason` across them. "No time that suited" clusters mean the preferred hours in the prompt are wrong for your callers; "calendar error" means look at the tool results; "wanted to reschedule" is a feature request the section below answers.
+
+**Dates and money in the caller's ear.** Listen to two [recordings](/telephony/recording), not just the transcripts. A transcript that reads "Thursday the ninth" tells you nothing about whether the voice said "sixteen hundred" instead of "four in the afternoon". Text-to-speech is where a correct booking becomes an unclear one, and every fix is a line in the SPEAKING section.
+
+## Where this falls short
+
+**The agent sends no confirmation.** There is no SMS on this platform at all, and the booking above emails nobody because it has no attendees. Three honest options. Add the caller as an `attendee` with their email address and let Google send the invitation — which means asking a caller to spell an email address aloud, and getting it wrong sometimes. Add an [`http` tool](/tools/http) that posts the booking into your own practice system and lets that send the message you already send. Or export the day's bookings and use an [email batch](/email/overview) — remembering that the provider's terms require the recipient to have opted in.
+
+**It cannot move or cancel an appointment.** That needs `search_events` to find the caller's existing booking and `update_event` or `delete_event` to change it, all three approved on the integration and described in the prompt. It is more than three extra tools of surface: finding the right event from a phone call means searching by a name the caller says out loud, and an `eventId` taken from a search names **one occurrence** of a recurring event rather than the series. Build it as a second agent with its own prompt before you bolt it onto this one.
+
+**There is a window in which two callers can be given the same slot.** `suggest_time` reads free/busy at the instant it runs; `create_event` writes some turns later. Nothing holds the slot in between, and Google will accept both bookings without complaint. On a single line the window is the length of one confirmation exchange, which is small but not zero; on several concurrent calls it is real. Narrow it by offering the soonest times, keeping the gap between offering and booking to one turn — which is what "read it back, wait, then book" above does — and by checking the diary at the end of each day. If double-booking is unacceptable, the booking has to go through a system of yours that can hold a slot, called from an `http` tool, with the calendar written afterwards.
+
+Two smaller limits. Free/busy covers at most 50 addresses per call, and any calendar Google will not share — usually anyone outside the account's organisation — comes back as unreadable rather than free. And the agent books on the connected account's own calendar: if the practice adds a second dentist with a separate diary, the routing between them is a prompt-and-`calendarId` problem you have to design, not something `suggest_time` does for you.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Google Calendar" href="/integrations/google-calendar">
+    All nine native tools, argument by argument.
+  </Card>
+  <Card title="MCP servers" href="/integrations/mcp-servers">
+    Approval, namespacing, and what happens when a server is slow.
+  </Card>
+  <Card title="Call analysis" href="/observability/call-analysis">
+    Tuning the extraction against a call that already happened.
+  </Card>
+  <Card title="Phone numbers" href="/telephony/phone-numbers">
+    Put the finished agent on a number.
+  </Card>
+</CardGroup>

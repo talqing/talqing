@@ -1,0 +1,140 @@
+---
+title: "Transfers"
+description: "What a caller, a colleague and your call records experience when an agent hands a call to a human."
+---
+
+A transfer hands a live caller to a person. The agent decides to do it, and from
+that moment the conversation stops being ours: the caller is talking to your
+colleague and the agent is gone.
+
+This page is the operator's view — what the caller hears, what the person
+answering sees, what it costs and how it reads back afterwards. To build one,
+see [the transfer operation](/tools/transfer).
+
+## The two modes
+
+The builder chooses `cold` or `warm`. Everything below is what each one feels
+like from the outside.
+
+| | `cold` (default) | `warm` |
+| --- | --- | --- |
+| Caller hears | Whatever the agent said, then hold music while the phone rings, then the person answering. | The same, and stays on hold longer while the agent briefs the person answering. |
+| Person answering hears | The caller, straight away. | Your agent first, telling them who is calling and why, then the caller. |
+| Person answering can refuse | No — they are already connected. | Yes. The caller never hears them do it. |
+| Cost on top of the call | The two humans stay on the line. | The same, plus the briefing conversation. |
+
+While the transfer is dialling, the caller's microphone and speaker are both
+switched off. They hear hold music and nobody is listening to them — which is
+deliberate, so a "hello?" into a ringing line is not transcribed and not billed.
+
+## What the person answering sees
+
+<Warning>
+**They see your workspace's number, not the caller's.** Caller ID on an outgoing
+call is a property of your carrier connection, not of the individual call, so
+there is no way to present the caller's number to your colleague instead. This
+is the same on all four carriers and cannot be changed per transfer.
+</Warning>
+
+Give your colleagues something to go on inside the call instead: a `warm`
+transfer, where the agent says who is calling before handing over, is the answer
+to "who is this?" that caller ID cannot give here.
+
+## When it does not connect
+
+Every failure reaches the caller as one of a small set of plain lines. A carrier
+status code is never spoken, and a fault of ours is never dressed up as a fact
+about the person being called.
+
+| The caller is told | When |
+| --- | --- |
+| "the line was busy" | The destination was busy. |
+| "nobody answered" | It rang out, or the ring window elapsed. |
+| "that number could not be reached" | The number is not in service or does not exist. |
+| "they aren't able to take the call right now" | `warm` only: the person answered and declined. |
+| "the call went through to their voicemail" | `warm` only: the agent reached a greeting rather than a person. |
+| "the transfer could not be completed" | Everything else — including our own configuration or authorisation faults, deliberately, because those are not the destination's fault and not the caller's business. |
+
+A **declined** warm transfer never leaks the decliner's words. Whatever your
+colleague said about why goes onto the call's timeline and nowhere else; the
+caller hears the fixed line above.
+
+After a failure the tool's `on_failure` decides what happens next: `continue`
+brings the caller off hold and back to the agent, which then has the wording
+above to work with, or `end_call` ends the call.
+
+## What it costs
+
+| | What is billed |
+| --- | --- |
+| The call up to the transfer | Normally — provider spend on your own keys, plus Talqing's per-minute platform fee. A transferred call is a completed call and is owed the fee. |
+| The warm briefing | It is a second, full AI conversation — speech to text, a language model and text to speech — and its provider usage lands on this same call's bill. |
+| The two humans talking | **Talqing's meter stops when the agent leaves.** Your carrier's does not: the call stays open on your carrier account for as long as the two of them talk, and that time is on your carrier's invoice. |
+
+<Warning>
+A transferred call that nobody hangs up is held open until the platform's
+three-hour cap on any call. Talqing bills nothing for that time; your carrier
+does. It ends as soon as either human hangs up.
+</Warning>
+
+## Timing
+
+| Limit | Value | Why it matters |
+| --- | --- | --- |
+| `ringing_timeout` | 5–120 seconds, default 30 | How long the destination may ring before the transfer gives up. |
+| Briefing | 90 seconds, fixed | `warm` only, and it starts once they answer. A colleague who answers and then wanders off does not leave the caller in hold music indefinitely. |
+| Silence on the line | 120 seconds | A leg carrying no audio for this long is dropped by the carrier side. |
+
+<Warning>
+The ring window and the briefing share the 120-second budget, because the caller
+is on hold for both. The default 30 + 90 lands exactly on it. **Raising
+`ringing_timeout` toward its 120-second maximum eats the margin and can drop the
+held caller entirely** — a worse outcome than coming off hold early. If you need
+a long ring, shorten what the agent says in the briefing.
+</Warning>
+
+## How a transfer reads back
+
+Three places record it, and they answer different questions.
+
+| Where | What it holds |
+| --- | --- |
+| `close_reason: "transferred"` | Its own bucket, not a completion and not a failure. A transferred call is short by design; without this the short duration and truncated recording would read as a call that fell over. |
+| `transfer` on the call | `mode`, `destination`, `outcome` (`connected` or `failed`), the plain-English `detail` the caller was given, the carrier's raw verdict for support, and the `on_failure` that was in force. |
+| The `transfer.briefing` timeline event | `warm` only: what the agent told your colleague about this caller, plus their own words if they declined. |
+
+The briefing is **deliberately not in the transcript**. It is the agent talking
+about the caller to a third party, not to them — putting it in the transcript
+would replay it into the caller's next conversation as if they had said it. It
+is the only record of what was said about a customer to someone else, so treat
+it as a compliance record rather than telemetry.
+
+The recording covers the call up to the handover. What the two humans say to each
+other afterwards is not recorded — the agent, and with it the recorder, has left.
+
+A transferred call is still analysed like any other, so
+[call analysis](/observability/call-analysis) can tell you why calls escalate.
+
+## What transfers are not
+
+- **Not agent to agent.** Moving between agents is a [handoff](/teams/handoffs),
+  a different mechanism with different context rules.
+- **Not a queue or an IVR.** A transfer dials one number. Where that number
+  rings is your phone system's business.
+- **Not templated.** The destination is a literal phone number frozen when the
+  tool is published, and it is refused at validation if it is anything else.
+  That is anti-fraud design: a destination a model could compose is a destination
+  a caller could talk it into.
+- **Not paused or resumed.** There is no hold-and-return button; the caller is
+  on hold only while the transfer is being attempted.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Build a transfer tool" href="/tools/transfer">
+    The operation, its fields, and one tool per destination.
+  </Card>
+  <Card title="Close reasons" href="/observability/close-reasons">
+    Where `transferred` sits among every other way a call can end.
+  </Card>
+</CardGroup>

@@ -1,0 +1,1886 @@
+{
+  "components": {
+    "responses": {
+      "BadRequest": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "description": "Well-formed, but rejected by a rule; `detail.errors` lists each problem."
+      },
+      "Conflict": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "description": "The resource's current state forbids this \u2014 a name already taken, a job already running."
+      },
+      "Error": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "description": "Unexpected error. Every error this API returns carries this body."
+      },
+      "Forbidden": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "description": "Authenticated, but this organization role may not perform the operation."
+      },
+      "NotFound": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "description": "No such resource in this organization."
+      },
+      "PaymentRequired": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "description": "This organization has no credit left, so a new call cannot be started. Calls already running are unaffected."
+      },
+      "Unauthorized": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "description": "Missing credential, or one that is revoked or no longer a member of this organization."
+      },
+      "ValidationFailed": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        },
+        "description": "The request did not match this operation's schema; `detail.errors` lists each field."
+      }
+    },
+    "schemas": {
+      "AuthContextResponse": {
+        "properties": {
+          "tenant": {
+            "$ref": "#/components/schemas/PublicTenantResponse"
+          },
+          "user": {
+            "$ref": "#/components/schemas/PublicUserResponse"
+          }
+        },
+        "required": [
+          "user",
+          "tenant"
+        ],
+        "title": "AuthContextResponse",
+        "type": "object"
+      },
+      "CreateTokenRequest": {
+        "properties": {
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "CreateTokenRequest",
+        "type": "object"
+      },
+      "ErrorBody": {
+        "description": "The structured half of our error contract: a human `message` plus a list\nof individual `errors` (used wherever we surface many problems at once,\nincluding tool publish, op-tree checks, and request validation). The global\nexception handlers normalize every API error to\n`{detail: {message, errors}}`, so SDKs can parse one shape consistently.",
+        "properties": {
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message",
+          "errors"
+        ],
+        "title": "ErrorBody",
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "description": "The body of every error response, at every status code.",
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ErrorBody"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "description": "Liveness of the API process itself.",
+        "properties": {
+          "model_registry": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ModelRegistryHealth"
+                },
+                "propertyNames": {
+                  "enum": [
+                    "llm",
+                    "stt"
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Registry"
+          },
+          "status": {
+            "const": "ok",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "InviteRequest": {
+        "properties": {
+          "email": {
+            "format": "email",
+            "title": "Email",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "ADMIN",
+              "EDITOR",
+              "VIEWER"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "role"
+        ],
+        "title": "InviteRequest",
+        "type": "object"
+      },
+      "InviteResponse": {
+        "properties": {
+          "accepted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accepted At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "ADMIN",
+              "EDITOR",
+              "VIEWER"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role",
+          "created_at"
+        ],
+        "title": "InviteResponse",
+        "type": "object"
+      },
+      "McpTokenResponse": {
+        "description": "The credential half of an MCP client configuration.\n\nNo API URL: one token reaches every region, so the base URL is whichever\nregion the caller wants to work in \u2014 a choice only the dashboard is holding.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "token",
+          "created_at"
+        ],
+        "title": "McpTokenResponse",
+        "type": "object"
+      },
+      "MemberResponse": {
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "joined_at": {
+            "format": "date-time",
+            "title": "Joined At",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "picture_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Picture Url"
+          },
+          "role": {
+            "enum": [
+              "ADMIN",
+              "EDITOR",
+              "VIEWER"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role",
+          "joined_at"
+        ],
+        "title": "MemberResponse",
+        "type": "object"
+      },
+      "ModelRegistryHealth": {
+        "description": "How fresh one kind of this process's searched-provider model list is.\n\nA silently stale registry is the one failure this design trades for\nfreshness \u2014 a refresh that keeps failing holds the last good snapshot\nindefinitely, on purpose, because clearing it would take every model of that\nprovider out of the editor and out of publish validation at once. So its age\nhas to be readable without opening a log.",
+        "properties": {
+          "age_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Age Seconds"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "models": {
+            "title": "Models",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "models",
+          "age_seconds",
+          "last_error"
+        ],
+        "title": "ModelRegistryHealth",
+        "type": "object"
+      },
+      "OkResponse": {
+        "description": "The generic '{ok: true}' body returned by deletes / no-content mutations.",
+        "properties": {
+          "ok": {
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "title": "OkResponse",
+        "type": "object"
+      },
+      "OrgNameRequest": {
+        "properties": {
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "OrgNameRequest",
+        "type": "object"
+      },
+      "OrgResponse": {
+        "properties": {
+          "home_region": {
+            "title": "Home Region",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "joined_at": {
+            "format": "date-time",
+            "title": "Joined At",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "retention_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retention Days"
+          },
+          "role": {
+            "enum": [
+              "ADMIN",
+              "EDITOR",
+              "VIEWER"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "role",
+          "home_region",
+          "joined_at"
+        ],
+        "title": "OrgResponse",
+        "type": "object"
+      },
+      "PageInviteResponse": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/InviteResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "has_more",
+          "limit",
+          "offset"
+        ],
+        "title": "Page[InviteResponse]",
+        "type": "object"
+      },
+      "PageMemberResponse": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MemberResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "has_more",
+          "limit",
+          "offset"
+        ],
+        "title": "Page[MemberResponse]",
+        "type": "object"
+      },
+      "PageOrgResponse": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OrgResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "has_more",
+          "limit",
+          "offset"
+        ],
+        "title": "Page[OrgResponse]",
+        "type": "object"
+      },
+      "PageTokenResponse": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TokenResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "has_more",
+          "limit",
+          "offset"
+        ],
+        "title": "Page[TokenResponse]",
+        "type": "object"
+      },
+      "PatchOrgRequest": {
+        "description": "Merge-style, like every other PATCH here: an omitted field is unchanged.\n\n``retention_days`` needs the sentinel because ``null`` is a real value \u2014\n\"keep everything forever\" \u2014 and has to be distinguishable from \"leave the\npolicy alone\".",
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "retention_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": -1,
+            "description": "How many days to keep call and conversation content \u2014 recordings, transcripts, summaries and the phone numbers on a call. `null` keeps everything forever, which is the default. Applies to calls from now on.",
+            "title": "Retention Days"
+          }
+        },
+        "title": "PatchOrgRequest",
+        "type": "object"
+      },
+      "PublicTenantResponse": {
+        "properties": {
+          "home_region": {
+            "title": "Home Region",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "home_region"
+        ],
+        "title": "PublicTenantResponse",
+        "type": "object"
+      },
+      "PublicUserResponse": {
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "picture_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Picture Url"
+          },
+          "role": {
+            "enum": [
+              "ADMIN",
+              "EDITOR",
+              "VIEWER"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role"
+        ],
+        "title": "PublicUserResponse",
+        "type": "object"
+      },
+      "RegionResponse": {
+        "description": "One region, as the dashboard reads it.",
+        "properties": {
+          "api_url": {
+            "title": "Api Url",
+            "type": "string"
+          },
+          "default": {
+            "title": "Default",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "name",
+          "api_url",
+          "default"
+        ],
+        "title": "RegionResponse",
+        "type": "object"
+      },
+      "RegionsResponse": {
+        "properties": {
+          "regions": {
+            "items": {
+              "$ref": "#/components/schemas/RegionResponse"
+            },
+            "title": "Regions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "regions"
+        ],
+        "title": "RegionsResponse",
+        "type": "object"
+      },
+      "RoleRequest": {
+        "properties": {
+          "role": {
+            "enum": [
+              "ADMIN",
+              "EDITOR",
+              "VIEWER"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "title": "RoleRequest",
+        "type": "object"
+      },
+      "TokenCreatedResponse": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "manual",
+              "mcp"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "user_email": {
+            "title": "User Email",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "user_id",
+          "user_email",
+          "created_at",
+          "token"
+        ],
+        "title": "TokenCreatedResponse",
+        "type": "object"
+      },
+      "TokenResponse": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "manual",
+              "mcp"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "user_email": {
+            "title": "User Email",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "user_id",
+          "user_email",
+          "created_at"
+        ],
+        "title": "TokenResponse",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "BearerAuth": {
+        "bearerFormat": "JWT",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "SessionCookie": {
+        "in": "cookie",
+        "name": "talqing_session",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "summary": "Internal: identity, organizations, access tokens, payments, and the region list. Not published \u2014 the tenant-facing API is regional.",
+    "title": "Talqing control API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/health": {
+      "get": {
+        "description": "Liveness probe: `200` once this process is serving. Unauthenticated.\n\nIt answers for the API process, not its dependencies \u2014 a `200` here does\nnot promise Postgres, Redis or LiveKit are reachable. The one thing it\ndoes report is `model_registry`, because that snapshot lives in this\nprocess's memory and nothing else can see how old it is.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Health",
+        "tags": [
+          "service"
+        ]
+      }
+    },
+    "/v1/auth/logout": {
+      "post": {
+        "operationId": "auth.logout",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/me": {
+      "get": {
+        "description": "Who this credential is: the signed-in user, their role, and the organization.\n\nEverything else you can reach is scoped to that organization, and `role`\n(`ADMIN`, `EDITOR` or `VIEWER`) decides whether writes will be accepted. A\nuser may belong to several organizations with a different role in each; this\nreports the one this credential is for.\n\n`tenant.home_region` is read here rather than carried on the tenant object: a\nregion has no use for it \u2014 every region serves every organization \u2014 so it\nstays a control-plane fact the dashboard asks for, and not a field every\nworker in every region hauls around.",
+        "operationId": "auth.me",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthContextResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Me",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/mcp-token": {
+      "get": {
+        "description": "This user's MCP token, in plaintext.\n\nUnlike a token created by hand, this one can be read whenever it is needed:\nthe dashboard renders it into ready-to-paste MCP configuration for Claude\nCode, Codex and Grok. The value is re-derived from the token's row, not\nstored, and is the same string every time \u2014 so a configuration a user\nalready saved keeps working.\n\nIt is always the caller's own token, never anyone else's, and is created on\nthe spot for a user who somehow has none. Delete it from the tokens list to\nrevoke it; the next call issues a new one, which rotates the credential.\n\nNo API URL comes with it, and it is not an omission: one token reaches every\nregion, and only the dashboard knows which region the person is looking at.\nControl could only answer with its own address, which is the one host an MCP\nclient must never be pointed at.",
+        "operationId": "tokens.mcp",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpTokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Mcp Token",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/v1/org": {
+      "patch": {
+        "description": "Change this organization's name or its data retention policy.\n\nThe name is display only \u2014 nothing keys on it.\n\n`retention_days` is how long call and conversation *content* is kept:\nrecordings, transcripts, summaries, extracted fields and the phone numbers\non a call. When it passes, all of that is deleted and the call itself\nremains, with its duration, outcome and cost, so past invoices still\nresolve. `null` keeps everything forever, which is the default.\n\nIt applies to calls from now on: a call already in the system keeps the\ndeadline it was given when it ended, so shortening the policy never\nretroactively destroys anything. Erasing a contact's last call also resets\nwhat your agents remember about that person.",
+        "operationId": "orgs.update",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchOrgRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Patch Org",
+        "tags": [
+          "org"
+        ]
+      }
+    },
+    "/v1/org/invites": {
+      "get": {
+        "description": "Invites waiting on a first login. Accepted and revoked ones drop off the\nlist \u2014 an accepted invite is a member, and belongs on the roster instead.",
+        "operationId": "orgs.invites.list",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageInviteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "List Invites",
+        "tags": [
+          "org"
+        ]
+      },
+      "post": {
+        "description": "Invite an email address into this organization with a role.\n\nThere is no invite link and no accept step: the invite is keyed to a Google\nidentity, so signing in with that address *is* the check. Someone who\nalready has an account joins immediately; anyone else joins the first time\nthey sign in.\n\nNo email is sent at MVP, so an existing user finds out by seeing the\norganization appear in their switcher \u2014 tell them yourself.",
+        "operationId": "orgs.invites.create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Create Invite",
+        "tags": [
+          "org"
+        ]
+      }
+    },
+    "/v1/org/invites/{invite_id}": {
+      "delete": {
+        "description": "Withdraw a pending invite, so signing in with that address no longer\njoins this organization.",
+        "operationId": "orgs.invites.revoke",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "invite_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Invite Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Revoke Invite",
+        "tags": [
+          "org"
+        ]
+      }
+    },
+    "/v1/org/leave": {
+      "post": {
+        "description": "Leave this organization. Any member may, including an admin who has\npromoted a successor. Nothing they created is deleted.",
+        "operationId": "orgs.leave",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Leave Org",
+        "tags": [
+          "org"
+        ]
+      }
+    },
+    "/v1/org/members": {
+      "get": {
+        "description": "Every member sees the roster; only an ADMIN can change it.",
+        "operationId": "orgs.members.list",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageMemberResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "List Members",
+        "tags": [
+          "org"
+        ]
+      }
+    },
+    "/v1/org/members/{user_id}": {
+      "delete": {
+        "description": "Remove someone from this organization.\n\nThey lose access on their next request, and their access tokens for this\norganization stop working with them. Nothing they created is deleted.\n\nAllowed even when this is the only organization they belong to \u2014 whether\nthey have somewhere else to go is not this organization's problem, and their\nnext sign-in gives them one of their own.",
+        "operationId": "orgs.members.remove",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Remove Member",
+        "tags": [
+          "org"
+        ]
+      },
+      "patch": {
+        "description": "Change a member's role. Takes effect on their very next request.",
+        "operationId": "orgs.members.setRole",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Set Member Role",
+        "tags": [
+          "org"
+        ]
+      }
+    },
+    "/v1/orgs": {
+      "get": {
+        "description": "Every organization the signed-in user belongs to, with their role in each.\n\nNewest membership first, deliberately: an admin can add you to their\norganization without you being asked or emailed, so the one you did not know\nabout is the one that needs to be visible.",
+        "operationId": "orgs.list",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageOrgResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "List Orgs",
+        "tags": [
+          "org"
+        ]
+      },
+      "post": {
+        "description": "Create a new, empty organization with the caller as its ADMIN.\n\nAny member can do this \u2014 it grants nothing in the organization they are\ncurrently in. Switch into it to start working there.\n\nNo signup grant: `billing.signup_grant_usd` is for an organization created at\na first sign-in, and that is the whole of \"one grant per person, not one per\norganization they create\". An organization made here starts at $0 in every\nregion.\n\nIts home region is inherited from the one the caller is already in rather\nthan taken from the request or from the configured default. No request body\nor query parameter in this API carries a region slug \u2014 the dashboard picks a\nregion by base URL, not by field \u2014 and defaulting an Indian workspace's\nsecond organization into `us` would open it empty in a region the person was\nnot looking at, which is exactly the \"looks like data loss\" failure a region\nswitcher has to avoid.",
+        "operationId": "orgs.create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrgNameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Create Org",
+        "tags": [
+          "org"
+        ]
+      }
+    },
+    "/v1/orgs/{org_id}/switch": {
+      "post": {
+        "description": "Point the dashboard session at another of the caller's organizations.\n\nThe session cookie carries the organization, so switching re-issues it \u2014 the\ncaller's role, resources and billing all move with it. Reload after this.",
+        "operationId": "orgs.switch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Org Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Switch Org",
+        "tags": [
+          "org"
+        ]
+      }
+    },
+    "/v1/regions": {
+      "get": {
+        "description": "Every region this deployment serves, and where each one's API is.\n\nConfiguration, not a table \u2014 the list changes when a region is stood up,\nwhich is a deploy.",
+        "operationId": "regions.list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegionsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List Regions",
+        "tags": [
+          "regions"
+        ]
+      }
+    },
+    "/v1/tokens": {
+      "get": {
+        "description": "List personal access tokens: your own, or every one in the organization\nif you are an admin.\n\nWho holds which credential is organization-admin information, so an EDITOR\nor VIEWER sees only what they created. Plaintext token values are never\nreturned. A token with `kind: mcp` was issued automatically for the\ndashboard's MCP setup; the rest were created by hand.",
+        "operationId": "tokens.list",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageTokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "List Tokens",
+        "tags": [
+          "tokens"
+        ]
+      },
+      "post": {
+        "description": "Create a personal access token for driving this API without the dashboard.\n\nThe token authenticates as its creator and acts with that user's live role,\nso it can never do more than they can. It does not expire; deleting it is\nthe revocation. The plaintext value is returned once here and never again \u2014\ntreat it like a password and do not echo it back into a conversation.",
+        "operationId": "tokens.create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCreatedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Create Token",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/v1/tokens/{token_id}": {
+      "delete": {
+        "description": "Revoke a token immediately and permanently.\n\nOwners can delete their own; organization admins can delete any in the\norganization. Deleting an `mcp` token rotates it: the owner's next dashboard\nvisit issues a replacement, and anything still configured with the old one\nstops working.",
+        "operationId": "tokens.delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Token Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Delete Token",
+        "tags": [
+          "tokens"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "description": "Dashboard session authentication.",
+      "name": "auth"
+    },
+    {
+      "description": "Organizations, their members, roles and invites.",
+      "name": "org"
+    },
+    {
+      "description": "Personal access tokens for API clients.",
+      "name": "tokens"
+    },
+    {
+      "description": "The regions a workspace's resources can live in.",
+      "name": "regions"
+    },
+    {
+      "description": "The payment processor's callback.",
+      "name": "billing"
+    },
+    {
+      "description": "Liveness of the API itself.",
+      "name": "service"
+    }
+  ]
+}

@@ -1,0 +1,154 @@
+---
+title: "Keypad input"
+description: "Let a caller answer with the keypad, and let the agent press keys back into an IVR."
+---
+
+Two separate features, both about DTMF: **keypad input** is a setting on the
+agent that turns a caller's keypresses into a turn the agent can answer, and
+**`send_dtmf`** is an operation that presses keys on the call from a tool.
+
+Both work on phone calls and on [media streams](/channels/media-streams). A web
+call has no keypad and a chat has no phone, so on those they simply never apply.
+
+<Warning>
+**Keypad digits are events, never tones.** Talqing reads the keypress event the
+carrier or the partner platform signals, and does not listen for tones inside
+the audio. On a line that only carries in-band tones — some older PBX
+interconnects — a caller pressing 1 reaches nothing, and there is no setting that
+changes that.
+</Warning>
+
+One consequence of that is worth knowing on purpose: **out-of-band digits are
+absent from the call recording.** They never entered the audio path, so a PIN
+typed on a keypad is not in the stored file, by construction.
+
+## Caller → agent
+
+Turn it on in the agent editor under **Keypad**, or set `keypad_input` on the
+config. **`voice` agents only** — a `video` agent is a web call wearing an avatar
+and a `text` agent has no call at all, so the setting is cleared on both and the
+editor does not show it.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `enabled` | `false` | Whether the caller's keypresses reach the agent at all. |
+| `timeout` | `2.0` | Seconds of quiet before an entry is taken as finished. `0` waits for the terminator, however long that takes. |
+| `terminator` | `"#"` | The key that ends an entry. `"#"`, `"*"` or `""` for none. It is not part of the entry. |
+
+<CodeGroup>
+```bash cURL
+curl -X PATCH https://api.in.talqing.com/v1/agents/81399608-4930-4ff1-9281-f1f4932d1999 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"config": {"keypad_input": {"enabled": true, "timeout": 2.0, "terminator": "#"}}}'
+```
+
+```typescript TypeScript
+await talqing.agents.update({
+  agent_id: "81399608-4930-4ff1-9281-f1f4932d1999",
+  updateAgentRequest: {
+    config: {
+      keypad_input: { enabled: true, timeout: 2.0, terminator: "#" },
+    },
+  },
+});
+```
+
+```python Python
+talqing.agents.update(
+    "81399608-4930-4ff1-9281-f1f4932d1999",
+    config={
+        "keypad_input": {"enabled": True, "timeout": 2.0, "terminator": "#"},
+    },
+)
+```
+</CodeGroup>
+
+### What the agent sees
+
+An entry arrives as **one user turn**, labelled:
+
+```
+Keypad entry: 4821
+```
+
+The label is deliberate. A bare `4821` in the transcript is indistinguishable
+from the caller *saying* "four eight two one", and those are different facts to
+anyone auditing a call or writing an [analysis](/observability/call-analysis)
+prompt.
+
+Three behaviours follow from that:
+
+- **The first keypress interrupts the agent.** A caller who has started typing
+  has stopped listening.
+- **The terminator flushes and is dropped.** Pressing it on nothing is ignored,
+  so finishing one entry with `#` does not open an empty turn.
+- **Fifty characters flushes immediately.** A stuck key cannot grow a buffer
+  that never resolves.
+
+<Note>
+A keypad entry does **not** fire the `on_user_turn_completed`
+[lifecycle hook](/agents/lifecycle-hooks). That hook is called from the
+speech-to-text turn-commit path, and a keypad entry does not pass through it. If
+your hook enriches every user turn, it will not run for one typed on a keypad.
+</Note>
+
+### One combination is refused at publish
+
+`timeout: 0` together with `terminator: ""` is a buffer with no way out: nothing
+would ever finish an entry, and every digit a caller types would disappear.
+Publishing refuses it in those words. Set a timeout, or pick a terminator.
+
+## Agent → keypad
+
+The `send_dtmf` operation presses keys on the call the agent is already on —
+for navigating an IVR on the other end, entering an account number, or picking a
+menu option.
+
+```json
+{
+  "kind": "send_dtmf",
+  "config": { "digits": "2w{{args.account_number}}#" }
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `0`–`9`, `*`, `#` | The keys a telephone has. |
+| `A`–`D` | The fourth column, which no consumer handset has and some private systems still use. |
+| `w` | Wait half a second. |
+| `W` | Wait one second. |
+
+Digits are sent one at a time with 0.3 s between them, and `w`/`W` add to that.
+`2w{{args.account_number}}#` is "press 2, wait for the menu, then the account
+number, then hash".
+
+**`digits` is templated**, unlike a [transfer](/tools/transfer) destination, and
+the difference is deliberate: a transfer destination is a *who*, decided at
+publish time, and resolving it would make prompt injection a toll-fraud vector.
+IVR digits are a *what*, and they are only useful when they come from the call.
+
+`send_dtmf` is not terminal — the tool carries on afterwards, so sending digits
+and then saying something is the normal case.
+
+### Where it refuses itself
+
+| Channel | `send_dtmf` |
+| --- | --- |
+| Phone call, inbound or outbound | Works |
+| Media stream · SparkTG, Plivo | Works |
+| Media stream · Twilio, Exotel, Vonage | **Refuses** — the protocol has no command for it |
+| Web voice or video call | **Refuses** — there is no telephone line to press keys on |
+| Text | **Refuses** |
+
+A refusal is an error the model is told about, with the reason. It never
+silently does nothing.
+
+<CardGroup cols={2}>
+  <Card title="Media streams" href="/channels/media-streams">
+    Which partner platforms can carry keypad presses in each direction.
+  </Card>
+  <Card title="Operation tree" href="/tools/operation-tree">
+    Where `send_dtmf` sits among the other operations.
+  </Card>
+</CardGroup>

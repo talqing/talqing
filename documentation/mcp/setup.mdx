@@ -1,0 +1,178 @@
+---
+title: "Setup"
+description: "Install the Talqing MCP server in Claude Code, Codex, Cursor, Grok or any stdio client, and check that it works."
+---
+
+The server runs locally over stdio and talks to the Talqing API with your personal access token. Two environment variables configure it, both required.
+
+## Get the token and the command
+
+Open the dashboard's **Agents** page. At the top is a panel headed **Build agents from your terminal**, with a tab for **Claude Code**, **Codex** and **Grok**. It already carries your token and the base URL of the region you are currently looking at.
+
+The token is masked until you click **Reveal token**, and **Copy** always copies the real value — so the panel is safe to leave open on a shared screen. It is your MCP token, issued to you at signup and readable as often as you need it. It authenticates as you, acts with your current role, and reaches only your workspace. You can also use any personal access token you created yourself; see [authentication](/get-started/authentication).
+
+## Install
+
+<CodeGroup>
+```bash Claude Code
+claude mcp add talqing \
+  -e TALQING_BASE_URL=https://api.in.talqing.com \
+  -e TALQING_API_KEY=$TALQING_API_KEY \
+  -- npx -y @talqing/mcp
+```
+
+```bash Codex
+codex mcp add talqing \
+  --env TALQING_BASE_URL=https://api.in.talqing.com \
+  --env TALQING_API_KEY=$TALQING_API_KEY \
+  -- npx -y @talqing/mcp
+```
+
+```json Cursor
+{
+  "mcpServers": {
+    "talqing": {
+      "command": "npx",
+      "args": ["-y", "@talqing/mcp"],
+      "env": {
+        "TALQING_BASE_URL": "https://api.in.talqing.com",
+        "TALQING_API_KEY": "your-personal-access-token"
+      }
+    }
+  }
+}
+```
+
+```toml Grok
+[mcp_servers.talqing]
+command = "npx"
+args = ["-y", "@talqing/mcp"]
+env = { TALQING_BASE_URL = "https://api.in.talqing.com", TALQING_API_KEY = "your-personal-access-token" }
+```
+
+```json Any stdio client
+{
+  "mcpServers": {
+    "talqing": {
+      "command": "npx",
+      "args": ["-y", "@talqing/mcp"],
+      "env": {
+        "TALQING_BASE_URL": "https://api.in.talqing.com",
+        "TALQING_API_KEY": "your-personal-access-token"
+      }
+    }
+  }
+}
+```
+</CodeGroup>
+
+The Claude Code and Codex commands are run once in a terminal and write the client's own configuration for you. Cursor's block goes in `.cursor/mcp.json` in your project, or `~/.cursor/mcp.json` to have it everywhere. Grok's `mcp add` takes no `--env` flag, so its credentials can only be set in a file: `~/.grok/config.toml`.
+
+The server needs Node 20 or newer. `npx -y @talqing/mcp` fetches the current release each time the client starts it; append `@x.y.z` to pin a version.
+
+## The two variables
+
+| Variable | What it is |
+| --- | --- |
+| `TALQING_BASE_URL` | The API base URL of one region — `https://api.in.talqing.com` or `https://api.us.talqing.com` |
+| `TALQING_API_KEY` | Your personal access token, sent as `Authorization: Bearer <token>` on every call |
+
+Both are required and **neither has a default**. A missing one is a startup failure with the name of the variable, not a call that silently reaches somewhere else — there is no fallback host, so the server can never quietly talk to the wrong workspace.
+
+<Note>
+**`TALQING_BASE_URL` names a region.** Everything this server can reach belongs to that one: an agent, its calls, its phone numbers and its credit balance. One token reaches every region — it names your workspace, not a place — so working in another region is the same token and a different base URL. The dashboard's snippet always carries the region you are looking at; switch region there and copy it again. See [regions](/get-started/regions).
+</Note>
+
+## Check that it works
+
+Restart the client so it picks up the new server, then ask it something that only a working connection can answer:
+
+> List my Talqing agents.
+
+It should call `list_agents` and come back with the agents in that region's workspace, or say the workspace has none — either is a pass. A brand new workspace is empty, so if you want a reply with something in it, ask for the catalog instead:
+
+> Which LLM models can a Talqing voice agent use, and which of them do I have a provider key for?
+
+That reads `get_catalog` and `list_provider_keys`, which exercises two operations and tells you something you need before you build anything. See [provider keys](/get-started/provider-keys).
+
+## Run a local install
+
+`npx` downloads the package on every client start. To hold a fixed copy instead, install it globally — the package puts a `talqing-mcp` command on your `PATH`:
+
+```bash
+npm install -g @talqing/mcp
+```
+
+Then point the client at that binary rather than at `npx`:
+
+```json
+{
+  "mcpServers": {
+    "talqing": {
+      "command": "talqing-mcp",
+      "args": [],
+      "env": {
+        "TALQING_BASE_URL": "https://api.in.talqing.com",
+        "TALQING_API_KEY": "your-personal-access-token"
+      }
+    }
+  }
+}
+```
+
+Upgrading is then explicit: `npm install -g @talqing/mcp@latest`.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The server does not appear in the client">
+    Check the client's own MCP list first — `claude mcp list` for Claude Code, `codex mcp list` for Codex — to confirm the entry was written where you expected. Client configuration is usually per project as well as per user, so a server added in one directory is not there in another.
+
+    If it is listed but not connecting, run the same command by hand with both variables set. The server fails at startup rather than mid-call, so a configuration problem prints its cause immediately:
+
+    ```bash
+    TALQING_BASE_URL=https://api.in.talqing.com \
+    TALQING_API_KEY=$TALQING_API_KEY \
+    npx -y @talqing/mcp
+    ```
+
+    A healthy start prints nothing and waits — it speaks MCP over stdin and stdout. Press Ctrl-C. A missing variable prints its name and exits. Anything else is Node: the package needs Node 20 or newer.
+  </Accordion>
+
+  <Accordion title="The token is rejected">
+    A rejected token comes back as **401** with `invalid token`. Three causes, in order of likelihood:
+
+    - The token was truncated on the way into the config. It is a long single-line string with no spaces and no prefix; copy it again with the dashboard's **Copy** button rather than selecting the masked text.
+    - The token was deleted. Revoking a personal access token deletes its row, and the row is the check — the token stops working on the next call, everywhere, immediately.
+    - You are pointing at something that is not a region's API. `TALQING_BASE_URL` must be `https://api.in.talqing.com` or `https://api.us.talqing.com`, with no path.
+
+    A **503** on the same call is different: it means the control plane could not be reached to verify the token. That is transient — retry.
+
+    A **403** is not a token problem. The token works and your role does not allow that operation; see [permissions](/mcp/permissions).
+  </Accordion>
+
+  <Accordion title="Tools are missing, or the agent says it cannot do something">
+    The server always advertises every operation regardless of your role — a viewer sees all of them and gets a 403 when they call a write. So a tool that is genuinely absent is one of two things.
+
+    Some clients cap how many tools they will load from a server, or across all servers. This one exposes 158, which is enough to hit a cap that other servers never reach. Disable the MCP servers you are not using for this task and reconnect.
+
+    Or the operation was never exposed. Sign-in, workspaces, members, roles, personal access tokens, buying credits, the streaming endpoints and deleting a call or its recording are deliberately unreachable, each for a stated reason — [permissions](/mcp/permissions) lists them and, for the streams, the polling operation to use instead.
+  </Accordion>
+
+  <Accordion title="The client's context fills up">
+    The tool list and the server instructions are sent on every model call, and 158 tools is a large fixed cost before your own conversation starts. The five biggest request types are already deferred rather than inlined — see [tools](/mcp/tools) — which is what keeps the surface loadable at all, but it is still the largest thing in the session.
+
+    What helps: run one task per session rather than building an agent, debugging a call and writing your app in the same thread; keep other MCP servers off while you are working on Talqing; and let the agent fetch `describe_schema` for the one shape it is writing instead of asking it to dump all five.
+  </Accordion>
+</AccordionGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Recipes" href="/mcp/recipes">
+    Prompts that produce a published agent, a live phone line and a campaign.
+  </Card>
+  <Card title="Tools" href="/mcp/tools">
+    Every operation, and how its arguments map to the HTTP call.
+  </Card>
+</CardGroup>

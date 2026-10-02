@@ -1,0 +1,130 @@
+---
+title: "Tools and MCP servers"
+description: "Attach tools and MCP servers to a task, define one inline, and understand what publishing pins."
+---
+
+A task attaches tools and MCP servers the same way an agent does — by id, or defined inline in the same write. What the model can reach while a run is in flight is exactly `tools` plus `mcps`, plus the generated `submit_result` tool that ends the run — and, if the task's model offers them, the [provider tools](/agents/reasoning-and-builtin-tools) switched on under `llm.builtin_tools`, which the provider runs on its own servers rather than Talqing running for it. Those are the only three kinds. This page is about the first two.
+
+```json
+{
+  "config": {
+    "name": "Research a company",
+    "tools": [
+      { "tool_id": "3f8b0f4c-9a1e-4a7d-9c2b-1d5e6f70a821" }
+    ],
+    "mcps": [
+      { "integration_id": "c41d8e37-25a9-4f60-b3d8-9e07a15c4b62" }
+    ],
+    "output": [
+      { "name": "summary", "type": "string", "description": "Two sentences on what they sell. Send null if you could not read enough to say." }
+    ]
+  }
+}
+```
+
+Everything about building a tool — the schema, the description, the operation tree — is in [tools](/tools/overview). This page is only about what changes when the thing calling it is a task.
+
+## Attaching a tool
+
+**Only published tools can be attached.** A tool with no published version is refused when you save the task, naming the tool. Publish it first — see [testing and publishing](/tools/testing-and-publishing).
+
+You can also define a tool inline, in the same request that creates the task:
+
+```json
+{
+  "config": {
+    "name": "Look up an order",
+    "tools": [
+      {
+        "tool": {
+          "name": "get_order",
+          "description": "Fetch one order by its id.",
+          "json_schema": {
+            "type": "object",
+            "properties": { "order_id": { "type": "string" } },
+            "required": ["order_id"]
+          },
+          "operations": [
+            {
+              "kind": "http",
+              "config": {
+                "method": "GET",
+                "url": "https://api.northwind.example/orders/{{args.order_id}}",
+                "headers": { "Authorization": "Bearer {{secrets.NORTHWIND_KEY}}" }
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "output": [
+      { "name": "status", "type": "string", "description": "The order's current status, verbatim from the API. Send null if the order was not found." }
+    ]
+  }
+}
+```
+
+An inline tool is **not** kept inline. It is created as a real tool, published as v1, and the stored config carries `{"tool_id": "…"}` instead — so it gets an editor, a test panel, a ToolCoPilot, `run_tool` and version history like every other tool. A name that already exists in the workspace is a `409`; reference the existing tool by id, or rename this one.
+
+An inline [FAQ](/agents/faqs) under `faqs` follows the same rule: a task write creates it as a stored FAQ and keeps `{"faq_id": "…"}`, and a name already taken is a `409`.
+
+## Publishing a task pins its tool versions
+
+**Republishing a tool does not change a published task.** Publishing a task freezes each attached tool at the version live at that moment, exactly as [publishing an agent does](/agents/versions) — so a task keeps behaving the way you tested it until you publish it again.
+
+That matters most where a task runs for a long time: an [email batch](/email/overview) drafts for hours, and a tool republished halfway through must not silently change what the second half of the list is sent.
+
+Two consequences worth planning for:
+
+- **Republish the task to pick up a tool change.** Until you do, the task runs the version it pinned.
+- **A pinned tool version that is deleted fails the run**, as a `configuration` error naming it. Deleting a tool does not refuse — the task's own versions are immutable, and a version pinning a tool that no longer exists is a fact about the workspace, not about the version. See [errors and limits](/tasks/errors-and-limits).
+
+<Note>
+The draft never pins: `tool_version` is null there, meaning "whatever is published now". Publishing is what writes the number, and a rollback strips it again from the restored draft.
+</Note>
+
+## Attaching an MCP server
+
+`mcps` names an integration that holds the server's credential, or defines a server inline. Only an MCP-capable integration whose status is `active` can be attached; a disabled one or one that needs reconnecting is refused when you save. Defining a server inline creates a custom MCP integration and stores its id, the same way an inline tool becomes a real tool.
+
+Everything about approval and namespacing is shared with agents and documented once, in [MCP servers](/integrations/mcp-servers). The two facts that bite most often:
+
+- **`allowed_tools` is approved on the integration, not on the task.** Null means every tool the server offers. Narrowing it reaches every task and every published agent on the next turn, because that approval is live — MCP servers are not part of what a publish freezes.
+- **The model never sees a server's raw tool names.** Each is prefixed with the integration's `tools_namespace` — `crm` turns `search` into `crm_search`. Write your prompt against the exposed name; `allowed_tools` still approves the server's own names. Two attached servers sharing a namespace is refused when you save.
+
+Every approved tool is described to the model on every round, so a large server narrows the model's attention and lengthens each round. On a task the cost of that is tokens and seconds rather than a caller waiting, but it is still the difference between a run that picks the right tool and one that does not.
+
+## What a tool call costs, and where it shows
+
+Talqing charges nothing per tool call. What a call costs is whatever it spends on your side: your own endpoint, your own MCP provider's credits, and the tokens the model spends reading the result back — reported on the run as `provider_cost`.
+
+Each call appears in the run's `trace` as one entry, with the tool's name as the model called it (namespaced, for an MCP tool), the arguments it sent, the result it got back and how long the call took:
+
+```json
+{
+  "step": 2,
+  "kind": "tool",
+  "name": "crm_search",
+  "args": { "query": "northwind.com" },
+  "result": { "results": [{ "name": "Northwind Tools", "employees": 240 }] },
+  "ms": 812,
+  "truncated": false
+}
+```
+
+Workspace secret values are masked before the trace is stored, and long fields are cut and marked. See [running and runs](/tasks/running-and-runs).
+
+<Warning>
+A metered provider is metered per run. A task attached to an enrichment or data provider spends that provider's credits every time it runs — and an [email batch](/email/overview) runs the task once per row, so a 5,000-row CSV spends them 5,000 times. Check what one run costs at the provider before you point a batch at it.
+</Warning>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Running and runs" href="/tasks/running-and-runs">
+    Run a task and read what its tools actually did.
+  </Card>
+  <Card title="MCP servers" href="/integrations/mcp-servers">
+    Approval, namespacing and the tools an integration exposes.
+  </Card>
+</CardGroup>

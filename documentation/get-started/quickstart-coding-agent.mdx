@@ -1,0 +1,112 @@
+---
+title: "Quickstart: coding agent"
+description: "Point Claude Code, Codex or any MCP client at Talqing and build agents by asking for them."
+---
+
+Talqing ships an MCP server that exposes **one tool per API endpoint** and hands your client the same platform knowledge our own in-product CoPilots work from. Anything a CoPilot can build, your coding agent can build — from your terminal, in the same session as the rest of your code.
+
+## Get the token and the command
+
+Open the dashboard's **Agents** page. At the top is a panel headed **Build agents from your terminal**, with a tab for **Claude Code**, **Codex** and **Grok**. It already contains your token and the base URL of the region you are currently looking at.
+
+The token is masked until you click **Reveal token**, and **Copy** always copies the real value — so the panel is safe to leave open on a shared screen. It is the token issued to you at signup, re-readable any time; it authenticates as you, acts with your current role, and reaches only your workspace.
+
+## Install
+
+<CodeGroup>
+```bash Claude Code
+claude mcp add talqing \
+  -e TALQING_BASE_URL=https://api.in.talqing.com \
+  -e TALQING_API_KEY=$TALQING_API_KEY \
+  -- npx -y @talqing/mcp
+```
+
+```bash Codex
+codex mcp add talqing \
+  --env TALQING_BASE_URL=https://api.in.talqing.com \
+  --env TALQING_API_KEY=$TALQING_API_KEY \
+  -- npx -y @talqing/mcp
+```
+
+```json Any stdio client
+{
+  "mcpServers": {
+    "talqing": {
+      "command": "npx",
+      "args": ["-y", "@talqing/mcp"],
+      "env": {
+        "TALQING_BASE_URL": "https://api.in.talqing.com",
+        "TALQING_API_KEY": "your-personal-access-token"
+      }
+    }
+  }
+}
+```
+</CodeGroup>
+
+Both environment variables are required and neither has a default, so the server can never quietly talk to the wrong workspace.
+
+<Note>
+**`TALQING_BASE_URL` names a region.** Everything this server can reach belongs to that one region: an agent, its calls, its phone numbers and its credit balance. One token reaches every region — it names your workspace, not a place — so working in another region is the same token and a different base URL. The dashboard's snippet always carries the region you are looking at; switch region there and copy it again. See [regions](/get-started/regions).
+</Note>
+
+Grok's `mcp add` takes no `--env`, so its configuration goes in `~/.grok/config.toml`; the dashboard's Grok tab has that form ready to paste. See [MCP setup](/mcp/setup) for Cursor and the rest.
+
+## A worked session
+
+Four prompts, from an empty workspace to a published agent with a tool attached. Each one is a normal request in your client's chat — you are not writing API calls.
+
+<Steps>
+  <Step title="Ask for the agent">
+    > Create a voice agent called "Northwind support" that answers questions about orders, delivery and returns for an online hardware store. Read the catalog first and pick a fast, cheap model stack that speaks English. Do not publish it.
+
+    It reads `get_catalog` for valid provider and model pairs and `list_provider_keys` to see which providers you have keys for, writes a system prompt and a greeting, and calls `create_agent`. It will tell you which models it chose and why. If a provider has no key, it says so rather than picking it anyway — publishing would fail on that later.
+  </Step>
+
+  <Step title="Ask for a tool and attach it">
+    > Add a tool called `lookup_order` that takes an order number, calls `GET https://api.northwind.example/orders/{{args.order_number}}` with an Authorization header read from the workspace secret `NORTHWIND_API_KEY`, and tells the agent the status and the delivery date. Attach it to the agent.
+
+    It writes the tool's `json_schema` and its [operation tree](/tools/operation-tree), calls `validate_tool`, then `publish_tool` — a tool must be published before an agent can attach it, so it does that without asking. Then it attaches the tool to the agent. `tools` is a list and is sent whole, so it reads the tools already attached and sends them back with the new one appended.
+  </Step>
+
+  <Step title="Ask it to check its work">
+    > Validate the agent and tell me what is wrong.
+
+    `validate_agent` runs on the server against rules that cannot be checked by reading a draft — missing provider keys, an unpublished tool, a model that does not support the channel, a required variable an inbound call could never supply. Errors block a publish; warnings do not. Expect it to report the result it got back rather than reasoning about your config.
+  </Step>
+
+  <Step title="Ask it to publish">
+    > Publish it.
+
+    `publish_agent` freezes the draft as an immutable version and pins each attached tool to the version live at that moment. **It will not do this until you say so** — see below.
+  </Step>
+</Steps>
+
+To test what you built, open the agent in the dashboard and use the test panel, or place a call from your own phone. A voice agent needs a browser or a phone on the other end; the MCP server can start one but cannot listen to it.
+
+## What it will not do without being asked
+
+The server's instructions hold it to three rules, and they are the ones that cost money or reach people:
+
+- **It never publishes an agent unless you ask.** It will propose it when the draft is ready and wait for you to say publish, deploy or go live. Publishing a *tool* is different — that is a prerequisite for attaching one, and it does that on its own.
+- **It never reaches a real person unless you named that contact.** An outbound call rings someone's phone and costs money; a message to a connected channel is one they receive. Both are irreversible, so it tests against a number or a thread you have named, never one it picked.
+- **It deletes only on an explicit request naming the target.** Agents, tools, carrier accounts, integrations, secrets and webhooks are all permanent. Taking a phone number out of service is treated the same way, because it stops real callers reaching anyone.
+
+Some things are out of reach structurally rather than by instruction — it cannot mint itself a credential, change who is in your workspace, or spend your money on credits. And it adds no permissions of its own: every call is your API call, with your role. See [permissions](/mcp/permissions) for the full picture, and leave your client's own approval prompts on.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="MCP overview" href="/mcp/overview">
+    What the server is, and how it stays in step with the product.
+  </Card>
+  <Card title="MCP setup" href="/mcp/setup">
+    Every client, including Cursor and generic stdio configuration.
+  </Card>
+  <Card title="MCP recipes" href="/mcp/recipes">
+    Prompts that build a working agent end to end.
+  </Card>
+  <Card title="Core concepts" href="/get-started/core-concepts">
+    The vocabulary your coding agent is using.
+  </Card>
+</CardGroup>

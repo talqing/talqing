@@ -1,0 +1,93 @@
+---
+title: "Permissions"
+description: "The server adds no permissions of its own, four things it deliberately cannot reach, and what to approve by hand."
+---
+
+The server holds one credential — your personal access token — and sends it on every call. There is no service account behind it and no elevated path through it. Every operation runs as you, in your workspace, with your role, and returns exactly what the same call would return from `curl`.
+
+## Your role, unchanged
+
+A token authenticates as the person who created it and inherits that person's **live** role. Membership is re-read on every request and never cached, so a demotion or a removal takes effect on the next call the server makes, mid-session included.
+
+| Role | Operations it can call | What it gets |
+| --- | --- | --- |
+| `VIEWER` | 69 of 158 | Every read: agents, tools, calls, transcripts, observability, the catalog. Writes come back as **403** — `your role is view-only — ask an organization admin for editor access` |
+| `EDITOR` | 154 of 158 | Everything above plus every write: building, publishing, dialling, batches. Secrets and provider keys come back as **403** — `only an organization admin can do this` |
+| `ADMIN` | 158 of 158 | Everything, including `create_secret`, `delete_secret`, `set_provider_key` and `delete_provider_key` |
+
+The server advertises all 158 tools whatever your role is — it does not know your role until the API answers. So a viewer's coding agent will try a write and be told no, clearly, rather than being unable to see that the operation exists. See [workspaces and roles](/get-started/workspaces-and-roles).
+
+## What it deliberately cannot reach
+
+Four areas are unreachable by construction, not by instruction. An agent cannot be talked into them.
+
+### Sign-in, workspaces, members, roles and personal access tokens
+
+These live on a separate control API, and this server holds no URL for it. It is not a filtered list that could be widened — the operations are not in the package.
+
+Two things follow. An AI builder cannot mint itself a credential, or revoke yours. And who is in the workspace, and at what role, stays where a human is deliberately in the loop: invites, role changes and removals are dashboard work. See [workspaces and roles](/get-started/workspaces-and-roles).
+
+### Buying credits
+
+Reading the balance would be harmless. Starting a payment spends the workspace's money, and neither belongs on a coding agent's surface, so nothing under billing is exposed.
+
+You do not lose the answer this would have given. A workspace that runs out of credits refuses new calls with **402**, and the call reads back with `close_reason: insufficient_credits` — which `get_call` and `list_calls` both report. An agent asked why a call failed finds that and has the whole answer. Top up in the dashboard; see [pricing and credits](/get-started/pricing-and-credits).
+
+### Streaming endpoints
+
+Server-sent event streams are not tool-shaped, so they are not tools. Every one has a polling equivalent that is — `list_conversation_items` for a conversation — so nothing on the API is unreachable from here. [Tools](/mcp/tools) has the mapping, and [streaming](/api-reference/streaming) documents the streams themselves for application code, which is where they belong.
+
+### Deleting a call or its recording
+
+Every other `delete_` operation removes configuration you could write again: an agent, a tool, a webhook, a secret. This one is different. Deleting a call destroys the record of something that happened — the transcript, the tool calls, the recording — and it can take a contact's memory of past calls with it, so the next time that person rings, the agent has forgotten them.
+
+That is a decision for a person looking at the call, not a step in a cleanup script. Delete a call or a recording from the dashboard; see [recordings](/observability/recordings) and [data retention](/platform/data-retention-and-privacy).
+
+## Operations that touch the real world
+
+Most of the surface is configuration, and a mistake in configuration is an edit away from being fixed. These are not:
+
+- **`create_outbound_call`** rings someone's phone. It is billable, it happens the moment it is called, and there is no cancel.
+- **`create_call_batch`** places up to 10 000 of those. Voicemail is answered and billed as a completed call unless the agent has `voicemail_detection` on; and every call runs the agent's current published version, so republishing mid-batch changes every call placed after that moment.
+- **`create_chat_message`** runs the agent for real: its tools call your endpoints, and the turn is billed. **`end_chat`** on a Telegram or WhatsApp chat ends a live conversation with a person, and whatever the agent's exit hook says is sent to them.
+- **`run_task`** and **`run_tool`** execute for real. The HTTP operations call your endpoints with your secrets, MCP servers spend your credits, the model spends your tokens. A task that books a slot or charges a card does so.
+- **`create_email_send`** mails real people from your own Resend account, under your agreement with them. The safeguard is a rate rather than a row count: `send_daily_cap` bounds how many leave per day, and the send can be paused or cancelled — cancelling hands every unsent row back as a draft.
+- **`publish_agent`** changes what live callers hear on the next call.
+- **`assign_phone_number`** and **`unassign_phone_number`** put an agent in front of real callers, or take it away from them.
+
+The server's own instructions tell the model to do none of this unasked: never publish an agent unless asked; never reach a real person unless asked for that specific contact; delete only on an explicit request naming the target. Those are rules a model follows, which is not the same as a rule the system enforces. **Leave your client's approval prompts on.**
+
+## Approve these by hand
+
+| Operation | What happens the moment it runs |
+| --- | --- |
+| `create_outbound_call` | A real phone rings. Billable, irreversible |
+| `create_call_batch` | Up to 10 000 billable dials, on a schedule you may not be watching |
+| `resume_call_batch` | Dialling restarts on whatever list the batch holds now |
+| `add_call_batch_recipients` | Appends to a batch, waking a completed one — those rows get called |
+| `add_whatsapp_batch_recipients` | On a sending or completed batch, those rows are messaged |
+| `add_email_batch_recipients` | May reopen a send of every row, which mails them unreviewed |
+| `create_email_send` | Mail leaves your Resend account to the named rows |
+| `create_chat_message` | The agent runs: its tools hit your endpoints, and the turn is billed |
+| `end_chat` | The chat ends, and what its exit hook says reaches the person on Telegram or WhatsApp |
+| `run_task` | Your endpoints, your secrets, your credits, your tokens |
+| `run_tool` | The draft tool's HTTP operations hit your endpoints for real |
+| `publish_agent` | Live callers get the new version on the next call |
+| `assign_phone_number` | An agent starts answering that number |
+| `unassign_phone_number` | Callers to that number stop being answered |
+| `backfill_call_analysis` | Re-analyses a range of past calls, charging a model call for each |
+| Any `delete_` operation | Permanent. Eleven of them, and there is no undo |
+| `create_secret`, `delete_secret`, `set_provider_key`, `delete_provider_key` | Workspace credentials. Deleting a provider key breaks every published agent that needs it |
+| `rotate_webhook_secret` | The old signing secret stops working immediately; your receiver must be updated |
+| `provision_telephony_account`, `import_phone_numbers`, `provision_phone_number` | Changes configuration on the carrier side, outside Talqing |
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Recipes" href="/mcp/recipes">
+    Prompts that build, publish and debug — with what to check afterwards.
+  </Card>
+  <Card title="Tools" href="/mcp/tools">
+    Every operation, its annotations, and how its arguments map to HTTP.
+  </Card>
+</CardGroup>

@@ -1,0 +1,194 @@
+---
+title: "Observability"
+description: "One endpoint behind the whole dashboard: volume, endings, response time and spend over a window of up to seven days."
+---
+
+The Observability page in the dashboard is a wall of time-bucketed charts —
+how many sessions ran, how they ended, how fast the agent answered, and what it
+all cost. Everything on it comes from a single endpoint, `GET /v1/observability`,
+which returns one complete snapshot of a date range.
+
+Everything is regional. The snapshot covers the sessions in the region whose
+base URL you called, and nothing else.
+
+## The request
+
+<ParamField query="start_date" type="string (date)">
+  First day in the range, `YYYY-MM-DD`. Defaults to `end_date` minus six days.
+</ParamField>
+
+<ParamField query="end_date" type="string (date)">
+  Last day in the range, inclusive. Defaults to today in `timezone`.
+</ParamField>
+
+<ParamField query="timezone" type="string" default="UTC">
+  An IANA zone name. It decides where a day starts and ends, and every `bucket`
+  in the response is local wall-clock time in this zone. An unknown name is a
+  `400`.
+</ParamField>
+
+<ParamField query="agent_id" type="string (uuid)">
+  Only sessions this agent ran. Every section honours it.
+</ParamField>
+
+<ParamField query="channel" type="string">
+  `voice`, `video` or `text`. Every section honours it — including `latency`,
+  which changes meaning. See the traps below.
+</ParamField>
+
+<CodeGroup>
+```bash cURL
+curl -G https://api.in.talqing.com/v1/observability \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "start_date=2026-08-24" \
+  --data-urlencode "end_date=2026-08-30" \
+  --data-urlencode "timezone=Asia/Kolkata"
+```
+
+```typescript TypeScript
+const report = await talqing.observability.get({
+  start_date: "2026-08-24",
+  end_date: "2026-08-30",
+  timezone: "Asia/Kolkata",
+});
+
+console.log(report.range.granularity); // "day"
+console.log(report.summary.total_sessions, report.summary.total_cost);
+```
+
+```python Python
+report = talqing.observability.get(
+    start_date="2026-08-24",
+    end_date="2026-08-30",
+    timezone="Asia/Kolkata",
+)
+
+print(report["range"]["granularity"])  # "day"
+print(report["summary"]["total_sessions"], report["summary"]["total_cost"])
+```
+</CodeGroup>
+
+## Seven days, and no more
+
+**A range wider than seven days is a `400`: `date range cannot exceed 7 days`.**
+
+That is a product choice, not a performance ceiling — the queries carry a month
+comfortably. Seven days is the window in which a change you made is still the
+change you are looking at. To compare weeks, ask for each week separately.
+
+`start_date` after `end_date` is also a `400`.
+
+## Granularity is derived, never requested
+
+There is no `granularity` parameter. The rule is fixed:
+
+| Range | Buckets |
+| --- | --- |
+| `start_date == end_date` | Hourly — **all 24 hours**, including the ones today has not reached yet |
+| Anything wider | Daily, one bucket per day |
+
+`range.granularity` is `"hour"` or `"day"` and tells you which, so you can label
+an axis without re-deriving the rule. A single day always returns 24 buckets
+because a chart that stops at the current hour reads as a day that ended early;
+the hours ahead are zeroes, not gaps.
+
+Every series in the response is zero-filled across every bucket in the range. A
+stacked bar chart with a missing bucket does not draw a gap — it draws the wrong
+shape.
+
+## What comes back
+
+| Section | What it holds |
+| --- | --- |
+| `range` | The resolved `start_date`, `end_date`, `timezone` and `granularity`. Read these rather than assuming your defaults were used. |
+| `summary` | Range totals: session counts by status, `completion_rate`, runtime, the three cost figures, priced/pending/unpriceable counts, average response time, and `by_channel`. |
+| `timeline` | One row per bucket with every single-series figure the page charts over time: sessions, completed, incomplete, the three cost figures, talk time, recorded, analysed and transferred counts, and `cache_hit_ratio`. |
+| `volume` | The same buckets cut eight ways. See below. |
+| `endings` | Every distinct `close_reason` in the range with its bucket, its session count and how many of those failed. Ranked bucket-first. |
+| `latency` | Response time per stage, the per-bucket series, and a distribution across sessions. |
+| `cost` | Spend split by kind, provider and model, plus the token cache split and any unpriceable incidents. |
+| `agents` | One row per agent and channel: sessions, `completion_rate`, `success_rate`, average duration, total and average cost, average response time. |
+
+### The eight breakdowns in `volume`
+
+Each is a `{series, other_count}` object, and each series carries a stable `key`,
+a `label`, a `total` and one point per bucket.
+
+| Field | Cut by |
+| --- | --- |
+| `agent_data` | Agent. The name is the one frozen on the session, so an agent renamed mid-range keeps what it was called that day. |
+| `phone_number_data` | Phone number, labelled with the DID rather than its id. |
+| `type_data` | `SIP_INBOUND`, `SIP_OUTBOUND`, `WHATSAPP_INBOUND`, `STREAM`, `WEB`, `TEXT`. |
+| `status_data` | `completed`, `failed`, `canceled`, `running`, `queued`. |
+| `close_reason_data` | The close-reason **bucket**, not the raw string — twenty SIP failure strings on one chart is a chart nobody reads. The raw strings are in `endings`. See [close reasons](/observability/close-reasons). |
+| `recording_data` | `stored`, `pending`, `failed`, `consent_withdrawn`, `deleted`, `none`. |
+| `analysis_data` | `completed`, `failed`, `skipped`, `pending`, `none`. |
+| `transfer_data` | `connected`, `failed`. |
+
+**Every breakdown is capped at eight series.** The ninth-busiest and everything
+below it are summed into one series keyed `__other__` and labelled `Other`, and
+`other_count` says how many distinct values went into it — `0` when nothing was
+dropped. A capped chart that did not say so would read as a complete one.
+
+<Warning>
+**Two things here will give you a wrong number if you skip them.**
+
+**`latency.basis` differs by channel, and the two must never be averaged
+together.** It is `per_turn` for voice and video — a sample-weighted mean over
+every measured turn — and `per_call` for text, which reports only
+`llm_node_ttft` (the model's time to first token) because LiveKit measures
+end-to-end latency from speech, which a text session does not have. With no
+`channel` filter, `latency` defaults to voice and video only; `latency.channels`
+says which channels it covered.
+
+**Every rate is over a subset, not over `total_sessions`.** `success_rate` is
+over `judged_sessions` — the calls post-call analysis actually judged. The cost
+figures are over `priced_sessions`. Latency is over `measured_sessions`. Divide
+by `total_sessions` yourself and you will report a number nothing in the product
+means.
+</Warning>
+
+## Zero traffic is a fact, not a gap
+
+`summary.by_channel` always lists all three channels, in the order `voice`,
+`video`, `text`, whether or not any of them ran. A channel at zero and a channel
+missing from the response are different facts, and only one of them is a
+problem — so a flat line means no traffic, never a broken channel.
+
+The same applies to `pending_sessions` and `unpriceable_sessions` in `summary`.
+They are separate on purpose: a call still being priced resolves itself, while a
+call billing could not price is an incident with a message attached, in
+`cost.unpriceable_reasons`. See [costs](/observability/costs).
+
+## What is not here
+
+**Agent task runs are excluded entirely.** A task is an agent nobody talks to,
+it writes no session row, and none of it reaches this endpoint — not its runs,
+not its spend. Task spend appears on the task's own run history, and, for a task
+drafting an email campaign, on that batch's page.
+
+There is also no per-turn drilldown, no
+webhook delivery metric and no tool-call volume. For a single call, open the
+call — [calls](/observability/calls) carries all of that at full resolution.
+
+## In the dashboard
+
+**Observability** offers three presets — Today, Yesterday and 7 days — plus a
+date picker whose bounds move together, so you cannot pick a range the API will
+reject. The agent and channel filters map to the two query parameters. Picking
+a single day switches every chart to hourly without you asking.
+
+<CardGroup cols={2}>
+  <Card title="Calls" href="/observability/calls">
+    One call at full resolution: transcript, tool calls, latency stages, cost.
+  </Card>
+  <Card title="Costs" href="/observability/costs">
+    Provider spend versus the platform fee, and how to read either.
+  </Card>
+  <Card title="Close reasons" href="/observability/close-reasons">
+    Every reason a call can end, and what to do about each.
+  </Card>
+  <Card title="Debugging agents" href="/observability/debugging-agents">
+    Symptom-first playbook for when an agent misbehaves.
+  </Card>
+</CardGroup>

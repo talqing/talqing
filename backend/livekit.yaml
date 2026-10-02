@@ -1,0 +1,20 @@
+# LiveKit Server — local dev config (self-hosted, no Cloud).
+# Browser connects to ws://localhost:7880; media falls back to TCP:7881 when
+# UDP/ICE can't traverse the docker bridge on macOS (reliable for local dev).
+# Redis is required for livekit-sip (shared control plane + SIP state).
+port: 7880
+bind_addresses:
+  - "0.0.0.0"
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50019
+  use_external_ip: false
+redis:
+  address: redis:6379
+keys:
+  devkey: 0afb5b0317f24772c630e7d955297af7ff5167b45fbc5792  # gitleaks:allow
+# No `webhook:` section: self-hosted LiveKit only emits webhooks when that
+# section is configured. Talqing lifecycle webhooks are emitted by workers.
+logging:
+  level: info

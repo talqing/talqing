@@ -1,0 +1,160 @@
+---
+title: "Telephony troubleshooting"
+description: "Symptom-first fixes: numbers that are not live, calls that do not arrive, and calls that end badly."
+---
+
+Find the symptom, read the fix. Where a symptom needs a decision rather than a
+lookup, the last section says which field to read first.
+
+## Where to look, in order
+
+Work outward from configuration to the individual call. Three fields answer
+three different questions, and reading them in the wrong order wastes time.
+
+| Order | Field | Answers |
+| --- | --- | --- |
+| 1 | `readiness` on the phone number | Is this number configured to do the thing at all? A number that is not `live` cannot answer, whatever else is true. |
+| 2 | `close_reason` on the call | Did a call happen, and how did it end? This names the owner of the problem — the caller, their carrier, your configuration, or us. |
+| 3 | The call detail (`GET /v1/calls/{session_id}`) | Why. The transcript with every tool call and its output, per-stage latency, `error`, and the recording. |
+
+Two more when they apply: `status_message` on a phone number carries the last
+thing that went wrong with it, and `failure_reason` on a batch says why it is
+not dialling.
+
+## The number is not `live`
+
+| `readiness` | Cause | Fix |
+| --- | --- | --- |
+| `needs_agent` | Nothing is assigned to answer. | Assign a published `voice` agent. A `video` or `text` agent is refused. |
+| `needs_carrier_setup` | Inbound is blocked because carrier-console work is outstanding. On Exotel, the App Bazaar Flow. | Finish the step in the carrier's console, then `PATCH` the account with `console_setup_confirmed: true`. See [carrier accounts](/telephony/carrier-accounts). |
+| `setting_up` | Provisioning is in progress. | Wait, then re-read. If it stays here, provision it again. |
+| `error` | Provisioning failed. | Read `status_message`, fix the cause, then `POST .../provision`. |
+| `disabled` | Someone disabled it, or its carrier account was disabled. | Two calls: `PATCH` `status` to `pending`, then `POST .../provision`. It does not come back on its own. |
+| `live`, but still nothing | The number is fine; the problem is further in. | Go to the next section. |
+
+Assigning refused with `'<name>' is required and has no default`? The agent
+declares a variable an inbound call can never supply. Give it a default, make it
+optional, or leave the number unassigned. See
+[variables](/agents/variables).
+
+## Inbound calls are not arriving
+
+| Check | What it means |
+| --- | --- |
+| Is `readiness` `live`? | If not, the table above is the whole answer. |
+| Is there a call record at all? `GET /v1/calls?type=SIP_INBOUND` | A record with a `close_reason` means the call reached us and was refused — read the reason. **No record at all** means the call never reached us, which is a carrier-side problem. |
+| Does the workspace have credit? | A workspace out of credit stops answering. Every call ends `insufficient_credits` and the number still looks `live`. |
+| Is the caller withholding their number? | An anonymous caller is refused with `sip_caller_unidentified_failed`. Nothing on your side fixes this. |
+| Is the agent published? | An assigned agent with no published version ends every call `unpublished_agent_failed`. |
+| Exotel only: is every number attached to the Flow? | A number still showing "Install an App" in ExoPhones is not connected, even though the account is confirmed. |
+| Did you disable and re-enable the carrier account? | Re-enabling the account does not restore per-number routing. Provision each number again. |
+
+<Warning>
+No call record and a `live` number means the carrier is not delivering the call
+to us. Check the number is still active on your carrier account and still
+pointed at Talqing in the carrier's console — disabling a number here unmaps it
+at the carrier on a best-effort basis, and re-importing does not always undo a
+change you made there by hand.
+</Warning>
+
+## Outbound calls fail at setup
+
+These are refusals before anything is dialled, so nothing is billed.
+
+| Error | Cause | Fix |
+| --- | --- | --- |
+| `this number is not enabled for outbound` | `can_outbound` is false. | `PATCH` the number with `{"can_outbound": true}`. |
+| `phone number must be active (provisioned) for outbound calls` | The number is not `active`. | Provision it. |
+| `telephony account is not ready for outbound; provision it first` | The carrier account is `connected`, `error` or `disabled`. | Provision the account, or fix its credentials first. |
+| `to: … is not a valid number to dial from …` | `to` did not normalize against your dialling number's region. | Send full international format. A bare national number is read relative to the number you dial **from**. |
+| `this endpoint runs voice agents; '<name>' resolves to a <channel> agent` | You named a `video` or `text` agent. | Only `voice` agents can be on a phone call. |
+| `publish the agent before calling` | The agent has no published version. | Publish it. |
+| `'<name>' is required and has no default` | The agent declares a variable you did not supply. | Send it in `vars`, or give it a default. |
+| `402` out of credits | The workspace balance is empty. | Top up. Nothing was dialled. |
+| `502 failed to dispatch outbound call` | The call could not be started. The session is recorded as failed with `sip_dispatch_failed`. | Retry. Repeated failures are a platform problem — contact support with a session id. |
+
+## A call connects and drops immediately
+
+| `close_reason` | What happened | What to do |
+| --- | --- | --- |
+| `insufficient_credits` | The workspace is out of credit, so the call was never answered. | Top up. |
+| `agent_start_failed` | The agent compiled and then died before its first word — most often two attached tools presenting the same name to the model. `error` on the call says which. | Fix the agent and republish. Run [validation](/agents/validation) first. |
+| `prepare_failed` | The agent could not start at all. | Read `error`. Usually a missing provider key or a model the catalog does not have. |
+| `avatar_start_failed` | Video only: the avatar never joined, so the call was ended. | Check the avatar and the provider key. |
+| `sip_caller_unidentified_failed` | Inbound with no readable caller number. | Nothing. |
+| `conversation_bind_failed` | The call could not be attached to a conversation. | Ours. Contact support with the session id. |
+
+## No audio, or audio in one direction only
+
+The recording is the diagnostic. It is stereo — caller on the left, agent on the
+right — so a silent channel says which side never arrived.
+
+| Symptom | Likely cause |
+| --- | --- |
+| The caller's channel is silent, the agent's is not | Their audio never reached us. A carrier-side media problem, and usually visible as `sip_media_failure_failed` on the call. |
+| The agent's channel is silent | The agent never spoke. Read the transcript: it usually never got going, and `close_reason` names why. |
+| Both silent, and the call ended after roughly two minutes | A leg carrying no audio for 120 seconds is dropped by the carrier side. This is what a call parked in silence looks like. |
+| The caller heard silence, then the call ended, on inbound | The agent took too long to publish audio. Inbound callers wait 60 seconds for the agent to start; a slow first turn eats that. Check the per-stage latency on the call detail. |
+| `sip_media_failure_failed` mid-call | The audio path broke while the call was live. A carrier fault. |
+
+## Calls ending unexpectedly
+
+The full vocabulary is at [close reasons](/observability/close-reasons). The
+handful you will meet most:
+
+| `close_reason` | Reads as | Notes |
+| --- | --- | --- |
+| `participant_disconnected` | The caller hung up. | The most common ending on inbound. Normal. |
+| `user_initiated` | **The agent ended the call**, not the caller. | LiveKit names this after whoever ended the session, which here is only ever the `end_call` operation. Do not read it as the customer hanging up. |
+| `end_call` | The agent ended the conversation. | The deliberate goodbye. |
+| `silence_timeout` | The caller stayed silent, so the agent hung up. | On outbound, often a machine that stops talking and nobody replies — turn on [voicemail detection](/agents/voicemail). Tuned by [`silence`](/agents/silence-and-call-length). |
+| `voicemail` | The call reached voicemail, so the agent hung up. | The agent's [voicemail detection](/agents/voicemail) heard a machine. Billed; retried by a batch. |
+| `max_duration` | The call reached its time limit. | The agent's `max_duration_seconds`, 30 minutes by default. |
+| `sip_busy_failed` / `sip_no_answer_failed` | The line was busy / the phone rang and nobody picked up. | Outbound, and normal on a list. Retried by a batch. |
+| `sip_unallocated_failed` | That number is not in service. | Bad data. A batch never retries this. |
+| `stale` | The call was ended after the process running it stopped reporting. | Ours. The call is not priced and emits no completion event. |
+
+Anything ending in `_failed` waives Talqing's platform fee. The provider spend
+already incurred on your own keys is still yours.
+
+## A batch stopped itself
+
+| `status` / `failure_reason` | What happened | Fix |
+| --- | --- | --- |
+| `failed`, with a reason | Ten consecutive setup-style failures tripped the circuit breaker. | Read `failure_reason` — it names the last thing that went wrong. Fix it and create a new batch; a failed batch cannot be resumed. |
+| `running`, `next_dial_at` null, `failure_reason` about credits | The workspace ran out of credit. The batch is not failed and no attempt was spent. | Top up. It resumes on its own. |
+| `running`, `next_dial_at` in the future | The calling window is closed, `start_at` has not arrived, or today's `dial_daily_cap` is spent; `next_dial_reason` says which. | Nothing. This is the clock, not a fault. |
+| `failure_reason` naming a person | The batch's creator left the workspace or was demoted below the editor role. Every pass re-authorizes as them. | Re-create the batch under an account that will still be there. |
+| `failure_reason` about the agent or number | The agent was unpublished, or the number or account stopped being usable, mid-campaign. | Republish or re-provision, then create a new batch for the remaining rows — re-uploading the same list into a new batch is safe, and a completed recipient is never called twice. |
+
+The breaker never counts busy signals or unanswered phones. If a batch stopped,
+something systematic broke.
+
+## Credentials expired or rotated
+
+| Symptom | Fix |
+| --- | --- |
+| The carrier account flips to `error` with the carrier's own message. | `PATCH` the account with the new `credentials` — it merges, so you can rotate one key without re-sending the others — then `POST .../provision`. |
+| `GET .../remote-numbers` fails. | The same. That endpoint reads the carrier live, so it is the quickest proof a credential still works. |
+| Import fails with `could not list numbers from <carrier>`. | The same. |
+| A running batch stops after ten failures in a row. | Fix the credential first, then start a new batch for the remaining rows. |
+| Deleting the account fails with a `502`. | The carrier refused the teardown, usually because the credential is dead. Restore a working credential, then delete. |
+
+Existing numbers keep working while a credential is being replaced only if the
+carrier still accepts the old one. Rotate during a quiet hour.
+
+## Still stuck
+
+Have these ready before contacting `hello@talqing.com`: the region base URL, the
+phone number in E.164, the `session_id` of one bad call, and its `close_reason`.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Close reasons" href="/observability/close-reasons">
+    Every reason a call can end and what to do about it.
+  </Card>
+  <Card title="Debugging agents" href="/observability/debugging-agents">
+    The agent said something odd, was slow, or hung up.
+  </Card>
+</CardGroup>

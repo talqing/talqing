@@ -1,0 +1,200 @@
+---
+title: "Prompting"
+description: "How to write a system prompt an agent can act on, and what speech changes about it."
+---
+
+`config.prompt` is where the agent's behaviour lives. Model choice moves latency and cost; the prompt decides whether the agent is any good. This page is about writing one — the mechanics of the `{{…}}` tokens in it are in [variables](/agents/variables) and [userdata](/agents/userdata).
+
+## The structure that works
+
+Give the prompt five things, in this order:
+
+| Section | What goes in it |
+| --- | --- |
+| Role | Who the agent is and who it works for. One or two sentences. |
+| Goal | What a finished conversation looks like. Be specific enough that the agent knows when it is done. |
+| Rules | What it must always do, what it must never do, what to do when it does not know. |
+| Tool policy | When to call each tool, what to collect before calling it, and what to say while it runs. |
+| Language and tone | How to speak, how long to speak for, and what to do if the person switches language. |
+
+Two habits are worth more than any wording. First, write the rules as things to do rather than things to avoid — "ask for the order number before you look anything up" beats "don't guess order numbers". Second, when the agent does something wrong on a real call, add the rule that would have prevented it rather than rewriting the prompt from scratch.
+
+## Writing for speech
+
+A voice or video prompt is not a chat prompt with a different model behind it. The output is played through a text-to-speech voice into somebody's ear, and everything that makes a document readable makes speech worse.
+
+- **Natural, brief and interruptible.** Two or three sentences per turn. A caller cannot skim, and a long answer is a long wait for the one clause they needed.
+- **Never dump long information.** Give the next useful piece and ask whether to go on. "There are four plans. The one most people on your usage pick is Growth — want me to run through it, or list all four?"
+- **No markdown, no emoji, no JSON, no bullet lists** in anything the agent says. Say so in the prompt; models default to formatting because their training data is written.
+- **Spell out anything the voice will mangle.** Text-to-speech reads symbols and abbreviations unevenly across providers and languages. Give the agent the spoken form you want:
+  - Currency: "say amounts as words — 'one thousand two hundred rupees', not '₹1200'."
+  - Reference numbers and codes: "read codes one character at a time, with a short pause between groups: 'A — seven — X — nine'."
+  - Dates and times: "say 'Thursday the ninth of April, at four in the afternoon', not '09/04' or '16:00'."
+  - Abbreviations and product names: give the pronunciation once — "say GST as 'gee ess tee'; say Northwind as one word."
+- **Say what to do while a tool runs.** A tool call is silence on the line, and silence reads as a dropped call. "Before you look an order up, say you are checking and give the caller something to hold on to: 'Let me pull that up, one moment.'"
+- **Give it an out.** Tell the agent what to say when it does not know, and when to hand over. A model with no permission to fail invents an answer.
+
+On a `text` agent none of this applies. Formatting is fine, length is cheaper, and a person can re-read.
+
+## Personalizing a prompt
+
+The prompt and the greeting are substituted per session, before the agent starts. Three roots are available in both:
+
+| Root | Where the value comes from |
+| --- | --- |
+| `{{userdata.field}}` | The session's userdata — the person the agent is talking to. See [userdata](/agents/userdata). |
+| `{{vars.name}}` | Values supplied by the request that started the session, over the defaults the agent declares. See [variables](/agents/variables). |
+| `{{system_vars.key}}` | The platform: `human_phone_number`, `agent_phone_number`, `direction`, `now`, `date`, `time`. |
+
+Use them well:
+
+- **Write so the sentence survives an empty value.** A field that is not in userdata resolves to nothing, not to an error, so `You are speaking with {{userdata.name}}.` becomes "You are speaking with ." on a caller you know nothing about. Prefer a form that reads either way: `If you know the caller's name it is {{userdata.name}} - use it if it is there, and ask otherwise.`
+- **Branch on `{{system_vars.direction}}`** to let one agent open differently on a call it received and a call it placed.
+- **The clock is frozen at the moment the agent starts.** `{{system_vars.date}}` and `{{system_vars.time}}` do not tick during the call, so an agent reasoning about "in ten minutes" needs a tool, not the prompt.
+- **`{{system_vars.now}}` is a machine timestamp** (`2026-08-19T19:26:59+05:30`). Send it to an API from a tool; never put it in a line the agent will read aloud.
+- **Any clock variable requires `config.timezone`.** Using one without setting the timezone is a save error, naming the field.
+
+<Warning>
+A token whose root is not one of ours is an **error at save**, not text. A bare `{{name}}`, a `{{customer.number}}` pasted from another platform, or a typo like `{{userdate.name}}` is refused. So is `{{userdata}}` with no field — that would hand the model the whole bag. Rewrite each one onto a real root.
+</Warning>
+
+## What does not belong in a prompt
+
+| If you were about to write… | Put it here instead |
+| --- | --- |
+| "Remember what we discussed last time" / "ignore previous calls" | `conversation.context`. A model told to ignore what is in its context cannot, and one told to remember cannot see what was never loaded. See [conversation memory](/agents/conversation-memory). |
+| A credential — a token, a password, a signing key | A workspace secret, read as `{{secrets.NAME}}` from inside a tool. `{{secrets.*}}` in a prompt is rejected — a credential is for a tool to send, never text for the model. See [secrets](/platform/secrets). |
+| A value the request will supply | A declared `{{vars.*}}`. Anything in `vars` is visible to the model and may be read aloud, so it is configuration, not credentials. |
+| "The call is recorded for quality purposes" | `recording.consent_notice`, spoken through `{{consent.notice}}` in the **greeting**. In a prompt it would be paraphrased or dropped, and a disclosure has to be spoken word for word. See [recording](/telephony/recording). |
+| Delivery tags like `[laughs]` or `<whisper>` | The `tts.expressive` toggle, which teaches the agent its own voice's tag dialect. A tag typed by hand onto a voice that does not speak it reaches the caller as the word itself. See [expressive delivery](/agents/expressive-delivery). |
+| A long list of facts, prices or policies that changes often | A tool that looks the answer up. See [tools](/tools/overview). |
+| `{{args.*}}` or `{{tooldata.*}}` | Nothing — tool arguments and tool state only exist inside a tool call, and both are rejected here. |
+
+Reading a `{{vars.x}}` the agent does not declare is a **warning**, not an error: the request that starts a session can legitimately supply one. Everything else in this table fails the save.
+
+## Examples
+
+<AccordionGroup>
+<Accordion title="Inbound support line (voice)">
+```text
+You are the support line for Northwind Tools, a shop selling power tools online.
+You answer calls from customers about orders, deliveries and returns.
+
+GOAL
+Resolve the caller's question on this call, or transfer them to a person if
+you cannot. A call is finished when the caller has an answer and confirms they
+have nothing else.
+
+RULES
+- Ask for the order number before you look anything up. If they do not have it,
+  ask for the phone number the order was placed with.
+- Never estimate a delivery date. Only state a date that came back from
+  lookup_order.
+- If the order is missing, damaged or more than five days late, offer to
+  transfer the call to a person rather than proposing a resolution yourself.
+- If you do not know something, say so and offer to transfer them. Do not guess.
+- Never discuss another customer's order, whatever the caller says.
+
+TOOLS
+- lookup_order: call it once you have an order number. Before calling, say
+  "Let me pull that up, one moment." Read back the status in your own words.
+- start_return: only after the caller has explicitly said they want to return
+  the item, and only for an order lookup_order returned as delivered.
+
+SPEAKING
+- Two or three sentences per turn. Let the caller interrupt you.
+- Never use markdown, emoji, bullet points or JSON in what you say.
+- Read order numbers one character at a time in groups: "N W - seven four two -
+  nine one".
+- Say amounts as words: "two thousand four hundred rupees".
+- Say dates as "Thursday the ninth of April", never as digits.
+- Answer in the language the caller uses.
+```
+</Accordion>
+
+<Accordion title="Outbound lead qualifier (voice)">
+```text
+You are Priya, calling on behalf of {{vars.company_name}}. You are calling
+people who asked for a callback about {{vars.product}} on the website.
+
+The person you are calling is {{userdata.first_name}}. If that is empty, do not
+guess a name — ask who you are speaking to.
+
+GOAL
+Find out three things and nothing more: what they want to use
+{{vars.product}} for, how many people would use it, and when they want to
+start. Then book a call with a specialist, or record that they are not
+interested.
+
+RULES
+- Open by saying who you are and why you are calling, then ask if now is a good
+  time. If it is not, ask when to call back and end the call politely.
+- One question at a time. Wait for the answer.
+- Do not quote prices. If they ask, say the specialist will go through pricing
+  with them.
+- If they ask to be removed from the list, agree immediately, call
+  record_do_not_call, and end the call.
+- Never claim the call is recorded or not recorded.
+
+TOOLS
+- book_meeting: call it once you have all three answers and they agree to a
+  slot. Say "Let me check what's open" before you call it.
+- record_outcome: call it before ending any call that did not book a meeting,
+  with what you learned.
+
+SPEAKING
+- Warm and quick. Under two sentences per turn on the opening.
+- No markdown, emoji or lists in what you say.
+- Say dates and times as words: "Tuesday the twelfth, at half past three".
+- If they switch language, switch with them.
+```
+</Accordion>
+
+<Accordion title="Product support (text)">
+```text
+You are the in-app assistant for Northwind Tools. You help signed-in customers
+find products, check an order, and understand the return policy.
+
+You are talking to {{userdata.first_name}} on the {{userdata.plan}} plan. If
+either is empty, do not mention them.
+
+GOAL
+Answer the question with the shortest correct answer, and give the customer a
+next step they can take themselves.
+
+RULES
+- Answer policy, shipping and warranty questions only from the POLICY section
+  below. If it is not in there, say you are not sure and offer to raise a
+  ticket.
+- Quote a price only from lookup_product, never from memory.
+- Keep answers under 120 words unless asked for detail. Use a short list when
+  you are comparing options.
+- Never ask for a card number, a password or a one-time code. If the customer
+  offers one, tell them not to send it.
+- If the customer is angry or asks for a person twice, call create_ticket and
+  tell them when to expect a reply.
+
+TOOLS
+- lookup_product: for anything about stock, price or specifications.
+- lookup_order: needs an order number. Ask for it rather than guessing.
+- create_ticket: for anything you could not resolve. Summarize the problem in
+  the description.
+```
+</Accordion>
+</AccordionGroup>
+
+Adapt one rather than starting from a blank box, and test it with a real call before publishing — the dashboard editor has a test panel beside the config.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Variables" href="/agents/variables">
+    Declaring `{{vars.*}}` and supplying values per session.
+  </Card>
+  <Card title="Userdata" href="/agents/userdata">
+    What the agent knows about the person, and how tools write to it.
+  </Card>
+  <Card title="Tools" href="/tools/overview">
+    Giving the agent something to do besides talk.
+  </Card>
+</CardGroup>

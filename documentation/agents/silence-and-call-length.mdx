@@ -1,0 +1,72 @@
+---
+title: "Silence and call length"
+description: "Checking in on a caller who goes quiet, hanging up when they never answer, and the per-agent limit on how long a call may last."
+---
+
+Two settings end a call that nobody hung up: `config.silence` for a caller who
+goes quiet and stays quiet, and `config.max_duration_seconds` for a call that has
+run too long. Without them, an off-hook handset, hold music or an IVR talking to
+your agent would keep billing your models until the platform's three-hour cap.
+
+Voice and video only. A [chat](/channels/text-conversations) has no inactivity
+timeout and no length limit — it stays open until something ends it — so a text
+agent ignores both. They are kept, so switching back to voice restores them.
+
+Both are read from **the agent that answered the call**, like `max_steps`. A
+[handoff](/tools/handoff-operation) does not change them.
+
+## Silence
+
+After `silence.timeout` seconds of quiet — counted from when the agent stops
+talking — the agent checks whether the caller is still there. It does this **in
+its own words**, written by the agent's model, so the check-in comes out in the
+language and tone of the conversation rather than as a fixed English line.
+
+It waits `timeout` again after each check-in. Once `max_check_ins` have gone
+unanswered, the agent says a short goodbye and hangs up, and the call closes with
+`close_reason: silence_timeout`. Anything the caller says resets the count.
+
+`max_check_ins: 0` skips the check-in: the agent says goodbye and hangs up at the
+first silence.
+
+Each check-in is recorded as a `caller.check_in` event on the call, with the
+`attempt` number and the total (`of`), so a call detail page shows why the agent
+spoke up. The check-in itself is in the transcript like any other agent line.
+
+Nothing is checked while a [transfer](/telephony/transfers) holds the call — the
+caller is on hold music then, and the quiet is ours, not theirs.
+
+## Call length
+
+`max_duration_seconds` is the longest a call may last, counted from when the
+agent starts speaking. At the limit the agent says a brief goodbye, written by its
+model, and hangs up. The call closes with `close_reason: max_duration`.
+
+`null` means the platform's own cap of three hours, which applies to every voice
+and video call — phone, web and media stream alike. A limit that lands while a
+transfer is still dialling waits for the transfer to finish.
+
+## Reference
+
+| Field | Type | Default | Range |
+| --- | --- | --- | --- |
+| `silence.enabled` | boolean | `true` | |
+| `silence.timeout` | number (seconds) | 10 | 5–600 |
+| `silence.max_check_ins` | integer | 2 | 0–5 |
+| `max_duration_seconds` | integer or null | 1800 | 30–10800; `null` = 10800 |
+
+<Tip>
+If callers legitimately go quiet — reading out a long number, or holding for
+their bank — raise `silence.timeout` rather than turning silence handling off.
+</Tip>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Turn handling" href="/agents/turn-handling">
+    Interruptions, preemptive generation and the endpointing windows.
+  </Card>
+  <Card title="Close reasons" href="/observability/close-reasons">
+    Every way a call can end, and who owns each one.
+  </Card>
+</CardGroup>

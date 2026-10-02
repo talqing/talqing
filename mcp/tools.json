@@ -1,0 +1,2237 @@
+{
+  "api_prefix": "/v1",
+  "api_version": "1.0.0",
+  "tools": [
+    {
+      "description": "List the workspace's agents, newest edit first.",
+      "method": "GET",
+      "name": "list_agents",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_agents').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/agents",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Create an agent from a complete config.",
+      "method": "POST",
+      "name": "create_agent",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_agent').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/agents",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Fetch one agent's draft config, published version and publish history.",
+      "method": "GET",
+      "name": "get_agent",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_agent').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/agents/{agent_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Update the agent's draft config. Send only the fields to change.",
+      "method": "PATCH",
+      "name": "update_agent",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('update_agent').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/agents/{agent_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Delete an agent and its versions permanently; 409 while anything still points at it.",
+      "method": "DELETE",
+      "name": "delete_agent",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('delete_agent').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/agents/{agent_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Run publish-grade validation on the draft without publishing it.",
+      "method": "POST",
+      "name": "validate_agent",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('validate_agent').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/agents/{agent_id}/validate",
+      "read_only": false,
+      "role": "read"
+    },
+    {
+      "description": "Freeze the current draft as a new immutable version and make it live.",
+      "method": "POST",
+      "name": "publish_agent",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('publish_agent').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/agents/{agent_id}/publish",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Fetch what one published version of an agent actually contains.",
+      "method": "GET",
+      "name": "get_agent_version",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_agent_version').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/agents/{agent_id}/versions/{version}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Put an earlier published version of an agent back into production.",
+      "method": "POST",
+      "name": "rollback_agent_version",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('rollback_agent_version').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/agents/{agent_id}/versions/{version}/rollback",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "List the workspace's tools with their draft operation trees.",
+      "method": "GET",
+      "name": "list_tools",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_tools').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tools",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Create a draft tool.",
+      "method": "POST",
+      "name": "create_tool",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_tool').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tools",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Fetch one tool: behaviour flags, argument schema, draft operation tree and the list of published versions.",
+      "method": "GET",
+      "name": "get_tool",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_tool').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tools/{tool_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Update a draft tool. Omitted fields are left unchanged.",
+      "method": "PATCH",
+      "name": "patch_tool",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('patch_tool').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tools/{tool_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Delete a tool and its published versions permanently.",
+      "method": "DELETE",
+      "name": "delete_tool",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('delete_tool').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tools/{tool_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Check the draft operation tree without publishing it.",
+      "method": "POST",
+      "name": "validate_tool",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('validate_tool').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tools/{tool_id}/validate",
+      "read_only": false,
+      "role": "read"
+    },
+    {
+      "description": "Run the draft tool once with arguments you supply and see every step.",
+      "method": "POST",
+      "name": "run_tool",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('run_tool').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tools/{tool_id}/run",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Validate the draft and freeze it as a new immutable tool version.",
+      "method": "POST",
+      "name": "publish_tool",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('publish_tool').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tools/{tool_id}/publish",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Fetch what one published version of a tool actually contains.",
+      "method": "GET",
+      "name": "get_tool_version",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_tool_version').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tools/{tool_id}/versions/{version}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Put an earlier published version of a tool back into production.",
+      "method": "POST",
+      "name": "rollback_tool_version",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('rollback_tool_version').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tools/{tool_id}/versions/{version}/rollback",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "List the workspace's agent tasks.",
+      "method": "GET",
+      "name": "list_tasks",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_tasks').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tasks",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Create an agent task: an agent nobody talks to, which takes named inputs and returns a typed result.",
+      "method": "POST",
+      "name": "create_task",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_task').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tasks",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Fetch one task's draft config, published version, history and last run.",
+      "method": "GET",
+      "name": "get_task",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_task').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tasks/{task_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Update the task's draft config. Send only the fields to change.",
+      "method": "PATCH",
+      "name": "update_task",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('update_task').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tasks/{task_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Delete a task and its published versions. Its runs survive, still named after it.",
+      "method": "DELETE",
+      "name": "delete_task",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('delete_task').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tasks/{task_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Run publish-grade validation on the draft without publishing it.",
+      "method": "POST",
+      "name": "validate_task",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('validate_task').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tasks/{task_id}/validate",
+      "read_only": false,
+      "role": "read"
+    },
+    {
+      "description": "Freeze the current draft as a new immutable version and make it live.",
+      "method": "POST",
+      "name": "publish_task",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('publish_task').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tasks/{task_id}/publish",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Fetch what one published version of a task actually contains.",
+      "method": "GET",
+      "name": "get_task_version",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_task_version').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tasks/{task_id}/versions/{version}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Put an earlier published version of a task back into production.",
+      "method": "POST",
+      "name": "rollback_task_version",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('rollback_task_version').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tasks/{task_id}/versions/{version}/rollback",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Run the task once with the variables you supply, and wait for the result.",
+      "method": "POST",
+      "name": "run_task",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('run_task').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tasks/{task_id}/runs",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "This task's runs, newest first, each with its output, trace and cost.",
+      "method": "GET",
+      "name": "list_task_runs",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_task_runs').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tasks/{task_id}/runs",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "One run in full: what it produced, every tool it called on the way, and what it cost.",
+      "method": "GET",
+      "name": "get_task_run",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_task_run').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/tasks/{task_id}/runs/{run_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "List the workspace's integrations with their provider, status and config.",
+      "method": "GET",
+      "name": "list_integrations",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_integrations').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/integrations",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "List the providers that can be integrated, and how to connect each one.",
+      "method": "GET",
+      "name": "integration_catalog",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('integration_catalog').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/integrations/catalog",
+      "read_only": true,
+      "role": "public"
+    },
+    {
+      "description": "Create a manual integration, fully configured.",
+      "method": "POST",
+      "name": "create_integration",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_integration').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/integrations",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Fetch one integration: provider, status, structured config, trigger capabilities and inbound webhook setup state.",
+      "method": "GET",
+      "name": "get_integration",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_integration').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/integrations/{integration_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Update an integration. Omitted fields are left unchanged.",
+      "method": "PATCH",
+      "name": "patch_integration",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('patch_integration').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/integrations/{integration_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Delete an integration and its triggers permanently.",
+      "method": "DELETE",
+      "name": "delete_integration",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('delete_integration').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/integrations/{integration_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Connect to the integration's MCP server and list every tool it offers.",
+      "method": "GET",
+      "name": "list_integration_mcp_tools",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_integration_mcp_tools').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/integrations/{integration_id}/mcp-tools",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "List the trigger deployments under an integration.",
+      "method": "GET",
+      "name": "list_integration_triggers",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_integration_triggers').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/integrations/{integration_id}/triggers",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Deploy an agent to an inbound provider event.",
+      "method": "POST",
+      "name": "create_integration_trigger",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_integration_trigger').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/integrations/{integration_id}/triggers",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Update a trigger: reassign the agent, change reply mode, enable or disable it.",
+      "method": "PATCH",
+      "name": "patch_integration_trigger",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('patch_integration_trigger').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/integrations/{integration_id}/triggers/{trigger_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Delete a trigger permanently. The agent stops receiving that event.",
+      "method": "DELETE",
+      "name": "delete_integration_trigger",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('delete_integration_trigger').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/integrations/{integration_id}/triggers/{trigger_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "List the workspace's FAQs by name, with how many questions each holds.",
+      "method": "GET",
+      "name": "list_faqs",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_faqs').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/faqs",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Create an FAQ, optionally with its first question/answer entries.",
+      "method": "POST",
+      "name": "create_faq",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_faq').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/faqs",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Get one FAQ with every entry, in the order they were added.",
+      "method": "GET",
+      "name": "get_faq",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_faq').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/faqs/{faq_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Rename an FAQ.",
+      "method": "PATCH",
+      "name": "update_faq",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('update_faq').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/faqs/{faq_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Delete an FAQ and its entries. Refused with 409 while an agent or task still attaches it.",
+      "method": "DELETE",
+      "name": "delete_faq",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('delete_faq').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/faqs/{faq_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Append question/answer entries to an FAQ, all or nothing. Live at once: agents using the FAQ read them from their next session.",
+      "method": "POST",
+      "name": "create_faq_entries",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_faq_entries').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/faqs/{faq_id}/entries",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Change one entry's question, answer or both. Live from the next session.",
+      "method": "PATCH",
+      "name": "update_faq_entry",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('update_faq_entry').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/faqs/{faq_id}/entries/{entry_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Delete one entry from an FAQ.",
+      "method": "DELETE",
+      "name": "delete_faq_entry",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('delete_faq_entry').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/faqs/{faq_id}/entries/{entry_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "List the telephony carriers an account can be connected to.",
+      "method": "GET",
+      "name": "list_telephony_providers",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_telephony_providers').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/providers",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "List the workspace's connected carrier accounts.",
+      "method": "GET",
+      "name": "list_telephony_accounts",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_telephony_accounts').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/accounts",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Connect a carrier account so the workspace can own phone numbers.",
+      "method": "POST",
+      "name": "create_telephony_account",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_telephony_account').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/accounts",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Read one carrier account, including what its setup still needs.",
+      "method": "GET",
+      "name": "get_telephony_account",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_telephony_account').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/accounts/{account_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Update a carrier account: rename it, replace credentials, or disable it.",
+      "method": "PATCH",
+      "name": "patch_telephony_account",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('patch_telephony_account').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/accounts/{account_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Disconnect a carrier account permanently.",
+      "method": "DELETE",
+      "name": "delete_telephony_account",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('delete_telephony_account').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/accounts/{account_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Build (or repair) the SIP trunk between Talqing and the carrier.",
+      "method": "POST",
+      "name": "provision_telephony_account",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('provision_telephony_account').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/accounts/{account_id}/provision",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "List the numbers this account owns at the carrier, ready to import.",
+      "method": "GET",
+      "name": "list_remote_numbers",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_remote_numbers').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/accounts/{account_id}/remote-numbers",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "List the workspace's phone numbers, optionally for one carrier account.",
+      "method": "GET",
+      "name": "list_phone_numbers",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_phone_numbers').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/phone-numbers",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Bring carrier-owned numbers into the workspace, provisioning each one.",
+      "method": "POST",
+      "name": "import_phone_numbers",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('import_phone_numbers').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/phone-numbers/import",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Read one phone number: its carrier, capabilities, agent and readiness.",
+      "method": "GET",
+      "name": "get_phone_number",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_phone_number').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/phone-numbers/{number_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Relabel a number, change what it may do, or take it out of service.",
+      "method": "PATCH",
+      "name": "patch_phone_number",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('patch_phone_number').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/phone-numbers/{number_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Wire a number up at the carrier and in LiveKit so it can carry calls.",
+      "method": "POST",
+      "name": "provision_phone_number",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('provision_phone_number').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/phone-numbers/{number_id}/provision",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Put an agent on a number so it answers incoming calls.",
+      "method": "POST",
+      "name": "assign_phone_number",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('assign_phone_number').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/phone-numbers/{number_id}/assign",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Take the agent off a number, so incoming calls are no longer answered.",
+      "method": "POST",
+      "name": "unassign_phone_number",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('unassign_phone_number').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/telephony/phone-numbers/{number_id}/unassign",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "List WebSocket media-stream connections a partner can dial.",
+      "method": "GET",
+      "name": "list_stream_connections",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_stream_connections').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/streams",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Create a connection a streaming partner can dial.",
+      "method": "POST",
+      "name": "create_stream_connection",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_stream_connection').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/streams",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "One stream connection, with the URL to hand the partner.",
+      "method": "GET",
+      "name": "get_stream_connection",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_stream_connection').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/streams/{connection_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Rename a connection, point it at another agent, or disable it.",
+      "method": "PATCH",
+      "name": "patch_stream_connection",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('patch_stream_connection').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/streams/{connection_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Delete a stream connection. Calls it already carried are kept.",
+      "method": "DELETE",
+      "name": "delete_stream_connection",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('delete_stream_connection').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/streams/{connection_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Dial a real phone number and have a published agent take the call.",
+      "method": "POST",
+      "name": "create_outbound_call",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_outbound_call').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/outbound",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Call a list of people with a published agent, now or on a schedule.",
+      "method": "POST",
+      "name": "create_call_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_call_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/batches",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "List outbound calling batches, newest first, with live progress.",
+      "method": "GET",
+      "name": "list_call_batches",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_call_batches').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/batches",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "One batch: its policy, its progress, and why it is or is not dialling.",
+      "method": "GET",
+      "name": "get_call_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_call_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/batches/{batch_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Change a batch's policy while it runs or after it completes. The next pass reads it.",
+      "method": "PATCH",
+      "name": "patch_call_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('patch_call_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/batches/{batch_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "One batch's recipients and how each call went, in the uploaded order.",
+      "method": "GET",
+      "name": "list_call_batch_recipients",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_call_batch_recipients').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/batches/{batch_id}/recipients",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Append people to a batch, including one that has finished \u2014 it resumes.",
+      "method": "POST",
+      "name": "add_call_batch_recipients",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('add_call_batch_recipients').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/batches/{batch_id}/recipients",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Stop placing new calls; calls in progress run to their end.",
+      "method": "POST",
+      "name": "pause_call_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('pause_call_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/batches/{batch_id}/pause",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Undo a pause and carry on from where the batch stopped.",
+      "method": "POST",
+      "name": "resume_call_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('resume_call_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/batches/{batch_id}/resume",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Stop a batch for good. There is no undo.",
+      "method": "POST",
+      "name": "cancel_call_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('cancel_call_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/batches/{batch_id}/cancel",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "The domains a connected email account may send from, right now.",
+      "method": "GET",
+      "name": "list_email_senders",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_email_senders').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/senders",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Create an email batch: a list, an agent task that drafts each row, and a connected Resend account to send from.",
+      "method": "POST",
+      "name": "create_email_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_email_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "List email batches, newest first.",
+      "method": "GET",
+      "name": "list_email_batches",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_email_batches').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "One batch: its policy, its per-status counts and what drafting has cost.",
+      "method": "GET",
+      "name": "get_email_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_email_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Edit a batch's policy. The next drafting pass reads the new row.",
+      "method": "PATCH",
+      "name": "patch_email_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('patch_email_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Stop drafting new rows. Runs already in flight finish.",
+      "method": "POST",
+      "name": "pause_email_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('pause_email_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/pause",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Undo a pause and start drafting again from where it stopped.",
+      "method": "POST",
+      "name": "resume_email_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('resume_email_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/resume",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Stop drafting for good.",
+      "method": "POST",
+      "name": "cancel_email_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('cancel_email_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/cancel",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "One batch's rows, in the order they were uploaded.",
+      "method": "GET",
+      "name": "list_email_batch_recipients",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_email_batch_recipients').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/recipients",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Append rows to a batch; a drafted batch resumes. Duplicates are skipped and reported.",
+      "method": "POST",
+      "name": "add_email_batch_recipients",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('add_email_batch_recipients').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/recipients",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Edit cells on one row before it is sent.",
+      "method": "PATCH",
+      "name": "patch_email_batch_recipient",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('patch_email_batch_recipient').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/recipients/{recipient_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Take rows out of consideration. Reversible with `restore`.",
+      "method": "POST",
+      "name": "skip_email_batch_recipients",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('skip_email_batch_recipients').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/skip",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Put skipped rows back. `selection: \"all_eligible\"` means every row a person skipped; an `unfillable` row is restored by filling in its cell instead.",
+      "method": "POST",
+      "name": "restore_email_batch_recipients",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('restore_email_batch_recipients').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/restore",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Draft rows again from scratch. **Each one runs the task and is billed again.**",
+      "method": "POST",
+      "name": "redraft_email_batch_recipients",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('redraft_email_batch_recipients').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/redraft",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Send rows. **This mails real people and cannot be undone.**",
+      "method": "POST",
+      "name": "create_email_send",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_email_send').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/sends",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Every send on this batch, newest first, with its counts and its schedule.",
+      "method": "GET",
+      "name": "list_email_sends",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_email_sends').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/sends",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "One send: where its rows are, and when it next does something.",
+      "method": "GET",
+      "name": "get_email_send",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_email_send').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/sends/{send_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Re-steer one send: its pace, its hours, its daily cap, its start time.",
+      "method": "PATCH",
+      "name": "patch_email_send",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('patch_email_send').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/sends/{send_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Stop sending. It takes hold on the next email, and nothing is lost \u2014 the rows stay queued, and editable, until you resume.",
+      "method": "POST",
+      "name": "pause_email_send",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('pause_email_send').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/sends/{send_id}/pause",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Undo a pause and carry on from where it stopped.",
+      "method": "POST",
+      "name": "resume_email_send",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('resume_email_send').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/sends/{send_id}/resume",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Stop this send for good. Every row it has not sent stays a draft, exactly as it was, ready for another send \u2014 not a destructive action.",
+      "method": "POST",
+      "name": "cancel_email_send",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('cancel_email_send').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/email/batches/{batch_id}/sends/{send_id}/cancel",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "List a WhatsApp sender's approved templates, read live from its BSP.",
+      "method": "GET",
+      "name": "list_whatsapp_templates",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_whatsapp_templates').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/whatsapp/templates",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Create a WhatsApp batch: one approved template, sent once per CSV row. Sends nothing yet.",
+      "method": "POST",
+      "name": "create_whatsapp_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_whatsapp_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/whatsapp/batches",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "List WhatsApp batches, newest first.",
+      "method": "GET",
+      "name": "list_whatsapp_batches",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_whatsapp_batches').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/whatsapp/batches",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "One batch: its template, schedule and per-status counts, `replied` included.",
+      "method": "GET",
+      "name": "get_whatsapp_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_whatsapp_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/whatsapp/batches/{batch_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Edit a batch. Pacing and the window reach a live send within minutes.",
+      "method": "PATCH",
+      "name": "patch_whatsapp_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('patch_whatsapp_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/whatsapp/batches/{batch_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Stop sending before the next message. Nothing is lost.",
+      "method": "POST",
+      "name": "pause_whatsapp_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('pause_whatsapp_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/whatsapp/batches/{batch_id}/pause",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Stop for good. Messages already sent stay sent, and replies are still answered.",
+      "method": "POST",
+      "name": "cancel_whatsapp_batch",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('cancel_whatsapp_batch').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/whatsapp/batches/{batch_id}/cancel",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "A batch's rows in upload order, each with its rendered message.",
+      "method": "GET",
+      "name": "list_whatsapp_batch_recipients",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_whatsapp_batch_recipients').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/whatsapp/batches/{batch_id}/recipients",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Append rows; repeated numbers are skipped. **Messages them if sending or completed.**",
+      "method": "POST",
+      "name": "add_whatsapp_batch_recipients",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('add_whatsapp_batch_recipients').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/whatsapp/batches/{batch_id}/recipients",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Edit cells on a row not yet sent, its phone included. An empty value clears the edit.",
+      "method": "PATCH",
+      "name": "patch_whatsapp_batch_recipient",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('patch_whatsapp_batch_recipient').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/whatsapp/batches/{batch_id}/recipients/{recipient_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Take ready rows out of the send. Reversible with restore.",
+      "method": "POST",
+      "name": "skip_whatsapp_batch_recipients",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('skip_whatsapp_batch_recipients').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/whatsapp/batches/{batch_id}/recipients/skip",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Put rows a person skipped back. A row skipped for its cells returns when they are fixed.",
+      "method": "POST",
+      "name": "restore_whatsapp_batch_recipients",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('restore_whatsapp_batch_recipients').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/whatsapp/batches/{batch_id}/recipients/restore",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Mint a LiveKit token for a browser to open a web call with an agent.",
+      "method": "POST",
+      "name": "calls_token",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('calls_token').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/token",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Start a chat with a text agent. Send it messages with `create_chat_message`.",
+      "method": "POST",
+      "name": "create_chat",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_chat').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/chats",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "List chats, newest first.",
+      "method": "GET",
+      "name": "list_chats",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_chats').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/chats",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Read one chat: its status, cost so far and, once ended, its analysis.",
+      "method": "GET",
+      "name": "get_chat",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_chat').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/chats/{chat_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "One chat with its health snapshot, cost lines, vars and event trace.",
+      "method": "GET",
+      "name": "get_chat_detail",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_chat_detail').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/chats/{chat_id}/detail",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Analyse an ended chat again with its agent's saved definition.",
+      "method": "POST",
+      "name": "rerun_chat_analysis",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('rerun_chat_analysis').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/chats/{chat_id}/analysis",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Try an analysis definition against an ended chat. Nothing is saved; costs one model call.",
+      "method": "POST",
+      "name": "preview_chat_analysis",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('preview_chat_analysis').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/chats/{chat_id}/analysis/preview",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "The messages, tool calls and handoffs of one chat.",
+      "method": "GET",
+      "name": "list_chat_items",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_chat_items').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/chats/{chat_id}/items",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Send a message and get the agent's reply back on this request.",
+      "method": "POST",
+      "name": "create_chat_message",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_chat_message').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/chats/{chat_id}/messages",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "End a chat. Its analysis and `session.completed` webhook follow.",
+      "method": "POST",
+      "name": "end_chat",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('end_chat').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/chats/{chat_id}/end",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "List voice and video calls, newest first, with status, duration and cost.",
+      "method": "GET",
+      "name": "list_calls",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_calls').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Totals for a window: call count, minutes, spend and average cost.",
+      "method": "GET",
+      "name": "call_stats",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('call_stats').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/stats",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Everything about one call: health, transcript, tool calls, usage, cost.",
+      "method": "GET",
+      "name": "get_call",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_call').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/{session_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Try an analysis definition against one past call and see what it finds.",
+      "method": "POST",
+      "name": "preview_call_analysis",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('preview_call_analysis').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/{session_id}/analysis/preview",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Re-analyse past calls with each one's current agent definition.",
+      "method": "POST",
+      "name": "backfill_call_analysis",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('backfill_call_analysis').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/calls/analysis/backfill",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "List conversations across every channel, most recently active first.",
+      "method": "GET",
+      "name": "list_conversations",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_conversations').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/conversations",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Read one conversation's header: agent, surface, summary and userdata.",
+      "method": "GET",
+      "name": "get_conversation",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_conversation').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/conversations/{conversation_id}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "The messages in a conversation \u2014 the transcript of what was said.",
+      "method": "GET",
+      "name": "list_conversation_items",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_conversation_items').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/conversations/{conversation_id}/items",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "The agent sessions behind a conversation, newest first.",
+      "method": "GET",
+      "name": "list_conversation_sessions",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_conversation_sessions').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/conversations/{conversation_id}/sessions",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Did this conversation go well? One verdict over the whole thread.",
+      "method": "GET",
+      "name": "get_conversation_snapshot",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_conversation_snapshot').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/conversations/{conversation_id}/snapshot",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Edit a conversation's summary, userdata or metadata.",
+      "method": "PATCH",
+      "name": "patch_conversation",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('patch_conversation').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/conversations/{conversation_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Workspace analytics: volume, endings, recordings, response time and spend. One snapshot of a date range, up to 7 days.",
+      "method": "GET",
+      "name": "get_observability",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_observability').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/observability",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "List the workspace's secrets by name, with a masked hint of each value.",
+      "method": "GET",
+      "name": "list_secrets",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_secrets').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/secrets",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Store a secret, replacing any existing one with the same name.",
+      "method": "POST",
+      "name": "create_secret",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_secret').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/secrets",
+      "read_only": false,
+      "role": "admin"
+    },
+    {
+      "description": "Delete a secret permanently. Refused with 409 while a tool, integration or carrier account references it. Organization admins only.",
+      "method": "DELETE",
+      "name": "delete_secret",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('delete_secret').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/secrets/{secret_id}",
+      "read_only": false,
+      "role": "admin"
+    },
+    {
+      "description": "List every event a webhook can subscribe to, and which are emitted today.",
+      "method": "GET",
+      "name": "event_types",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('event_types').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/webhooks/event-types",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "List the workspace's webhooks with their subscriptions and last delivery result. Signing secrets are returned only as a masked hint.",
+      "method": "GET",
+      "name": "list_webhooks",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_webhooks').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/webhooks",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Create a webhook. Webhooks are workspace-wide \u2014 they fire for every agent.",
+      "method": "POST",
+      "name": "create_webhook",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('create_webhook').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/webhooks",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Update a webhook's URL, subscriptions or status. Omitted fields are left unchanged; a disabled webhook stops receiving deliveries.",
+      "method": "PATCH",
+      "name": "patch_webhook",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('patch_webhook').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/webhooks/{webhook_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Delete a webhook permanently.",
+      "method": "DELETE",
+      "name": "delete_webhook",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('delete_webhook').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/webhooks/{webhook_id}",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Issue a new signing secret, invalidating the old one immediately.",
+      "method": "POST",
+      "name": "rotate_webhook_secret",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('rotate_webhook_secret').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/webhooks/{webhook_id}/rotate-secret",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "Send a signed test event and return the endpoint's response, so delivery and signature verification can be checked end to end.",
+      "method": "POST",
+      "name": "test_webhook",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('test_webhook').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/webhooks/{webhook_id}/test",
+      "read_only": false,
+      "role": "write"
+    },
+    {
+      "description": "List recent delivery attempts for one webhook \u2014 event, response status and error \u2014 newest first. The place to look when a webhook seems silent.",
+      "method": "GET",
+      "name": "webhook_deliveries",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('webhook_deliveries').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/webhooks/{webhook_id}/deliveries",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "The provider catalog: every LLM, STT, TTS, realtime and avatar model that agents may use.",
+      "method": "GET",
+      "name": "get_catalog",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('get_catalog').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/catalog",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Search the models a provider offers too many of to list.",
+      "method": "GET",
+      "name": "search_models",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('search_models').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/catalog/models",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "The hosts that can serve one OpenRouter language model; fastest first when the workspace has an OpenRouter key. Each `host` is a valid entry for `llm.hosts`.",
+      "method": "GET",
+      "name": "list_model_hosts",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_model_hosts').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/catalog/models/hosts",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "The Anam avatar gallery \u2014 the faces a video agent can wear.",
+      "method": "GET",
+      "name": "catalog_avatars",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('catalog_avatars').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/catalog/avatars",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Browse and filter the voices available for one provider.",
+      "method": "GET",
+      "name": "catalog_voices",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('catalog_voices').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/catalog/voices",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Save a shared ElevenLabs library voice so agents can use it.",
+      "method": "POST",
+      "name": "add_elevenlabs_voice",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('add_elevenlabs_voice').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/catalog/voices/elevenlabs/add",
+      "read_only": false,
+      "role": "read"
+    },
+    {
+      "description": "The `stability` and `similarity_boost` an ElevenLabs voice was tuned with.",
+      "method": "GET",
+      "name": "elevenlabs_voice_settings",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('elevenlabs_voice_settings').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/catalog/voices/elevenlabs/{voice_id}/settings",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "List every AI provider and whether this workspace has an API key for it.",
+      "method": "GET",
+      "name": "list_provider_keys",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('list_provider_keys').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/byok",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "Store this workspace's API key for one provider, replacing any existing key.",
+      "method": "PUT",
+      "name": "set_provider_key",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('set_provider_key').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/byok/{provider}",
+      "read_only": false,
+      "role": "admin"
+    },
+    {
+      "description": "Remove this organization's API key for one provider. Agents that need it will stop working and can no longer be published. Organization admins only.",
+      "method": "DELETE",
+      "name": "delete_provider_key",
+      "parameters": {
+        "additionalProperties": true,
+        "description": "Arguments not inlined: call describe_function('delete_provider_key').",
+        "properties": {},
+        "type": "object"
+      },
+      "path": "/v1/byok/{provider}",
+      "read_only": false,
+      "role": "admin"
+    },
+    {
+      "description": "The full JSON Schema of one of the five large request types.",
+      "method": "GET",
+      "name": "describe_schema",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "enum": [
+              "AgentConfig",
+              "AgentOverride",
+              "AgentTeam",
+              "TaskConfig",
+              "ToolOperations"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "path": "/v1/schemas/{name}",
+      "read_only": true,
+      "role": "read"
+    },
+    {
+      "description": "The full argument schema of one function, by name.",
+      "method": "GET",
+      "name": "describe_function",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "path": "/v1/schemas/functions/{name}",
+      "read_only": true,
+      "role": "read"
+    }
+  ]
+}

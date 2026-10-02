@@ -1,0 +1,287 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Talqing",
+  "description": "Build, publish and operate AI voice, video and text agents.",
+  "colors": {
+    "primary": "#0F172A",
+    "light": "#94A3B8",
+    "dark": "#0F172A"
+  },
+  "favicon": "/favicon.png",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get started",
+            "pages": [
+              "get-started/introduction",
+              "get-started/core-concepts",
+              "get-started/quickstart-voice-agent",
+              "get-started/quickstart-phone-number",
+              "get-started/quickstart-text-agent",
+              "get-started/quickstart-coding-agent",
+              "get-started/provider-keys",
+              "get-started/authentication",
+              "get-started/regions",
+              "get-started/pricing-and-credits",
+              "get-started/workspaces-and-roles"
+            ]
+          },
+          {
+            "group": "Agents",
+            "pages": [
+              "agents/overview",
+              "agents/channels",
+              "agents/prompting",
+              "agents/models",
+              "agents/realtime",
+              "agents/model-fallbacks",
+              "agents/reasoning-and-builtin-tools",
+              "agents/priority-lane",
+              "agents/voices",
+              "agents/expressive-delivery",
+              "agents/speech-to-text-and-turn-detection",
+              "agents/language",
+              "agents/variables",
+              "agents/userdata",
+              "agents/conversation-memory",
+              "agents/turn-handling",
+              "agents/silence-and-call-length",
+              "agents/audio-processing",
+              "agents/vision-and-images",
+              "agents/keypad",
+              "agents/voicemail",
+              "agents/video-avatars",
+              "agents/lifecycle-hooks",
+              "agents/faqs",
+              "agents/agent-tasks",
+              "agents/versions",
+              "agents/validation",
+              "agents/per-call-configuration",
+              "agents/copilot"
+            ]
+          },
+          {
+            "group": "Tools",
+            "pages": [
+              "tools/overview",
+              "tools/schema-and-description",
+              "tools/operation-tree",
+              "tools/templating-and-data",
+              "tools/http",
+              "tools/code",
+              "tools/conditionals",
+              "tools/speech-operations",
+              "tools/end-call",
+              "tools/transfer",
+              "tools/handoff-operation",
+              "tools/frontend-rpc",
+              "tools/testing-and-publishing",
+              "tools/failures",
+              "tools/copilot",
+              "tools/patterns"
+            ]
+          },
+          {
+            "group": "Agent teams",
+            "pages": [
+              "teams/overview",
+              "teams/handoffs",
+              "teams/context-policies",
+              "teams/agent-teams-on-a-call",
+              "teams/conditional-handoffs",
+              "teams/patterns"
+            ]
+          },
+          {
+            "group": "Agent tasks",
+            "pages": [
+              "tasks/overview",
+              "tasks/inputs-and-output",
+              "tasks/prompting",
+              "tasks/tools-and-mcps",
+              "tasks/running-and-runs",
+              "tasks/versions",
+              "tasks/errors-and-limits",
+              "tasks/copilot"
+            ]
+          },
+          {
+            "group": "Telephony",
+            "pages": [
+              "telephony/overview",
+              "telephony/carrier-accounts",
+              "telephony/phone-numbers",
+              "telephony/inbound-calls",
+              "telephony/outbound-calls",
+              "telephony/batch-calling",
+              "telephony/transfers",
+              "telephony/recording",
+              "telephony/troubleshooting"
+            ]
+          },
+          {
+            "group": "Web & chat",
+            "pages": [
+              "channels/web-calls",
+              "channels/web-call-features",
+              "channels/text-conversations",
+              "channels/media-streams",
+              "channels/telegram",
+              "channels/whatsapp",
+              "channels/whatsapp-calls"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "integrations/overview",
+              "integrations/catalog",
+              "integrations/connecting",
+              "integrations/mcp-servers",
+              "integrations/custom-mcp",
+              "integrations/triggers",
+              "integrations/google-calendar"
+            ]
+          },
+          {
+            "group": "Email outbound",
+            "pages": [
+              "email/overview",
+              "email/setup",
+              "email/creating-a-batch",
+              "email/reviewing-and-sending",
+              "email/monitoring"
+            ]
+          },
+          {
+            "group": "WhatsApp outbound",
+            "pages": [
+              "whatsapp/setup",
+              "whatsapp/creating-a-batch",
+              "whatsapp/sending-and-monitoring"
+            ]
+          },
+          {
+            "group": "Observability",
+            "pages": [
+              "observability/overview",
+              "observability/calls",
+              "observability/conversations",
+              "observability/call-analysis",
+              "observability/recordings",
+              "observability/webhooks",
+              "observability/costs",
+              "observability/close-reasons",
+              "observability/debugging-agents"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/inbound-support-line",
+              "guides/outbound-lead-qualification",
+              "guides/appointment-booking",
+              "guides/website-chat",
+              "guides/multi-agent-triage",
+              "guides/research-and-outreach",
+              "guides/migrating-from-vapi"
+            ]
+          },
+          {
+            "group": "Platform",
+            "pages": [
+              "platform/secrets",
+              "platform/data-retention-and-privacy",
+              "platform/limits",
+              "platform/glossary"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Using the API",
+            "pages": [
+              "api-reference/introduction",
+              "api-reference/authentication",
+              "api-reference/errors",
+              "api-reference/pagination",
+              "api-reference/streaming",
+              "api-reference/webhook-events",
+              "api-reference/schemas"
+            ]
+          },
+          {
+            "group": "Endpoints",
+            "openapi": "openapi.json"
+          }
+        ]
+      },
+      {
+        "tab": "SDKs",
+        "groups": [
+          {
+            "group": "SDKs",
+            "pages": [
+              "sdks/overview",
+              "sdks/typescript",
+              "sdks/react",
+              "sdks/python"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "MCP",
+        "groups": [
+          {
+            "group": "MCP server",
+            "pages": [
+              "mcp/overview",
+              "mcp/setup",
+              "mcp/tools",
+              "mcp/permissions",
+              "mcp/recipes"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Support",
+        "href": "mailto:hello@talqing.com"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Dashboard",
+      "href": "https://app.talqing.com"
+    }
+  },
+  "footer": {
+    "socials": {
+      "website": "https://talqing.com"
+    }
+  },
+  "redirects": [
+    {
+      "source": "/sdks/typescript-browser",
+      "destination": "/sdks/react",
+      "permanent": true
+    }
+  ],
+  "seo": {
+    "metatags": {
+      "og:image": "https://talqing.com/opengraph-image.png"
+    }
+  }
+}

@@ -1,0 +1,207 @@
+---
+title: "Turn handling"
+description: "Interruptions, false-interruption resume, preemptive generation and the silence windows, with every default."
+---
+
+`config.turn_handling` is how the agent behaves around the edges of a turn: whether
+the caller can cut it off, what it does when they seem to have but had not, and
+whether it starts drafting a reply before it is certain they are done.
+
+Voice and video only. Switching an agent to `text` resets the whole block, and
+nothing in it reaches a text conversation.
+
+<Note>
+**What actually ends the caller's turn is not configured here.** Which end-of-turn
+detector runs follows from the speech-to-text model and `config.language`, and there
+is no knob for it. The two silence numbers below mean different things depending on
+which one you got. Read
+[speech and turn detection](/agents/speech-to-text-and-turn-detection)
+before tuning them.
+</Note>
+
+## Interruption
+
+```json
+{
+  "turn_handling": {
+    "interruption": {
+      "enabled": true,
+      "min_speech_duration": 0.5,
+      "min_words": 0,
+      "resume_false_interruption": true,
+      "false_interruption_timeout": 2.0,
+      "discard_audio_if_uninterruptible": true
+    }
+  }
+}
+```
+
+<ParamField path="interruption.enabled" type="boolean" default="true">
+  Whether the caller can cut the agent off mid-sentence. Off, the agent finishes
+  every line it starts.
+</ParamField>
+
+<ParamField path="interruption.min_speech_duration" type="number" default="0.5">
+  Seconds of speech before it registers as an interruption. Minimum 0. Raise it on
+  a noisy line, where a cough should not stop the agent.
+</ParamField>
+
+<ParamField path="interruption.min_words" type="integer" default="0">
+  Words the caller must say before it counts as an interruption. Minimum 0, and 0
+  means the word count is not consulted. Needs interim transcripts, so it applies
+  to the speech-to-text pipeline only.
+</ParamField>
+
+<ParamField path="interruption.resume_false_interruption" type="boolean" default="true">
+  After an interruption that turned out not to be one, pick the sentence back up
+  where it stopped.
+</ParamField>
+
+<ParamField path="interruption.false_interruption_timeout" type="number | null" default="2.0">
+  Seconds of silence after an interruption before it is classified as false.
+  Minimum 0. `null` switches false-interruption classification off entirely, which
+  also means nothing is ever resumed.
+</ParamField>
+
+<ParamField path="interruption.discard_audio_if_uninterruptible" type="boolean" default="true">
+  Drop buffered caller audio while the agent is speaking and cannot be interrupted.
+  Off, that audio is kept and reaches the agent once it finishes speaking.
+</ParamField>
+
+`min_words` on a **batch** speech-to-text model is a warning at save, not an error:
+
+```text
+word-count interruption needs interim transcripts, which batch speech-to-text models
+do not produce - the agent will only notice the interruption once the caller stops
+speaking
+```
+
+<Warning>
+**A video agent always runs with `resume_false_interruption` off.** An avatar cannot
+resume a sentence it has already stopped rendering — the lips would desync from the
+audio — so the runtime pins it off whatever the config says, and the dashboard hides
+the control on a video agent rather than showing one that lies. Everything else in
+this block behaves on video exactly as it does on voice.
+</Warning>
+
+### The greeting
+
+`config.greeting_interruptible` (default `true`) decides whether the caller can cut
+the greeting off. Set it to `false` and the agent finishes its opening line whatever
+the caller says over it; with `discard_audio_if_uninterruptible` on, what they said
+is dropped. It sits beside `greeting`, not in this block, and is refused on a
+realtime model, whose own server detects interruptions.
+
+A greeting that speaks the [recording notice](/telephony/recording) can never be
+interrupted, whatever this field says.
+
+## Preemptive generation
+
+The agent starts drafting a reply before it is certain the caller has finished, so
+the pause before it speaks is shorter. If the turn does not end where it guessed,
+the draft is thrown away — and you paid for it.
+
+```json
+{
+  "turn_handling": {
+    "preemptive_generation": {
+      "enabled": false,
+      "preemptive_tts": false,
+      "max_speech_duration": 10.0,
+      "max_retries": 3
+    }
+  }
+}
+```
+
+<ParamField path="preemptive_generation.enabled" type="boolean" default="false">
+  Off by default on Talqing, deliberately: it buys latency and costs discarded
+  generations, and that trade should be one you make on purpose.
+</ParamField>
+
+<ParamField path="preemptive_generation.preemptive_tts" type="boolean" default="false">
+  Also run text-to-speech ahead of the confirmed turn. With this off, only the
+  language model runs early. It cuts more of the pause and discards more when the
+  guess is wrong.
+</ParamField>
+
+<ParamField path="preemptive_generation.max_speech_duration" type="number" default="10.0">
+  Longest stretch of caller speech, in seconds, that preemptive generation is
+  attempted for. Minimum 0.
+</ParamField>
+
+<ParamField path="preemptive_generation.max_retries" type="integer" default="3">
+  Attempts per user turn. The counter resets when the turn completes. Minimum 0.
+</ParamField>
+
+Two configurations force it off, both cleared on the agent when you save:
+
+- **A realtime (speech-to-speech) agent.** The model detects turns itself, inside
+  the provider's socket, and has already answered by the point where a speculative
+  reply would have been useful. `enabled` and `preemptive_tts` are both pinned off.
+- **An agent watching a screen share.** The newest frame is injected into the
+  context on every turn, so the context the speculative reply was generated against
+  never matches the one the turn runs on — every preemptive reply would be
+  generated, billed and thrown away. See
+  [vision and images](/agents/vision-and-images).
+
+## Endpointing
+
+`turn_handling.endpointing` holds the two silence numbers —
+`min_silence_duration` (0.5, minimum 0.25) and `max_silence_duration` (2.5, and it
+must be at least the minimum). They are in the reference table below, but what each
+one *means* depends on which speech-to-text model is running, and that is on
+[speech and turn detection](/agents/speech-to-text-and-turn-detection). Read it
+before you change either.
+
+The short version: `min_silence_duration` always does something, though on several
+models it is a window handed to the provider rather than a wait Talqing performs, and
+on a realtime agent it becomes the provider's own silence window.
+`max_silence_duration` does something on exactly one pipeline — a batch model with
+`config.language` set to one the end-of-turn model knows — and is ignored everywhere
+else.
+
+## Symptom to setting
+
+| What you hear | Try |
+| --- | --- |
+| The agent cuts people off mid-sentence | Not a setting on this page — start at [speech and turn detection](/agents/speech-to-text-and-turn-detection). |
+| The agent talks over a caller who paused to think | Same. The lever is the speech-to-text model and the language, then `endpointing`. |
+| The agent stops for a cough, a door, a "mm-hm" | Raise `interruption.min_speech_duration`, or set `interruption.min_words` to 2–3 on a streaming model. |
+| The agent stops mid-sentence and never picks up | `interruption.resume_false_interruption` is off, or `false_interruption_timeout` is `null`. On a video agent, resume is unavailable by design. |
+| The agent resumes when the caller genuinely did interrupt | Lower `interruption.false_interruption_timeout`. |
+| Long pause before the agent replies | Turn on `preemptive_generation`, and `preemptive_tts` with it. Then check `reasoning_effort` — see [thinking and provider tools](/agents/reasoning-and-builtin-tools). |
+| Turned preemptive generation on and it did nothing | The agent is realtime, or it watches a screen share. Both pin it off. |
+| The agent answers something the caller said while it was still speaking | `discard_audio_if_uninterruptible` is off. |
+
+## Reference
+
+| Field | Type | Default | Range |
+| --- | --- | --- | --- |
+| `endpointing.min_silence_duration` | number | 0.5 | ≥ 0.25 |
+| `endpointing.max_silence_duration` | number | 2.5 | ≥ 0, and ≥ `min_silence_duration` |
+| `interruption.enabled` | boolean | `true` | |
+| `interruption.min_speech_duration` | number | 0.5 | ≥ 0 |
+| `interruption.min_words` | integer | 0 | ≥ 0 |
+| `interruption.resume_false_interruption` | boolean | `true` | forced off on video |
+| `interruption.false_interruption_timeout` | number or null | 2.0 | ≥ 0 |
+| `interruption.discard_audio_if_uninterruptible` | boolean | `true` | |
+| `greeting_interruptible` (top level) | boolean | `true` | refused as `false` on realtime; ignored while the greeting speaks the recording notice |
+| `preemptive_generation.enabled` | boolean | `false` | forced off on realtime and on screen share |
+| `preemptive_generation.preemptive_tts` | boolean | `false` | forced off on realtime and on screen share |
+| `preemptive_generation.max_speech_duration` | number | 10.0 | ≥ 0 |
+| `preemptive_generation.max_retries` | integer | 3 | ≥ 0 |
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Speech and turn detection" href="/agents/speech-to-text-and-turn-detection">
+    What actually ends a caller's turn, and the fourteen languages.
+  </Card>
+  <Card title="Audio processing" href="/agents/audio-processing">
+    Noise cancellation and background audio.
+  </Card>
+  <Card title="Debugging agents" href="/observability/debugging-agents">
+    The playbook when a call sounds wrong.
+  </Card>
+</CardGroup>

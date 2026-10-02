@@ -1,0 +1,266 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* talqing base layer — "pristine instrument".
+   Only raw CSS that genuinely cannot be a utility lives here: body defaults,
+   ::selection, thin scrollbars, and range-slider native pseudos. Everything
+   else is Tailwind utilities / primitive components. */
+
+@layer base {
+  :root {
+    --side-w: 256px; /* app-shell sidebar width */
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-canvas font-sans text-ink antialiased;
+    text-rendering: optimizeLegibility;
+    /* tabular-friendly numerals + a touch of stylistic refinement on Inter */
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
+    /* render native controls (select popups, scrollbars) in light mode regardless of OS setting */
+    color-scheme: light;
+  }
+
+  ::selection {
+    @apply bg-ink text-surface;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(12, 13, 15, 0.14) transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@layer components {
+  /* ---------------------------------------------------------------------
+     Public pages (landing + the two legal documents).
+     These are the documented exception to the token-only rule: the marketing
+     site runs its own brand palette — pure white paper, near-black ink and a
+     warm neutral shell for recessed bands — none of which belongs in the
+     dashboard instrument.
+     --------------------------------------------------------------------- */
+  .landing-theme {
+    --background: 255 255 255; /* paper */
+    --foreground: 10 10 10; /* ink — headings, primary button fill */
+    --card: 255 255 255;
+    --card-foreground: 10 10 10;
+    --popover: 255 255 255;
+    --popover-foreground: 10 10 10;
+    --primary: 28 28 28; /* the CTA black is off-black, not #000 */
+    --primary-foreground: 255 255 255;
+    --secondary: 244 243 239; /* warm shell — icon chips, recessed bands */
+    --secondary-foreground: 10 10 10;
+    --muted: 240 238 233;
+    --muted-foreground: 74 74 77; /* body copy against paper */
+    --accent: 233 233 233;
+    --accent-foreground: 10 10 10;
+    --border: 234 234 234; /* hairline */
+    --input: 234 234 234;
+    --ring: 10 10 10;
+    --radius: 0.5rem;
+    --font-mono: var(--font-jetbrains), "JetBrains Mono", monospace;
+    font-family: var(--font-landing-sans), "Figtree", system-ui, sans-serif;
+    font-feature-settings: normal;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    color: rgb(var(--foreground));
+    background-color: rgb(var(--background));
+  }
+
+  /* Newsreader carries an optical-size axis, and `auto` is what makes it worth
+     having: the hero at 65px resolves near opsz 72 — hairline-thin serifs, wide
+     stroke contrast, the editorial cut this page is drawn around — while a 28px
+     channel name resolves near opsz 28 and thickens enough to survive at that
+     size. Pinning opsz would win one of those two and lose the other. */
+  .landing-theme .font-display {
+    font-family: var(--font-landing-serif), Georgia, serif;
+    font-optical-sizing: auto;
+  }
+
+  .landing-theme .font-mono {
+    font-family: var(--font-mono);
+  }
+
+  /* The three-card agent cluster (app/agent-cluster.tsx), on the landing hero
+     and the /login panel. The art is drawn at a fixed 760×362 and scaled down.
+
+     `--cluster-scale` is the ONLY dial: it drives the wrapper's width, the
+     wrapper's height and the transform together. That is the point of the
+     variable. A transformed element keeps its UNSCALED layout box, so a hand
+     scaled composition needs its wrapper height hand-set to match, and before
+     this the scale and the height were two numbers at every breakpoint on two
+     pages that silently had to agree. Set the scale per breakpoint with
+     Tailwind's arbitrary-property syntax: `lg:[--cluster-scale:0.62]`.
+
+     (The obvious next step — deriving the scale from the container width so
+     callers set nothing — does not work: `scale()` needs a unitless number, and
+     container units are lengths. Length-over-length division in calc() is not
+     supported widely enough to rely on here. Don't retry it.) */
+  .agent-cluster {
+    --cluster-scale: 0.55;
+    width: calc(760px * var(--cluster-scale));
+    height: calc(362px * var(--cluster-scale));
+  }
+
+  .agent-cluster > * {
+    width: 760px;
+    height: 362px;
+    transform: scale(var(--cluster-scale));
+    transform-origin: top left;
+  }
+
+  /* Page-load reveal. `backwards` fill is what lets a staggered delay hold the
+     element hidden until its turn instead of flashing it first. */
+  .rise {
+    animation: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  }
+
+  /* One bar of a live waveform. The bars share these keyframes and differ only
+     by animation-delay, so the pulse travels along the strip. */
+  .wave-bar {
+    transform-origin: center;
+    animation: wave-bar 1.1s ease-in-out infinite;
+  }
+
+  .wave-bar-svg {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: wave-bar 1.1s ease-in-out infinite;
+  }
+
+  /* Halo behind a "session is live" dot. */
+  .live-halo {
+    animation: live-halo 2.4s ease-out infinite;
+  }
+
+  .marquee-track {
+    width: max-content;
+    will-change: transform;
+    animation: marquee 44s linear infinite;
+  }
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(14px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  @keyframes wave-bar {
+    0%,
+    100% {
+      transform: scaleY(0.46);
+    }
+    50% {
+      transform: scaleY(1);
+    }
+  }
+
+  @keyframes live-halo {
+    0% {
+      transform: scale(1);
+      opacity: 0.5;
+    }
+    70%,
+    100% {
+      transform: scale(2.6);
+      opacity: 0;
+    }
+  }
+
+  @keyframes marquee {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(-50%);
+    }
+  }
+
+  /* Thin scrollbar (webkit). Apply via the `scroll-thin` utility class. */
+  .scroll-thin::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb {
+    background: rgba(12, 13, 15, 0.13);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb:hover {
+    background: rgba(12, 13, 15, 0.24);
+    background-clip: content-box;
+  }
+
+  /* Range slider styled to match the neutral control look. The fill percent is
+     driven by the --range-pct custom property set inline at runtime. */
+  .range-neutral {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+  }
+  .range-neutral::-webkit-slider-runnable-track {
+    height: 8px;
+    border-radius: 999px;
+    border: 1px solid rgba(12, 13, 15, 0.12);
+    background: linear-gradient(
+      to right,
+      #6e7178 0%,
+      #6e7178 var(--range-pct, 50%),
+      #f4f4f5 var(--range-pct, 50%),
+      #f4f4f5 100%
+    );
+  }
+  .range-neutral::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    margin-top: -7px;
+    border-radius: 50%;
+    border: 1px solid #3d4148;
+    background: #ffffff;
+    box-shadow: 0 1px 3px rgba(12, 13, 15, 0.18);
+  }
+  .range-neutral::-moz-range-track {
+    height: 8px;
+    border-radius: 999px;
+    border: 1px solid rgba(12, 13, 15, 0.12);
+    background: #f4f4f5;
+  }
+  .range-neutral::-moz-range-progress {
+    height: 8px;
+    border-radius: 999px;
+    background: #6e7178;
+  }
+  .range-neutral::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 1px solid #3d4148;
+    background: #ffffff;
+    box-shadow: 0 1px 3px rgba(12, 13, 15, 0.18);
+  }
+}

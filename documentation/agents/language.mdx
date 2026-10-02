@@ -1,0 +1,328 @@
+---
+title: "Language"
+description: "One language setting shared by every model in the pipeline, and the places where Auto is not detection."
+---
+
+`config.language` is set once, on the agent, and every model in the pipeline
+gets it. There is no language field on `stt`, `tts` or `realtime` — each model
+translates the agent's setting into its own spelling, so Hindi reaches Deepgram
+as `hi` and Sarvam as `hi-IN` without you doing anything.
+
+`null` means Auto. It is the default, and it does not mean the same thing on
+every model.
+
+```json
+{ "language": "hi" }
+```
+
+Language is voice and video only. Setting it on a text agent is cleared on
+save — a chat has no speech models to configure, and the prompt sets the tone.
+
+## The rules
+
+**The code has to be one some model publishes.** The catalog accepts 119 codes
+in total, of which the dashboard picker offers 96 — the rest are a second
+spelling of a language already on the list, mostly Sarvam's `xx-IN` forms.
+Anything else is refused: `unknown language 'xx' - pick one from the agent's
+language list`. `GET /v1/catalog` returns the offered set as `languages`.
+
+**A model that publishes languages must cover the one you chose,** or the write
+is refused, naming the model and the language:
+
+```
+text-to-speech model 'sarvam/bulbul:v3' does not support Swedish
+```
+
+This is checked for `stt`, `tts`, `realtime` and any fallback on them. Which is
+why the order matters: **pick the language first, then pick models that cover
+it.** Going the other way means discovering at publish time that half the stack
+has to change.
+
+**A model with `language_required: true` refuses Auto.** One model has it today:
+
+```
+text-to-speech model 'soniox/tts-rt-v2' does not detect languages on its own -
+set the agent's language instead of leaving it on Auto
+```
+
+<Warning>
+  On Soniox text-to-speech the language is not a label — it is the phonetic
+  system the text is read through. English text sent as `es` comes back as
+  English words pronounced through Spanish phonics, which is not accented
+  English, it is unintelligible. The same sentence read as `de` turned "2024
+  dollars" into "12,047". Get this one right.
+</Warning>
+
+**Models that publish no languages ignore the setting entirely.** OpenAI's three
+text-to-speech models are multilingual and take no language parameter; Deepgram
+Aura and Flux TTS encode the language in the voice id (`aura-2-thalia-en`,
+`flux-alexis-en`, and every Flux voice is English); and `openai/gpt-live-1` and
+both xAI Grok Voice speech-to-speech models expose no language knob at all —
+steer those from the prompt.
+
+## How a code is matched to a model
+
+Three ordered rules, and nothing beyond them:
+
+1. **Exact.** The model publishes that code.
+2. **Widen.** You asked for `en-GB` and the model only has bare `en`.
+3. **Narrow.** You asked for `hi` and the model has exactly one variant of it,
+   such as Sarvam's `hi-IN`. Where several variants share the primary subtag —
+   xAI text-to-speech carries both `pt-BR` and `pt-PT` — the model's own default
+   breaks the tie if it fits, and otherwise the match fails rather than guessing
+   which regional accent your caller wanted.
+
+One deliberate alias exists: Sarvam spells Odia `od-IN` where ISO, Raya and the
+picker say `or`. Both reach both providers.
+
+## Auto is not detection everywhere
+
+With `language` unset, each model falls back to whatever its catalog entry says,
+and those fall into three groups.
+
+**Real detection.** The entry's `default_language` is `unknown`, `multi`, `auto`
+or empty, which are the providers' own words for "work it out".
+
+| Model | On Auto |
+| --- | --- |
+| `sarvam/saaras:v3`, `sarvam/saaras:v4` | `unknown` — returns a language probability with the transcript |
+| `sarvam/saaras:v3-realtime` | `auto` |
+| `deepgram/nova-3-general` | `multi` — detects and code-switches |
+| `deepgram/flux-general-multi` | Detects; the agent's language is only a hint |
+| `elevenlabs/scribe_v2_realtime`, `elevenlabs/scribe_v2` | Detects |
+| `openai/gpt-live-transcribe`, `openai/gpt-transcribe` | Detects |
+| `soniox/stt-rt-v5` | Detects across all 60 |
+| `openai/gpt-realtime-2.1`, `-mini` | Its transcription model detects |
+| `gemini/gemini-3.8-live`, `gemini/gemini-2.5-flash-native-audio-preview-12-2025` | Code-switches on its own |
+| `openai/gpt-live-1` | Not language-aware — steer it from the prompt |
+| `xai/xai-tts` | `auto` |
+| `sarvam/bulbul:v3` | Takes the spoken language from the text it is handed and ignores the parameter |
+
+**A fixed fallback, which is usually English.** These models do not detect. On
+Auto they run on their `default_language`, and a caller who speaks anything else
+is *mistranscribed* rather than merely misunderstood.
+
+| Model | On Auto | What that costs |
+| --- | --- | --- |
+| `deepgram/nova-3` | `en` | Hindi audio sent as `en` came back as the single word "namaste" |
+| `raya/bakbak-stt` | `en` | See the Raya note below |
+| `raya/m1`, `raya/standard` | `en` | The API rejects a request with no language, so something has to be sent |
+| `deepgram/flux-general-en` | `en` | English-only model; nothing else to fall back to |
+
+For an agent taking non-English calls on Auto, use `deepgram/nova-3-general`,
+`deepgram/flux-general-multi`, `sarvam/saaras:v3`, either ElevenLabs Scribe, or
+either OpenAI model. All of those detect for real.
+
+**A code is sent but detection happens anyway.** `xai/xai-stt` and
+`xai-stt-batch` declare `en`, and xAI's API requires a language on every
+request. But it detects regardless: Hindi audio sent with
+`language=en` still came back as correct Devanagari, and English audio sent as
+`hi` still came back as English. On these two the code only switches on inverse
+text normalization — spoken numbers and currencies rendered in written form —
+for that language.
+
+<Warning>
+  **Raya is the one to watch.** None of its three entries detect anything, and
+  the failure is asymmetric. English audio transcribed as `hi` comes back
+  transliterated with its meaning intact, but Hindi audio transcribed as `en`
+  loses content outright — one clip returned as "Namaste, I have to say, order
+  number." It arrives as a successful transcript with nothing to flag it, so the
+  agent never learns it misheard. An Indic agent on Raya must set
+  `config.language`.
+
+  On Raya speech-to-text the language also selects the **output script**, and it
+  is obeyed strictly: one Hindi clip came back in Devanagari on `hi`, in Tamil
+  script on `ta`, and romanized on `en`.
+</Warning>
+
+## Picking a language first
+
+<Steps>
+  <Step title="Choose the language">
+    Read `languages` from `GET /v1/catalog`. If your callers may switch
+    languages mid-call, leave it on Auto and pick models from the detection
+    table above.
+  </Step>
+  <Step title="Pick speech-to-text and text-to-speech that cover it">
+    Use the coverage table below, or filter `GET /v1/catalog`'s `stt` and `tts`
+    arrays on their `languages` lists. If the language is one of the fourteen
+    LiveKit's end-of-turn model knows, a batch speech-to-text model also buys
+    you better turn-taking — see [speech and turn detection](/agents/speech-to-text-and-turn-detection).
+  </Step>
+  <Step title="Pick a voice that speaks it">
+    Pass `language` to `GET /v1/catalog/voices` so the gallery only shows voices
+    for that language. See [voices](/agents/voices).
+  </Step>
+  <Step title="Validate before you publish">
+    `POST /v1/agents/{agent_id}/validate` reports every model that cannot speak
+    the language, in one response, instead of one per attempt.
+  </Step>
+</Steps>
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/agents/6f1d0a2c-6a0e-4f77-9b1e-6c1a2d3e4f50/validate \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const { errors, warnings } = await talqing.agents.validate({
+  agent_id: "6f1d0a2c-6a0e-4f77-9b1e-6c1a2d3e4f50",
+});
+```
+
+```python Python
+result = talqing.agents.validate("6f1d0a2c-6a0e-4f77-9b1e-6c1a2d3e4f50")
+print(result["errors"], result["warnings"])
+```
+</CodeGroup>
+
+## Coverage
+
+Which models accept each language. Accepting a language is not a claim about how
+well a model speaks it — audition a voice before you ship it.
+
+Six text-to-speech models are missing from the table because the setting does
+not reach them: `openai/gpt-4o-mini-tts`, `openai/tts-1` and `openai/tts-1-hd`
+are multilingual, and `deepgram/flux`, `deepgram/aura-2` and `deepgram/aura-1`
+take the language from the voice. Any of those is available whatever
+`config.language` says.
+
+**Speech-to-text:** Grok = `xai/xai-stt` · Grok B = `xai/xai-stt-batch` ·
+Saaras = `sarvam/saaras:v3`, `sarvam/saaras:v4` and `sarvam/saaras:v3-realtime`,
+which publish the same 23 · Bakbak = `raya/bakbak-stt` ·
+Soniox = `soniox/stt-rt-v5` · Scribe = `elevenlabs/scribe_v2_realtime` ·
+Scribe B = `elevenlabs/scribe_v2` · Live TX = `openai/gpt-live-transcribe` ·
+GPT TX B = `openai/gpt-transcribe` · Nova-3 M = `deepgram/nova-3-general` ·
+Nova-3 = `deepgram/nova-3` · Flux EN = `deepgram/flux-general-en` ·
+Flux M = `deepgram/flux-general-multi`
+
+**Text-to-speech:** Grok = `xai/xai-tts` · Bulbul = `sarvam/bulbul:v3` ·
+Raya = `raya/m1` and `raya/standard` · Soniox = `soniox/tts-rt-v2` ·
+Turbo = `elevenlabs/eleven_turbo_v2_5` · Flash = `elevenlabs/eleven_flash_v2_5` ·
+v3 = `elevenlabs/eleven_v3` and `elevenlabs/eleven_v3_conversational`, which
+publish the same set
+
+<AccordionGroup>
+  <Accordion title="Every language, and the models that accept it">
+
+| Language | Code | Speech-to-text | Text-to-speech |
+| --- | --- | --- | --- |
+| Afrikaans | `af` | Soniox, Live TX, GPT TX B | Soniox, v3 |
+| Albanian | `sq` | Soniox | Soniox |
+| Arabic | `ar` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B | Soniox, Turbo, Flash, v3 |
+| Arabic (Egypt) | `ar-EG` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B | Grok, Soniox, Turbo, Flash, v3 |
+| Arabic (Saudi Arabia) | `ar-SA` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B | Grok, Soniox, Turbo, Flash, v3 |
+| Arabic (UAE) | `ar-AE` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B | Grok, Soniox, Turbo, Flash, v3 |
+| Armenian | `hy` | Live TX, GPT TX B | — |
+| Assamese | `as` | Saaras, Bakbak | Raya |
+| Azerbaijani | `az` | Soniox, Live TX, GPT TX B | Soniox |
+| Basque | `eu` | Soniox | Soniox |
+| Belarusian | `be` | Soniox, Live TX, GPT TX B | Soniox |
+| Bengali | `bn` | Saaras, Bakbak, Soniox | Grok, Bulbul, Raya, Soniox |
+| Bodo | `brx` | Saaras, Bakbak | — |
+| Bosnian | `bs` | Soniox, Live TX, GPT TX B | Soniox |
+| Bulgarian | `bg` | Soniox, Live TX, GPT TX B | Soniox, Turbo, Flash, v3 |
+| Catalan | `ca` | Soniox, Live TX, GPT TX B | Soniox |
+| Chinese | `zh` | Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Chinese (Simplified) | `zh-CN` | Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Chinese (Traditional) | `zh-TW` | Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Croatian | `hr` | Soniox, Live TX, GPT TX B | Soniox, Turbo, Flash, v3 |
+| Czech | `cs` | Grok, Grok B, Soniox, Live TX, GPT TX B | Soniox, Turbo, Flash, v3 |
+| Danish | `da` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Soniox, Turbo, Flash, v3 |
+| Dogri | `doi` | Saaras, Bakbak | — |
+| Dutch | `nl` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Soniox, Turbo, Flash, v3 |
+| English | `en` | Grok, Grok B, Saaras, Bakbak, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux EN, Flux M | Grok, Bulbul, Raya, Soniox, Turbo, Flash, v3 |
+| English (Australia) | `en-AU` | Grok, Grok B, Saaras, Bakbak, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux EN, Flux M | Grok, Bulbul, Raya, Soniox, Turbo, Flash, v3 |
+| English (Indian) | `en-IN` | Grok, Grok B, Saaras, Bakbak, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux EN, Flux M | Grok, Bulbul, Raya, Soniox, Turbo, Flash, v3 |
+| English (New Zealand) | `en-NZ` | Grok, Grok B, Saaras, Bakbak, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux EN, Flux M | Grok, Bulbul, Raya, Soniox, Turbo, Flash, v3 |
+| English (UK) | `en-GB` | Grok, Grok B, Saaras, Bakbak, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux EN, Flux M | Grok, Bulbul, Raya, Soniox, Turbo, Flash, v3 |
+| English (US) | `en-US` | Grok, Grok B, Saaras, Bakbak, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux EN, Flux M | Grok, Bulbul, Raya, Soniox, Turbo, Flash, v3 |
+| Estonian | `et` | Soniox, Live TX, GPT TX B | Soniox |
+| Filipino | `fil` | Grok, Grok B | Turbo, Flash, v3 |
+| Finnish | `fi` | Soniox, Live TX, GPT TX B | Soniox, Turbo, Flash, v3 |
+| French | `fr` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| French (Canada) | `fr-CA` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Galician | `gl` | Soniox, Live TX, GPT TX B | Soniox |
+| German | `de` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Greek | `el` | Soniox, Live TX, GPT TX B | Soniox, Turbo, Flash, v3 |
+| Gujarati | `gu` | Saaras, Bakbak, Soniox | Bulbul, Raya, Soniox |
+| Hebrew | `he` | Soniox, Live TX, GPT TX B | Soniox |
+| Hindi | `hi` | Grok, Grok B, Saaras, Bakbak, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Bulbul, Raya, Soniox, Turbo, Flash, v3 |
+| Hindi (Latin script) | `hi-Latn` | Grok, Grok B, Saaras, Bakbak, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Bulbul, Raya, Soniox, Turbo, Flash, v3 |
+| Hungarian | `hu` | Soniox, Live TX, GPT TX B | Soniox, Turbo, Flash, v3 |
+| Icelandic | `is` | Live TX, GPT TX B | Soniox |
+| Indonesian | `id` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Italian | `it` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Japanese | `ja` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Kannada | `kn` | Saaras, Bakbak, Soniox, Live TX, GPT TX B | Bulbul, Raya, Soniox |
+| Kashmiri | `ks` | Saaras, Bakbak | — |
+| Kazakh | `kk` | Soniox, Live TX, GPT TX B | Soniox |
+| Konkani | `kok` | Saaras, Bakbak | — |
+| Korean | `ko` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Latvian | `lv` | Soniox, Live TX, GPT TX B | Soniox |
+| Lithuanian | `lt` | Soniox, Live TX, GPT TX B | Soniox |
+| Macedonian | `mk` | Grok, Grok B, Soniox, Live TX, GPT TX B | Soniox |
+| Maithili | `mai` | Saaras, Bakbak | — |
+| Malay | `ms` | Grok, Grok B, Soniox, Live TX, GPT TX B | Soniox, Turbo, Flash, v3 |
+| Malayalam | `ml` | Saaras, Bakbak, Soniox | Bulbul, Raya, Soniox |
+| Manipuri | `mni` | Saaras, Bakbak | — |
+| Maori | `mi` | Live TX, GPT TX B | — |
+| Marathi | `mr` | Saaras, Bakbak, Soniox, Live TX, GPT TX B | Bulbul, Raya, Soniox |
+| Nepali | `ne` | Saaras, Bakbak, Live TX, GPT TX B | Raya |
+| Norwegian | `no` | Soniox, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Soniox, Turbo, Flash, v3 |
+| Odia | `or` | Saaras, Bakbak | Bulbul |
+| Persian | `fa` | Grok, Grok B, Soniox, Live TX, GPT TX B | Soniox |
+| Polish | `pl` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Soniox, Turbo, Flash, v3 |
+| Portuguese | `pt` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Soniox, Turbo, Flash, v3 |
+| Portuguese (Brazil) | `pt-BR` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Portuguese (Portugal) | `pt-PT` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Punjabi | `pa` | Saaras, Bakbak, Soniox | Bulbul, Soniox |
+| Romanian | `ro` | Grok, Grok B, Soniox, Live TX, GPT TX B | Soniox, Turbo, Flash, v3 |
+| Russian | `ru` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Sanskrit | `sa` | Saaras, Bakbak | — |
+| Santali | `sat` | Saaras, Bakbak | — |
+| Serbian | `sr` | Soniox, Live TX, GPT TX B | Soniox |
+| Sindhi | `sd` | Saaras, Bakbak | — |
+| Slovak | `sk` | Soniox, Live TX, GPT TX B | Soniox, Turbo, Flash, v3 |
+| Slovenian | `sl` | Soniox, Live TX, GPT TX B | Soniox |
+| Spanish | `es` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Soniox, Turbo, Flash, v3 |
+| Spanish (Latin America) | `es-419` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Soniox, Turbo, Flash, v3 |
+| Spanish (Mexico) | `es-MX` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Spanish (Spain) | `es-ES` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Sundanese | `su` | — | Soniox |
+| Swahili | `sw` | Soniox, Live TX, GPT TX B | Soniox |
+| Swedish | `sv` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Soniox, Turbo, Flash, v3 |
+| Tagalog | `tl` | Soniox, Live TX, GPT TX B | Soniox |
+| Tamasheq | `taq` | Nova-3 M, Nova-3, Flux M | — |
+| Tamil | `ta` | Saaras, Bakbak, Soniox, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Bulbul, Raya, Soniox, Turbo, Flash, v3 |
+| Telugu | `te` | Saaras, Bakbak, Soniox | Bulbul, Raya, Soniox |
+| Thai | `th` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Soniox |
+| Turkish | `tr` | Grok, Grok B, Soniox, Scribe, Scribe B, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Grok, Soniox, Turbo, Flash, v3 |
+| Ukrainian | `uk` | Soniox, Live TX, GPT TX B, Nova-3 M, Nova-3, Flux M | Soniox, Turbo, Flash, v3 |
+| Urdu | `ur` | Saaras, Bakbak, Soniox, Live TX, GPT TX B | Soniox |
+| Uzbek | `uz` | — | Soniox |
+| Vietnamese | `vi` | Grok, Grok B, Soniox, Live TX, GPT TX B | Grok, Soniox, Turbo, Flash, v3 |
+| Welsh | `cy` | Soniox, Live TX, GPT TX B | Soniox |
+
+  </Accordion>
+</AccordionGroup>
+
+Speech-to-speech models publish their own lists: `openai/gpt-realtime-2.1` and
+`gpt-realtime-2.1-mini` accept the same 57 codes as OpenAI's speech-to-text
+models, Gemini Live accepts 19, and the two Grok Voice models publish none and
+ignore the setting.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Speech and turn detection" href="/agents/speech-to-text-and-turn-detection">
+    Why the language also decides how a caller's turn ends.
+  </Card>
+  <Card title="Voices" href="/agents/voices">
+    Filtering the voice gallery by the language you picked.
+  </Card>
+  <Card title="Models" href="/agents/models">
+    The full catalog, and cascade versus speech-to-speech.
+  </Card>
+</CardGroup>

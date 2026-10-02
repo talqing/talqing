@@ -1,0 +1,263 @@
+---
+title: "Monitoring"
+description: "Batch and send statuses, live counts, why either stopped itself, and what drafting has cost so far."
+---
+
+A batch is a drafting job with a review gate at the end of it, and a **send** is what a person creates on the other side of that gate. The two have separate lifecycles and separate failure modes, and this page covers both.
+
+`GET /v1/email/batches/{batch_id}` is the whole picture in one call.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/email/batches/7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57 \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const batch = await talqing.email.batches.get({
+  batch_id: "7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57",
+});
+
+console.log(batch.status, batch.counts, batch.next_draft_at, batch.failure_reason);
+```
+
+```python Python
+batch = talqing.email.batches.get("7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57")
+
+print(batch["status"], batch["counts"], batch["next_draft_at"], batch["failure_reason"])
+```
+</CodeGroup>
+
+```json
+{
+  "status": "drafting",
+  "counts": {
+    "total": 4200, "pending": 3702, "drafting": 5, "draft": 468, "draft_failed": 6,
+    "skipped": 12, "queued": 0, "sending": 0, "sent": 7, "send_failed": 0, "canceled": 0
+  },
+  "skips": { "operator": 2, "duplicate_recipient": 0, "unfillable": 10 },
+  "draft_failures": [{ "reason": "subject is empty (subject_line)", "count": 6 }],
+  "next_draft_at": null,
+  "next_draft_reason": null,
+  "stale_redraftable": 379,
+  "stale_sent": 0,
+  "failure_reason": null,
+  "sent_today": 7,
+  "send_daily_cap": { "kind": "fixed", "limit": 200 },
+  "send_daily_cap_today": 200,
+  "drafted_versions": [{ "version": 3, "count": 96 }, { "version": 2, "count": 379 }],
+  "published_task_version": 3,
+  "provider_cost": 11.4832,
+  "started_at": "2026-08-30T09:00:04Z",
+  "drafted_at": null
+}
+```
+
+| Field | What it answers |
+| --- | --- |
+| `status` | What the drafting job is doing. Nothing else. |
+| `counts` | One number per row status, plus `total`. `total` is the only stored count; the rest are tallied per read. `queued` is the drafts a live send covers, and `draft` the ones none does. |
+| `skips` | `counts.skipped` by reason: `operator`, `duplicate_recipient`, `unfillable`. An `unfillable` row can never be sent and is never drafted, so progress is measured without it — drafting against `total − unfillable`, sending against `total − skipped − draft_failed − canceled`. |
+| `draft_failures` | Why drafts failed, grouped by `last_error`, most common first, at most five. Whether a redraft can help depends on which. |
+| `next_draft_at` | When it will next draft a row, and `next_draft_reason` says which gate is holding it. |
+| `stale_redraftable` | How many rows an older version wrote **that a redraft would actually rewrite**. Not the same as adding up `drafted_versions`, which counts sent rows too — `stale_sent` is how many of those have already gone. |
+| `failure_reason` | Why it stopped, or why the last row failed. |
+| `sent_today` | How many of this batch's emails have gone out in the current local day, against `send_daily_cap_today` — the fixed limit, or where a ramp has got to. |
+| `drafted_versions` | Which published version of the task wrote how many rows, newest first, sent rows included. Use `stale_redraftable` for "how many could I redraft". |
+| `provider_cost` | What drafting has cost so far, summed over every row's task run. |
+| `started_at` / `drafted_at` | When the first row was claimed, and when the last one landed. |
+| `input_columns` / `output_columns` | The merged column space: your headers, then whatever the task declares. Read live, so a task that grew a field shows the new column. |
+
+## Batch statuses
+
+The dashboard renames two of these, and the renames matter enough to learn both.
+
+| API | Dashboard | Meaning |
+| --- | --- | --- |
+| `scheduled` | Scheduled | Created, waiting for `start_at`. |
+| `drafting` | Drafting | Running the task over rows, `draft_concurrency` at a time. |
+| `paused` | Paused | Someone paused it — **or it paused itself** after ten failures in a row, which is the case where `failure_reason` is set. Nothing is scheduled until it is resumed, and resuming carries on from where it stopped. |
+| `drafted` | **Ready to review** | Every row added so far has finished drafting. Adding rows drafts again. |
+| `canceled` | Canceled | Someone cancelled it. Drafting is over for good, and its rows cannot be drafted again. |
+| `failed` | **Stopped** | Drafting stopped and trying again cannot help: a deleted task, a broken field map, a creator who left. `failure_reason` says which. |
+
+<Note>
+**`drafted` means the drafts are ready, not that the batch is finished.** It says nothing about how many emails have been sent — that is what `counts` is for. A batch can sit at `drafted` forever with zero rows sent, and that is a normal end state, not a stall.
+</Note>
+
+The status filter on `GET /v1/email/batches` takes these same six strings.
+
+## `next_draft_at` and `next_send_at`
+
+Two fields, on two different objects, answering the same question: *why is nothing happening right now?*
+
+Both are `null` while the thing is actually working, and `null` once it is paused or over. Each comes with a **reason**, so you never have to infer which gate is holding it from other numbers.
+
+**`next_draft_at` / `next_draft_reason`** on the batch. Drafting has two reasons to wait, because there is no drafting window — nobody receives a draft:
+
+| Reason | Meaning |
+| --- | --- |
+| `start` | `start_at` has not arrived. |
+| `retry` | Every remaining row is waiting out `draft_retry_after_minutes`. `next_draft_at` is the earliest of them. |
+
+**`next_send_at` / `next_send_reason`** on a send. Sending has six:
+
+| Reason | Meaning |
+| --- | --- |
+| `start` | `start_at` has not arrived. |
+| `window` | Outside the send's business hours. `next_send_at` is the next opening. |
+| `daily_cap` | Today's limit (`send_daily_cap_today`) is spent for the local day. `next_send_at` is the next local midnight. The cap counts the whole **batch**, so several sends share one allowance. |
+| `retry` | Every remaining row is waiting out a retry. |
+| `gap` | Pacing between two emails of the **batch** — across all of its sends — and only reported when that wait is a minute or more. |
+| `drafting` | Everything the send covers that is ready has gone, and more of its rows are still being drafted. `next_send_at` is `null`: there is no instant to name. A send of every row waits like this for as long as drafting runs. |
+
+<Note>
+**These are properties of the batch and the send, not of a queue you can inspect.** A change to policy — raising a cap, widening a window, shortening the gap — reaches a waiting send within five minutes, with no restart and nothing to cancel: it re-reads its own row as it goes.
+</Note>
+
+A `drafting` batch or a `sending` send whose `next_*_at` has been in the past for more than a few minutes is something to look at.
+
+## When a batch stops itself
+
+Two things stop drafting, and they are deliberately different shapes.
+
+| Trigger | Threshold | What it does |
+| --- | --- | --- |
+| Row drafting keeps failing | **Ten consecutive** failures | **Pauses**, with `failure_reason` set and `email_batch.paused` fired. Nothing is lost — every row stays where it was — and **Resume** carries on from there, clearing the counter. The count is rolling, not cumulative, and any success resets it to zero. |
+| A `configuration` failure | **The first one** | **Fails.** A deleted tool, a missing provider key, an integration whose credential no longer resolves. It will fail identically on row 4,001, so the batch stops rather than proving it four thousand times. |
+
+Only drafting stops a batch. **A send failure never does** — it stops that send, and its unsent rows are simply drafts again. See below.
+
+Four more things stop a batch outright, each with a sentence in `failure_reason`:
+
+- the person who created it is no longer in the workspace,
+- that person is no longer an admin or editor. Both checks happen when drafting starts or restarts, as an HTTP request from them would be authorized on arrival; a batch already drafting finishes the list it began,
+- the task that drafts it has been deleted,
+- a publish of the task broke the field map. It is re-checked whenever the published version moves, not only at create: publishing and rolling back are refused while a live batch would break, but a publish can still move ground the guard cannot see, and then there is nothing to map.
+
+<Note>
+**A `missing_vars` failure never counts toward the ten.** A blank cell in a column the task requires is a fact about that row's data, not about the batch — ten of them in a row would otherwise stop a batch whose other 9,990 rows are fine. It also costs nothing: the check runs before the model is reached.
+</Note>
+
+When the breaker trips, the batch goes to **`paused`**, `failure_reason` carries the last thing that went wrong, and `email_batch.paused` fires. Nothing is handed back and nothing is discarded: fix whatever it names, press **Resume drafting**, and it continues from where it stopped. `failed` is reserved for the stops above, where trying again cannot help.
+
+## Why one row failed
+
+`last_error` on a recipient is the row-level answer. During drafting it reads `{error_type}: {message}`:
+
+```text
+provider_error: the model or a tool server failed: <what the provider said>
+missing_vars: this run supplied no value for required variable(s): company
+```
+
+| Error type | Retried? |
+| --- | --- |
+| `provider_error` | Yes, up to `draft_attempts`, `draft_retry_after_minutes` apart. |
+| `timeout` | Yes. |
+| `platform` | Yes. |
+| `canceled` | Yes, automatically, and **without spending an attempt** — a deploy stopped the worker, which is not this row's failure. |
+| `missing_vars` | No. The data is wrong; fix the cell and `redraft`. |
+| `no_output` | No. A second run produces the same non-answer. |
+| `step_limit` | No. |
+| `configuration` | No — and it stops the whole batch. |
+
+A row whose attempts are spent lands in `draft_failed` and waits for a person. `POST .../redraft` puts it back to `pending` with its attempt count reset — see [reviewing and sending](/email/reviewing-and-sending).
+
+A row also lands in `draft_failed` when the run **succeeded** and produced nothing that can be emailed — no address, an empty subject. Its `last_error` is the plain sentence rather than a typed one (`to is empty (email)`), it holds its `output` so you can read what the task did find, and it does not count against the batch's breaker: a list where two thirds of the numbers are unlisted is the task working, not the batch failing. It is not retried on its own either — the run answered, and asking again costs another run to get the same nothing.
+
+One more row-level error has no type prefix: `the worker drafting this row stopped before it finished`. That is a process that died mid-run rather than shut down cleanly, and the row goes back to `pending` without spending an attempt.
+
+## Send failures
+
+A send failure is classified by who owns the problem, and the class decides what happens next.
+
+| Class | What it is | What happens |
+| --- | --- | --- |
+| **transient** | A rate limit, a 5xx, a network error, anything unrecognised. | The row goes back to `queued` — a draft its send still covers — for another attempt `send_retry_after_minutes` later — under the same idempotency key, so a send that actually landed is not repeated. It also moves the send's breaker. |
+| **row** | This one email was refused: a malformed address, a payload the provider rejected. | The row settles `send_failed` and the send carries on. It does **not** move the breaker: that is a fact about the row's data. |
+| **account** | A revoked or invalid key, an unverified sending domain, a daily or monthly quota. | **That send stops immediately** and every row it has not sent goes back to `draft`. The batch is untouched. |
+
+For a send failure, `last_error` is the provider's own message rather than a typed prefix. Anything not recognised is treated as transient on purpose: a send that might have landed must not be written off as permanently failed, and the retry costs nothing because the idempotency key makes a re-send of a successful email a no-op.
+
+### When a send stops itself
+
+| Trigger | Threshold |
+| --- | --- |
+| Provider failures in a row | **Ten consecutive**, rolling, reset by any success |
+| An account-level refusal | **The first one** — it is deterministic, so a rolling counter is the wrong shape |
+
+Either way the send goes `failed` with a `failure_reason`, and **every row it had not sent is simply a draft again**. Nothing is lost: fix the cause, and create another send over the same rows.
+
+### Pausing, resuming and cancelling a send
+
+| Action | From | Effect |
+| --- | --- | --- |
+| `POST .../sends/{id}/pause` | `scheduled`, `sending` | Stops on the next email. Rows stay `queued`, and stay editable. |
+| `POST .../sends/{id}/resume` | `paused` | Carries on, and clears `failure_reason` and the breaker count. |
+| `POST .../sends/{id}/cancel` | `scheduled`, `sending`, `paused` | Every unsent row is a `draft` again. A send's scope never changes, so this and another send is how to change what it covers. |
+
+A row that is mid-send when a cancel lands is left alone and finishes — it may already be in someone's inbox.
+
+## Pause, resume, cancel
+
+| Action | From | Effect |
+| --- | --- | --- |
+| `POST .../pause` | `scheduled`, `drafting`, `drafted` | Stops claiming new rows. Runs already in flight finish. A paused batch has nothing scheduled at all until you resume it, so rows added meanwhile wait. Drafts already made stay reviewable and sendable. |
+| `POST .../resume` | `paused` | Starts again from where it stopped, and clears `failure_reason` and the breaker count. A batch whose `start_at` is still in the future goes back to `scheduled`, not `drafting`. |
+| `POST .../cancel` | `scheduled`, `drafting`, `paused` | Stops drafting for good. Rows already drafted are **not** touched and can still be sent; rows never reached report as `canceled`. |
+
+Anything else is a `409` naming the current status.
+
+<Note>
+**None of these touches a send.** Cancelling a batch stops its drafting; a send that is scheduled for Monday still goes out on Monday, and the drafts a person already reviewed are still theirs to send. Stopping the spend on a list is not the same act as throwing away work you have paid for and read.
+</Note>
+
+<Warning>
+**Deleting a batch deletes the record of what was sent to whom** — the addresses, the wording, the sending domain and the time. Export the CSV first if you may need to answer "what did we send this person". `DELETE /v1/email/batches/{batch_id}` (**Delete batch…** in the batch's menu) removes the batch, its rows and its sends for good, and is refused while the batch is still drafting or a send has not finished.
+</Warning>
+
+## Cost
+
+`provider_cost` on the batch is the running total of what drafting has spent: every row's task run, summed. It is `null` until the first run has a cost.
+
+That is your own model spend on your own [provider keys](/get-started/provider-keys). Talqing charges no platform fee on an email batch, and it does not meter whatever the task's tools and MCP servers charge per call — a lookup that spends a vendor's credits per row spends them 4,200 times on a 4,200-row batch, and shows up on that vendor's bill, not here.
+
+<Warning>
+**Task spend does not appear in the Observability charts.** Those are built on calls and conversations; a task run is neither. The number on the batch is the only place this spend is reported, and there is no cap in front of it. Every row runs the task and is billed whether or not it is ever sent.
+</Warning>
+
+## Webhooks
+
+Eight events. The first four carry the batch body a `GET` would return; the last four carry a send.
+
+| Event | When |
+| --- | --- |
+| `email_batch.started` | Drafting claimed its first row. |
+| `email_batch.drafted` | The last row finished drafting. The one worth pushing to a person: *your 412 drafts are ready to review*. Fires again after rows added later are drafted. |
+| `email_batch.paused` | Drafting **paused itself** after ten failures in a row. Every row is where it was, and `resume` carries on from there. |
+| `email_batch.failed` | Drafting stopped and trying again cannot help: a configuration failure, a deleted task, a broken field map, a creator who left. |
+| `email_batch.send.started` | The first email of a send went out. |
+| `email_batch.send.completed` | Every row a send covers has gone or failed — for a send of every row, once drafting has ended too. Fires again if added rows reopen the send. |
+| `email_batch.send.paused` | A send **paused itself** after ten provider failures in a row. Its rows are still queued — nothing was handed back — and `resume` continues. |
+| `email_batch.send.failed` | A send stopped on an account-level refusal: a revoked key, an unverified domain, an exhausted quota. Its unsent rows are drafts again. |
+
+<Note>
+**`*.paused` and `*.failed` are the pair worth wiring up, and they are not the same alarm.** A pause says *something is wrong right now and the work is waiting for you*; a failure says *this will not work until something outside Talqing changes*. Firing one event for both would make the payload's `status` disagree with the event name in the one place a tenant automates against.
+</Note>
+
+<Note>
+**Talqing reports what it sent, not what landed.** Delivery, bounces and spam complaints are Resend's record, and watching them there is how a sending domain survives.
+</Note>
+
+See [webhooks](/observability/webhooks) for the envelope, the signature scheme and delivery records.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Reviewing and sending" href="/email/reviewing-and-sending">
+    Editing rows, redrafting, duplicates, and creating a send you can steer.
+  </Card>
+  <Card title="Agent task errors" href="/tasks/errors-and-limits">
+    What each `error.type` means on the run that produced it.
+  </Card>
+</CardGroup>

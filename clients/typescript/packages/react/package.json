@@ -1,0 +1,73 @@
+{
+  "name": "@talqing/react",
+  "version": "0.10.0",
+  "description": "React bindings for Talqing web calls: the session, images, screen share, userdata and frontend RPC.",
+  "license": "MIT",
+  "homepage": "https://talqing.com",
+  "bugs": {
+    "email": "hello@talqing.com"
+  },
+  "keywords": [
+    "talqing",
+    "ai",
+    "agents",
+    "voice",
+    "video",
+    "livekit",
+    "react"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node ../../scripts/dist-markers.mjs",
+    "dev": "tsc -w -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@livekit/components-react": "^2.9.21",
+    "@talqing/client": "^0.6.0",
+    "@talqing/sdk": "^0.9.0",
+    "livekit-client": "^2.20.2",
+    "react": "^18.3.1 || ^19.0.0",
+    "react-dom": "^18.3.1 || ^19.0.0"
+  },
+  "devDependencies": {
+    "@livekit/components-react": "^2.9.24",
+    "@talqing/client": "^0.6.0",
+    "@talqing/sdk": "^0.9.0",
+    "@types/react": "^19.0.0",
+    "livekit-client": "^2.22.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "~5.9.3"
+  }
+}

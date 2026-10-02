@@ -1,0 +1,166 @@
+---
+title: "Video avatars"
+description: "A video agent is a voice agent wearing an Anam face: how to pick one, what it requires, and what it costs."
+---
+
+`channel: "video"` gives an agent a face. The Anam engine joins the call as a
+second participant, consumes the audio the agent publishes, and republishes it
+lip-synced to video on the agent's behalf.
+
+Nothing about the agent's brain changes. The avatar renders from the agent's own
+audio whatever produced it — a text-to-speech model in the cascade, or a
+speech-to-speech model — so **video runs on either pipeline, and everything true
+of that pipeline on `voice` is still true here.** Voices, expressive delivery,
+turn detection, tools and handoffs all work the same way.
+
+```json
+{
+  "channel": "video",
+  "avatar": {
+    "provider": "anam",
+    "model": "anam",
+    "avatar_id": "edf6fdcb-acab-44b8-b974-ded72665ee26",
+    "name": "Mia"
+  }
+}
+```
+
+Switching a config to `video` fills in a default `avatar` for you; switching
+away from it clears the object.
+
+## The `avatar` object
+
+<ParamField path="provider" type="string" default="anam">
+  An `avatar` provider from `GET /v1/catalog`. `anam` is the only one.
+</ParamField>
+
+<ParamField path="model" type="string" default="anam">
+  The catalog model, which is also the billing SKU. Required to publish:
+  without it, `video agents need an avatar model (e.g. anam)`.
+</ParamField>
+
+<ParamField path="avatar_id" type="string | null">
+  A face `id` from `GET /v1/catalog/avatars`. Required to publish: without it,
+  `video agents need an avatar`.
+</ParamField>
+
+<ParamField path="name" type="string | null">
+  The persona display name sent to Anam. Cosmetic — it does not change the face.
+</ParamField>
+
+## Picking a face
+
+`GET /v1/catalog/avatars` is the gallery. `active_version` (the Cara generation)
+and `render_style` (values such as `realistic`, `animated_3d` and `illustrated`)
+filter it, and the response echoes back the values present in the unfiltered gallery as
+`active_versions` and `render_styles` so the filters stay stable while you
+narrow. `offset` and `limit` page it, up to 100 at a time.
+
+<CodeGroup>
+```bash cURL
+curl -G https://api.in.talqing.com/v1/catalog/avatars \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "render_style=realistic" \
+  --data-urlencode "limit=40"
+```
+
+```typescript TypeScript
+const { avatars, active_versions, render_styles, has_more } =
+  await talqing.catalog.avatars.list({ render_style: "realistic", limit: 40 });
+```
+
+```python Python
+page = talqing.catalog.avatars.list(render_style="realistic", limit=40)
+```
+</CodeGroup>
+
+Each entry carries `id`, `name`, `variant`, `image_url`, `active_version` and
+`render_style`. The `id` is what goes in `avatar.avatar_id`.
+
+<Note>
+  `active_version` and `render_style` are **gallery facets, not models**. The
+  agent's `avatar.model` always comes from `GET /v1/catalog`, and at runtime
+  Talqing sends no version override at all — Anam renders each face at its own
+  server-side default. Filtering by a Cara version narrows what you can pick; it
+  does not pin what is rendered.
+</Note>
+
+With an Anam key saved for the workspace the gallery is your own Anam account's,
+and `workspace_key` comes back `true`. Without one you see Talqing's.
+
+## What video requires
+
+<Warning>
+  **Video needs an Anam key of your own.** Add one under
+  [provider keys](/get-started/provider-keys) or publishing is refused with
+  `no Anam API key for this workspace - add one under BYOK`.
+
+  **A video agent that cannot get a face does not fall back to voice.** If Anam
+  is out of capacity, the API errors, or the avatar has not joined within 30
+  seconds, the call ends with the close reason `avatar_start_failed`. If the
+  avatar leaves mid-call, the call ends with `avatar_disconnected` rather than
+  running on with a frozen face. See
+  [close reasons](/observability/close-reasons).
+</Warning>
+
+**Video is web only.** A video agent cannot be assigned to a phone number
+(`only published voice agents can answer SIP`) and cannot be dialled outbound
+(`outbound SIP requires a voice agent`). Reach one through
+`POST /v1/calls/token` — see [web calls](/channels/web-calls).
+
+**`resume_false_interruption` is forced off.** The avatar's audio output cannot
+be paused, and resuming a sentence after a false interruption needs a pause — so the
+setting is pinned off for every video agent whatever the config says, and the
+dashboard hides the control rather than showing one that lies. The rest of
+[turn handling](/agents/turn-handling) behaves exactly as it does on voice.
+
+**A handoff between video agents must keep the same face.** The Anam session is
+opened once, for the call, and cannot be swapped part-way through, so the
+target's `avatar` provider, model, `avatar_id` and `name` must all match the
+source's:
+
+```
+video handoffs require the same avatar provider, catalog model, avatar and
+display name - the Anam session is opened once, for the call, and cannot be
+swapped for another face part-way through
+```
+
+Channel and pipeline must match across a handoff too, so a video agent hands
+off only to another video agent on the same pipeline. See
+[handoffs](/teams/handoffs).
+
+## What it costs
+
+Avatar time is metered as **wall-clock seconds, idle included** — the clock
+starts when the Anam session is created, before the caller says anything, and
+stops when it is closed. Four minutes of a caller reading something
+before they answer is four minutes of avatar. It is priced per minute at the catalog's
+Anam rate and shown as its own line in the call's cost breakdown.
+
+That line is your own Anam spend, on your own key, on top of whatever the
+models cost — Talqing never resells it. Talqing's own charge is the per-minute
+platform fee, which is higher on `video` than on `voice`; see
+[pricing and credits](/get-started/pricing-and-credits) and
+[costs](/observability/costs).
+
+## Receiving the video
+
+A viewer joins the same LiveKit room and subscribes to the avatar participant's
+track. The browser SDK does that for you —
+[web calls](/channels/web-calls) covers minting a call token and connecting, and
+[web call features](/channels/web-call-features) covers rendering the avatar
+track alongside images, screen share and frontend actions.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Web calls" href="/channels/web-calls">
+    The call token and the browser integration a video agent needs.
+  </Card>
+  <Card title="Channels" href="/agents/channels">
+    What voice, video and text each have, and what they normalize away.
+  </Card>
+  <Card title="Voices" href="/agents/voices">
+    The voice the avatar lip-syncs to.
+  </Card>
+</CardGroup>

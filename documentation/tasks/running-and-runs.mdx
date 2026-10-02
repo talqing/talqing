@@ -1,0 +1,261 @@
+---
+title: "Running and runs"
+description: "Run a task and wait for the result, then read the output, the trace, the steps and the cost."
+---
+
+`POST /v1/tasks/{task_id}/runs` runs a task once with the values you supply and waits for it to finish. There is no queue and no job id to poll — the response is the whole run.
+
+<Note>
+This page is about running a task **on its own**. A task an agent enters mid-conversation is not a run: it has no `task_runs` row, no `error.type` and no separate bill, because it happened inside that call and is recorded as part of it. See [agent tasks](/agents/agent-tasks#in-the-transcript-and-on-the-bill).
+</Note>
+
+It runs the task's **published version**. A task that has never been published is refused with `publish '<name>' before running it`.
+
+<Warning>
+**A run executes for real.** The tools call your endpoints with your secrets, the MCP servers spend your credits, and the model spends your tokens on your own provider key. A task that books a slot, charges a card or sends a message will do so. This is true of the **Run** panel in the dashboard too.
+</Warning>
+
+Running a task needs the editor role. Reading its history does not.
+
+## Which version runs
+
+`version` picks the definition:
+
+| `version` | What runs |
+| --- | --- |
+| omitted | The published version. A `400` if there is none. |
+| a number | That frozen version. A `404` if it does not exist. |
+| `"draft"` | The unpublished config, **validated at publish grade and tool-pinned at request time** — so a draft that could not be published is refused with those errors rather than failing halfway through. |
+
+`"draft"` is the iteration loop: change the draft, run it, read the trace, fix — without putting unreviewed work live. It is what the TaskCoPilot uses. The dashboard's Run panel does not send it; publishing is how an edit becomes runnable there, for a task as for an agent.
+
+Every run records **which definition it used** as `task_version`, null for a draft run. That is what tells two runs either side of a publish apart.
+
+<CodeGroup>
+```bash cURL
+curl -sS -X POST \
+  https://api.in.talqing.com/v1/tasks/0b7d4c92-3e51-4a86-9f2d-71c0a4e58b13/runs \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  --max-time 200 \
+  -d '{ "vars": { "email": "priya@northwind.example" } }'
+```
+
+```typescript TypeScript
+const run = await talqing.tasks.runs.create({
+  task_id: "0b7d4c92-3e51-4a86-9f2d-71c0a4e58b13",
+  runTaskRequest: { vars: { email: "priya@northwind.example" } },
+});
+
+if (run.status === "failed") {
+  console.error(run.error?.type, run.error?.message);
+} else {
+  console.log(run.output);
+}
+```
+
+```python Python
+run = talqing.tasks.runs.create(
+    "0b7d4c92-3e51-4a86-9f2d-71c0a4e58b13",
+    vars={"email": "priya@northwind.example"},
+)
+
+if run["status"] == "failed":
+    print(run["error"]["type"], run["error"]["message"])
+else:
+    print(run["output"])
+```
+</CodeGroup>
+
+<Warning>
+The request blocks for as long as the run takes, up to the task's `timeout_seconds` (default 300, max 600). **Set your HTTP client's read timeout above it.** The Python SDK defaults to 30 seconds, which will abandon a run that is still perfectly healthy — you lose the result, not the spend. See [the Python SDK](/sdks/python).
+</Warning>
+
+## What comes back
+
+```json
+{
+  "id": "5a2e9d10-64bc-4f37-8e91-2c7b0d4a6f58",
+  "task_id": "0b7d4c92-3e51-4a86-9f2d-71c0a4e58b13",
+  "task_name": "Research a company",
+  "task_version": 3,
+  "status": "completed",
+  "error": null,
+  "vars": { "email": "priya@northwind.example" },
+  "output": {
+    "company_name": "Northwind Tools",
+    "what_they_sell": "Warehouse management software for mid-market distributors.",
+    "employee_count": 240,
+    "is_enterprise": false
+  },
+  "trace": [],
+  "steps_used": 4,
+  "max_steps": 25,
+  "attempts": 1,
+  "usage": [
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "input_tokens": 18432,
+      "input_cached_tokens": 12288,
+      "output_tokens": 951,
+      "purpose": "conversation",
+      "priority": false
+    }
+  ],
+  "provider_cost": 0.0184,
+  "billing_status": "computed",
+  "started_at": "2026-08-30T09:14:02.118Z",
+  "ended_at": "2026-08-30T09:14:19.402Z",
+  "duration_ms": 17284
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | uuid | This run. |
+| `task_id` | uuid \| null | Null once the task has been deleted — the run survives it. |
+| `task_name` | string \| null | The task's name at the time, so the run stays readable after a rename or a delete. |
+| `task_version` | integer \| null | Which published version ran. Null for a `version: "draft"` run. |
+| `status` | `running` \| `completed` \| `failed` | `running` only appears while a run is in flight, which you see when listing rather than in this response. |
+| `error` | object \| null | `{type, message}` on a failure. See [errors and limits](/tasks/errors-and-limits). |
+| `vars` | object | The values this run was given. |
+| `output` | object \| null | The validated `submit_result` payload. Null unless `status` is `completed`. |
+| `trace` | array | Every tool call and everything the model wrote, in order. |
+| `steps_used` | integer | Rounds used by the busiest attempt. |
+| `max_steps` | integer | The cap that was in force, stored on the run rather than read from the config, which may have moved since. |
+| `attempts` | integer | How many times the model was prompted to produce the result. |
+| `usage` | array | Tokens per provider and model. |
+| `provider_cost` | number \| null | Estimated spend on your own provider key, in USD. |
+| `billing_status` | string | `computed`, `skipped`, `unpriceable` or `pending`. |
+| `started_at`, `ended_at`, `duration_ms` | — | Wall clock. |
+
+`billing_status` is `skipped` when nothing reached a provider — a missing required variable, a missing provider key — which is not the same as spend of zero. It is `unpriceable` when the run happened but its model is missing from the catalog, so the cost is quarantined rather than reported as zero.
+
+## Reading `attempts` and `steps_used`
+
+These two numbers only make sense together, and reading `steps_used` alone will mislead you.
+
+**A step is one model → tools → model round, not one tool call.** Four tools called in a single reply cost one step.
+
+**A run that ends without calling `submit_result` is re-prompted rather than failed** — up to twice, so `attempts` is 1, 2 or 3. And **each re-prompt starts the step budget over**.
+
+So `attempts: 3` means two earlier attempts ended with no result — most often because they used every one of their steps — and the third one recovered. That run may have used up to three times the rounds `steps_used` shows.
+
+`steps_used` reports the **busiest attempt's** count, not the total, because the busiest attempt's count is the number `max_steps` actually governs. Summing them would report `step_limit` for two well-behaved attempts in a row.
+
+Which means `timeout_seconds`, not `max_steps`, is what really bounds a run: three attempts of 25 rounds each is 75 rounds of work, and only the clock stops it.
+
+A successful run's last round is the `submit_result` call itself, so a task that calls no other tool still reports `steps_used: 1`.
+
+In the dashboard, the Run panel shows this as `4 of 25` on one attempt and `12 of 25 ×3` on three.
+
+## The trace
+
+`trace` is everything the model did, in order. Two kinds of entry:
+
+```json
+[
+  {
+    "step": 1,
+    "kind": "message",
+    "name": "assistant",
+    "result": "I'll look up the domain first.",
+    "args": null,
+    "ms": null,
+    "truncated": false
+  },
+  {
+    "step": 2,
+    "kind": "tool",
+    "name": "web_lookup",
+    "args": { "domain": "northwind.example" },
+    "result": { "title": "Northwind Tools", "employees": 240 },
+    "ms": 812,
+    "truncated": false
+  }
+]
+```
+
+- `kind: "tool"` is a call the model made. `name` is the tool as the model called it, which for an MCP tool is the namespaced name. `args` and `result` are parsed when they are JSON and kept as text when they are not. `ms` is the time from the call to its output.
+- `kind: "message"` is something the model wrote. `name` is `assistant`, the text is in `result`, and `ms` is null because a message is written progressively and has no such pair of moments.
+
+Two things are done to it before it is stored, and both are visible:
+
+- **Workspace secret values are masked.** Redaction happens before the row is written, not before it is rendered — the trace is readable by everyone in the workspace, so a credential that reached it once would already have leaked.
+- **A field longer than 4,000 characters is cut** and the entry's `truncated` flag is set to `true`, so a short trace is never mistaken for a complete one.
+
+The trace holds at most 200 entries. A run longer than that keeps the first 200; `steps_used` still reports what actually happened.
+
+## History
+
+`GET /v1/tasks/{task_id}/runs` returns this task's runs, newest first, each with its full output, trace and cost. `GET /v1/tasks/{task_id}/runs/{run_id}` returns one.
+
+<CodeGroup>
+```bash cURL
+curl -sS "https://api.in.talqing.com/v1/tasks/0b7d4c92-3e51-4a86-9f2d-71c0a4e58b13/runs?limit=20" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const page = await talqing.tasks.runs.list({
+  task_id: "0b7d4c92-3e51-4a86-9f2d-71c0a4e58b13",
+  limit: 20,
+});
+
+for (const run of page.items) {
+  const which = run.task_version == null ? "draft" : `v${run.task_version}`;
+  console.log(run.started_at, which, run.status, run.error?.type ?? "", run.provider_cost);
+  for (const step of run.trace) {
+    const detail = step.kind === "tool" ? JSON.stringify(step.args) : String(step.result ?? "");
+    console.log(`  ${step.step} ${step.kind} ${step.name} ${detail}${step.truncated ? " [cut]" : ""}`);
+  }
+}
+```
+
+```python Python
+page = talqing.tasks.runs.list(
+    "0b7d4c92-3e51-4a86-9f2d-71c0a4e58b13", limit=20
+)
+
+for run in page["items"]:
+    which = "draft" if run["task_version"] is None else f"v{run['task_version']}"
+    print(run["started_at"], which, run["status"], run["provider_cost"])
+    for step in run["trace"]:
+        detail = step["args"] if step["kind"] == "tool" else step.get("result")
+        cut = " [cut]" if step["truncated"] else ""
+        print(f"  {step['step']} {step['kind']} {step['name']} {detail}{cut}")
+```
+</CodeGroup>
+
+The list is the standard page shape — `items`, `has_more`, `limit`, `offset` — with a default `limit` of 50 and a maximum of 200. See [pagination](/api-reference/pagination).
+
+`GET /v1/tasks` carries `last_run` on every task, so a list page can say "last run: failed, `step_limit`" without a request per row.
+
+Deleting a task does not delete its runs. They keep the task's name and their `task_id` goes null.
+
+<Warning>
+**Task runs are not in the Observability charts.** Those are built on calls and conversations, and a task is neither. A task's own history is the only place its runs live, and its spend shows only there and on an [email batch](/email/monitoring) page.
+</Warning>
+
+## In the dashboard
+
+The **Run** panel at the bottom of the task editor gives one field per declared variable, a Run button, and the finished run underneath: a status badge, which version ran, how long it took, `steps of max` with the attempt count beside it, the cost and the token total, then the result field by field — with `null` rendered as `null — not found` rather than a blank cell — and an expandable list of everything the model did.
+
+The panel runs the **published** version, so its fields are the ones that version declares and the sentence under the button says to republish after edits. Before the first publish there is a **Not published yet** state in place of the controls.
+
+Each row of an [email batch](/email/reviewing-and-sending) links to the run that drafted it, rendered the same way. That is where "why did it write that" gets answered.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Errors and limits" href="/tasks/errors-and-limits">
+    Every `error.type`, whose problem it is, and the fix.
+  </Card>
+  <Card title="Versions" href="/tasks/versions">
+    Publish, roll back, and what a publish freezes.
+  </Card>
+  <Card title="Email outbound" href="/email/overview">
+    Run a task once per row of a CSV and review what it wrote.
+  </Card>
+</CardGroup>

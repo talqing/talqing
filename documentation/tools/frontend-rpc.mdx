@@ -1,0 +1,225 @@
+---
+title: "Frontend RPC"
+description: "The frontend_rpc operation calls a handler in the web page the caller is looking at, and can publish from what it returns."
+---
+
+`frontend_rpc` calls back into the customer's own web page. The operation names a
+handler your page registered, sends it a payload, waits for its answer, and can
+publish fields out of that answer like any other data operation.
+
+It is what makes a web call more than audio: the agent can fill in the form the
+caller is looking at, highlight the product they asked about, navigate the page,
+or read something only the browser knows.
+
+```json
+{
+  "kind": "frontend_rpc",
+  "config": {
+    "method": "highlight_product",
+    "payload": { "sku": "{{args.sku}}" },
+    "timeout": 5
+  }
+}
+```
+
+<Warning>
+**Web calls only.** A text conversation fails with *"frontend_rpc is unavailable
+for text runs"*, and a phone call has no browser to call, so it fails with
+*"frontend_rpc has no connected web client participant"*. Neither is caught at
+publish — the same tool can be attached to a web agent and a phone agent.
+</Warning>
+
+## The configuration
+
+| Field | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `method` | string, required | — | The handler name your page registered. Must match `^[A-Za-z_][A-Za-z0-9_.-]*$`, so dots and dashes are allowed: `cart.add` is a valid name. |
+| `payload` | any | `null` | Anything JSON. Templated, so `{{args.*}}`, `{{tooldata.*}}` and the rest resolve before it is sent. |
+| `timeout` | number, above 0 and at most 60 | `5` | Seconds to wait for the handler's answer. Seconds, never milliseconds. |
+
+Like `http` and `code`, it also carries `silent`, `publish_fields` and
+`background_execution` — it is one of the three kinds that produce a result.
+
+## The envelope
+
+The platform sends **one** RPC method to the browser, `talqing.frontend_rpc`,
+carrying a JSON envelope:
+
+```json
+{ "method": "highlight_product", "payload": { "sku": "NW-4417" } }
+```
+
+The browser SDK registers that one method and dispatches on `envelope.method` to
+whichever handler you registered under that name. You never register
+`talqing.frontend_rpc` yourself.
+
+## Registering handlers in your page
+
+`useTalqingRpcHandlers` from `@talqing/react` takes a map of handler name
+to handler. Each handler receives the payload as a JSON **string** and must
+return a **string**.
+
+```tsx
+import { useTalqingRpcHandlers } from "@talqing/react";
+
+function CallSurface() {
+  useTalqingRpcHandlers({
+    highlight_product: async ({ payload }) => {
+      const { sku } = JSON.parse(payload);
+      document.querySelector(`[data-sku="${sku}"]`)?.scrollIntoView();
+      return "ok";
+    },
+    read_cart: async () => JSON.stringify({ items: cart.length, total: cart.total }),
+  });
+
+  return <ProductGrid />;
+}
+```
+
+The hook must be used inside your Talqing call context, and it registers and
+unregisters with the connection. The full signature, and the components and
+hooks around it, are in [the React SDK](/sdks/react).
+
+`useTalqingFrontendRpcs()` is the other half of the pair: it registers a
+catch-all handler that records the most recent payload per method and hands them
+back as `{ actions, clear }`. Useful for a debug panel while you are building —
+it answers every call with `"ok"` and does nothing else.
+
+## Reading the answer back
+
+Whatever the handler returns is parsed as JSON and becomes the operation's
+result. A handler that returns a plain string that is not JSON is wrapped as
+`{"result": "<the string>"}`, so a bare `"ok"` is still addressable.
+
+```json
+{
+  "kind": "frontend_rpc",
+  "config": { "method": "read_cart" },
+  "silent": true,
+  "publish_fields": [
+    { "path": "items", "key": "cart_items", "store": "tooldata" },
+    { "path": "total", "key": "cart_total", "store": "tooldata" }
+  ]
+}
+```
+
+A path that is not in the answer fails the operation — see
+[templating and data](/tools/templating-and-data) for how `publish_fields`
+resolve.
+
+## When it fails
+
+| Situation | What happens |
+| --- | --- |
+| No handler registered for that name | The page throws RPC error code **1404**, *"No frontend RPC handler registered for `<method>`"*, and the operation fails. |
+| Your handler throws | RPC error code **1500** with your error's message. |
+| The handler does not answer in `timeout` | The RPC times out and the operation fails. |
+| Nobody is connected | *"frontend_rpc has no connected web client participant"*. |
+| Two browsers in one call and no target | *"frontend_rpc has multiple web clients but no target identity"*. |
+
+All of them are ordinary operation failures, so `on_error` decides what happens
+next: `abort` (the default) ends the tool with the agent's graceful apology,
+`continue` moves on to the next operation. For anything cosmetic — a highlight, a
+scroll — `on_error: "continue"` is usually right: a caller should not be told the
+tool failed because a page element had moved.
+
+<Note>
+A registered handler that throws still returns a *response*; the operation
+failing is the platform passing that failure on. Handle what you can inside the
+handler and return a JSON answer describing it, rather than throwing, if the tree
+should branch on it.
+</Note>
+
+## Fire and forget
+
+`background_execution: true` detaches the operation. Nothing waits for the
+browser, nothing is published, and any failure only reaches the logs. Use it for
+one-way UI effects where the tree has no reason to know the outcome:
+
+```json
+{
+  "kind": "frontend_rpc",
+  "config": { "method": "scroll_to_section", "payload": { "id": "pricing" } },
+  "background_execution": true
+}
+```
+
+`background_execution` and `publish_fields` on the same operation is refused at
+publish — a detached operation has no response to publish out of.
+
+## Worked example: filling a form the caller is looking at
+
+The agent collects the details in conversation, writes them into the page, and
+confirms.
+
+```json
+[
+  {
+    "kind": "frontend_rpc",
+    "config": {
+      "method": "fill_signup_form",
+      "payload": {
+        "name": "{{args.full_name}}",
+        "email": "{{args.email}}",
+        "company": "{{args.company}}"
+      },
+      "timeout": 5
+    },
+    "silent": true,
+    "publish_fields": [{ "path": "ok", "key": "filled", "store": "tooldata" }]
+  },
+  {
+    "kind": "if",
+    "config": { "left": "{{tooldata.filled}}", "op": "eq", "right": true },
+    "then": [
+      {
+        "kind": "say",
+        "config": {
+          "text": "I've filled that in for you — have a look and press Submit when you're happy."
+        }
+      }
+    ],
+    "else": [
+      {
+        "kind": "generate_reply",
+        "config": {
+          "instructions": "Tell them the form could not be filled in automatically and read the details back so they can type them."
+        }
+      }
+    ]
+  }
+]
+```
+
+And the handler:
+
+```tsx
+useTalqingRpcHandlers({
+  fill_signup_form: async ({ payload }) => {
+    const fields = JSON.parse(payload);
+    const ok = form.setValues(fields);
+    return JSON.stringify({ ok });
+  },
+});
+```
+
+<Note>
+In a [test run](/tools/testing-and-publishing) a `frontend_rpc` is simulated:
+there is no browser attached to a test, so the step reports the method and the
+**resolved** payload rather than calling anyone. That is enough to check your
+templating; testing the handler itself means placing a web call.
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Web call features" href="/channels/web-call-features">
+    Frontend actions in context, with images, screen share and userdata.
+  </Card>
+  <Card title="React SDK" href="/sdks/react">
+    `useTalqingRpcHandlers` and every other hook, with signatures.
+  </Card>
+  <Card title="Templating and data" href="/tools/templating-and-data">
+    Templating the payload, and publishing out of the answer.
+  </Card>
+</CardGroup>

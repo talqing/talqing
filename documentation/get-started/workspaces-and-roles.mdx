@@ -1,0 +1,151 @@
+---
+title: "Workspaces and roles"
+description: "A workspace owns everything you build. Invite people into it with one of three roles, and know what each one can do."
+---
+
+A workspace is the boundary everything belongs to: agents, tools, phone numbers, provider keys, secrets, calls and credit. Nothing exists outside one. In the dashboard it is called your organization.
+
+You can belong to several workspaces and switch between them; you always have at least one, because your first sign-in creates one for you.
+
+## Switching workspaces
+
+`GET /v1/orgs` lists every workspace you belong to, with your role in each and when you joined. The dashboard's switcher is that list.
+
+Switching re-issues your session, so your role, your resources and your billing all move with it — which is why the dashboard reloads after a switch. Newest membership is listed first, deliberately: an admin can add you to a workspace without asking you first, so the one you did not know about is the one you should see.
+
+Creating another workspace is `POST /v1/orgs` with a name of 1–100 characters. Any member can do it, and it grants nothing in the workspace you are currently in. A workspace you create yourself starts with **no credit** in any region — the [signup grant](/get-started/pricing-and-credits) belongs to the account, not to each workspace it makes.
+
+<Note>
+None of this is on the regional API. Workspaces, members, roles and tokens live on the control plane — see [what is deliberately out of reach](#what-the-api-cannot-do) at the bottom of this page.
+</Note>
+
+## Inviting someone
+
+An ADMIN creates an invite with an email address and a role: `POST /v1/org/invites`, or **Settings → General** in the dashboard.
+
+<Warning>
+**No email is sent.** There is no invite link and no accept step — the invite is keyed to a Google identity, so signing in with that address *is* acceptance. You have to tell the person yourself.
+</Warning>
+
+What happens next depends on whether that address already has a Talqing account:
+
+- **They already have an account.** They are added to the workspace immediately, with the role you chose. They find out by seeing it appear in their workspace switcher, or by you telling them.
+- **They do not.** The invite waits. The first time they sign in with Google using that address, they join with the role you chose.
+
+Pending invites are listed at `GET /v1/org/invites`; an accepted one drops off that list because it is now a membership and belongs on the roster instead. Withdrawing one is `DELETE /v1/org/invites/{invite_id}` — after that, signing in with the address no longer joins your workspace.
+
+Two invites are refused as `400`: an address that is already a member (`… is already a member of this organization (EDITOR)`) and one that already has a pending invite (`… has already been invited`).
+
+## The three roles
+
+Membership is re-read on **every single request** and never cached, so a change lands on that person's very next call.
+
+| | ADMIN | EDITOR | VIEWER |
+| --- | --- | --- | --- |
+| Read agents, tools, tasks, calls, conversations, numbers, batches | Yes | Yes | Yes |
+| Read the credit balance and ledger | Yes | Yes | Yes |
+| See which providers have a key, and each key's last 4 characters | Yes | Yes | Yes |
+| See secret **names** and their masked tails | Yes | Yes | Yes |
+| See the member roster | Yes | Yes | Yes |
+| Create, edit, publish and delete agents, tools, tasks | Yes | Yes | — |
+| Start a web call, run a tool, run a task, use a CoPilot | Yes | Yes | — |
+| Place outbound calls, run batches, import and assign numbers | Yes | Yes | — |
+| Connect integrations and carrier accounts, manage webhooks | Yes | Yes | — |
+| Delete a call's content or its recording | Yes | Yes | — |
+| **Add, replace or delete a provider key** | Yes | — | — |
+| **Create or delete a secret** | Yes | — | — |
+| **Buy credit** | Yes | — | — |
+| **Invite, remove and re-role members** | Yes | — | — |
+| **Rename the workspace, set the retention policy** | Yes | — | — |
+
+A VIEWER is genuinely read-only. Every write answers `403` with:
+
+```
+your role is view-only — ask an organization admin for editor access
+```
+
+An EDITOR attempting an admin-only route gets `403` with:
+
+```
+only an organization admin can do this
+```
+
+<Note>
+**A VIEWER cannot start a test call.** Minting a web call token runs an arbitrary prompt on an arbitrary model against the workspace's own provider keys, so it needs the editor role. The agent editor's test panel is read-only for a VIEWER.
+</Note>
+
+The line between EDITOR and ADMIN is **credentials and money**. An EDITOR can build and ship anything, and can *reference* `{{secrets.NAME}}` in a tool they write, but cannot read, create or rotate the secret itself, cannot store a provider key, and cannot spend. See [secrets](/platform/secrets) and [provider keys](/get-started/provider-keys).
+
+## Changing a role
+
+`PATCH /v1/org/members/{user_id}` with `{"role": "EDITOR"}`, ADMIN only.
+
+It takes effect on that person's next request — including through **every personal access token they have already created**. A token authenticates as its creator and carries their live role, so demoting someone strips their tokens of the powers they lost without you reissuing anything, and promoting them grants the new ones the same way. See [authentication](/get-started/authentication).
+
+## Removing someone, and leaving
+
+`DELETE /v1/org/members/{user_id}` removes a member. Their access ends on their next request, and **their personal access tokens for this workspace are deleted with the membership** — the token still verifies cryptographically, but the row behind it is gone and every request with it is refused.
+
+Nothing they built is deleted. Agents, tools and calls belong to the workspace, not to the person.
+
+You cannot remove yourself this way; that is leaving, and leaving has its own rule. `POST /v1/org/leave` instead — any member may, including an admin who has promoted a successor first.
+
+## Two invariants
+
+Both are enforced, and both answer `400` rather than letting you strand a workspace.
+
+**A workspace always keeps at least one ADMIN.** Demoting the last admin, removing them or having them leave is refused:
+
+```
+an organization needs at least one admin
+```
+
+Leaving as the last admin says so more usefully: `an organization needs at least one admin — promote someone before leaving`.
+
+**You cannot leave your only workspace.**
+
+```
+you cannot leave your only organization — create or join another first
+```
+
+Signing back in would only create you a fresh one, so this refusal saves you the round trip. Note the asymmetry: an admin *can* remove someone who has nowhere else to go — whether they do is not that workspace's problem, and their next sign-in gives them one of their own.
+
+## Workspace settings
+
+Both are ADMIN only, both at `PATCH /v1/org`, both under **Settings → General**.
+
+<ParamField path="name" type="string">
+1–100 characters. Display only — nothing keys on it, so renaming breaks nothing.
+</ParamField>
+
+<ParamField path="retention_days" type="integer | null">
+How long call and conversation content is kept: 1–3650 days, or `null` to keep everything forever, which is the default. It is one policy for the whole workspace — there is no per-agent setting.
+
+Every member can *read* it. A VIEWER who cannot see why calls disappear opens a support ticket about it.
+
+See [data retention and privacy](/platform/data-retention-and-privacy) for exactly what a purge deletes, what survives it, and why changing the policy never moves a deadline that has already been set.
+</ParamField>
+
+Both are merge-style: an omitted field is left alone.
+
+## What the API cannot do
+
+Signing in, workspaces, members, roles and personal access tokens all live on the **control plane**, a separate host from the regional API. None of them is in `/v1` on a region, in either SDK, or in the MCP server. A regional base URL answers `404` for those paths.
+
+That means an AI builder pointed at Talqing — a CoPilot, an MCP client, your own script — **cannot mint itself a credential and cannot change who is in the workspace**. There is no endpoint that issues a token and no endpoint that adds a member, so it is not a permission check that could be misconfigured; the operations do not exist on that surface at all. Every CoPilot and MCP call runs as the signed-in user with exactly that user's role, and nothing it can call raises it.
+
+User management is where a human stays in the loop, and it stays there structurally.
+
+## Next
+
+<CardGroup cols={2}>
+<Card title="Authentication" href="/get-started/authentication">
+  Tokens, the Bearer header, and what a role change does to them.
+</Card>
+<Card title="Data retention and privacy" href="/platform/data-retention-and-privacy">
+  Setting the policy, and what a purge takes.
+</Card>
+<Card title="Secrets" href="/platform/secrets">
+  The admin-only store an editor can reference but not read.
+</Card>
+</CardGroup>

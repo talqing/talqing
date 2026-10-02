@@ -1,0 +1,384 @@
+---
+title: "Models"
+description: "The provider catalog is the only source of valid provider/model pairs, plus every model with its flags and price."
+---
+
+An agent names its models as `{provider, model}` pairs. The only valid pairs are the ones in the provider catalog, and a config naming anything else is refused on save with the list of what it could have said instead.
+
+The catalog is live. `GET /v1/catalog` is authoritative; the tables at the bottom of this page are a snapshot of it and can lag behind.
+
+<CodeGroup>
+```bash cURL
+curl https://api.in.talqing.com/v1/catalog \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const catalog = await talqing.catalog.get();
+
+for (const entry of catalog.llm) {
+  console.log(entry.provider, entry.model, entry.reasoning_efforts, entry.vision);
+}
+```
+
+```python Python
+catalog = talqing.catalog.get()
+
+for entry in catalog["llm"]:
+    print(entry["provider"], entry["model"], entry["reasoning_efforts"], entry["vision"])
+```
+</CodeGroup>
+
+The response carries one array per kind — `llm`, `stt`, `tts`, `realtime`, `avatar`, `noise_cancellation` — plus `providers`, the union of every `language` an agent may be set to, the subset of those the turn detector understands, `system_vars`, and the platform fee per channel.
+
+One provider's models are deliberately **not** in those arrays. A `providers` entry whose `browse` is `search` reaches hundreds of models through a single key, and shipping them all in this response would multiply its size; they are searched a page at a time instead, and its `searched_kinds` says which kinds (`llm`, `stt`). See [OpenRouter](#openrouter) below.
+
+<Warning>
+Every model runs on **your** provider key. An agent will not publish until a key is configured for each provider it needs — the language model, the speech models, the avatar, the noise canceller, and any fallback among them. See [provider keys](/get-started/provider-keys).
+</Warning>
+
+## Two pipelines
+
+A voice or video agent runs one of two shapes, and `config.realtime` is what discriminates them. Set it, and it is the whole pipeline; leave it null, and the cascade runs.
+
+| | Cascade (`stt` → `llm` → `tts`) | Realtime (speech-to-speech) |
+| --- | --- | --- |
+| Models | three, mixed freely across providers | one |
+| Latency | three network hops per turn, one of which is the model | one socket, lowest time to first sound |
+| Turn detection | ours, from the speech-to-text model and the language | the provider's, inside its own socket |
+| Voice | any voice from any text-to-speech provider | the model's own roster |
+| Fixed wording | the greeting, a `say` operation and a handoff message are spoken word for word | delivered as "say this" instructions the model may reword |
+| `reasoning_effort`, `priority`, `builtin_tools` | yes | no |
+| `fallback` | yes, per stage | no |
+| Preemptive generation | yes | no, pinned off |
+| `on_user_turn_completed` hook | yes | refused |
+| Screen share | yes | refused |
+| Expressive delivery | on the two models that speak tags | no |
+| Recording consent notice | yes | refused |
+| Images people attach | if the model reads images | if the model reads images — the two `grok-voice-*` entries do not |
+
+**Take the cascade unless latency is the product.** It is the shape everything else on the platform is built around: exact wording, per-stage failover, provider-side tools, a screen the agent can watch, and one hook that fires on every user turn. What you pay for it is a longer path to the first syllable.
+
+**Take a realtime model when the conversation is the interface** — a demo, a companion, an interview — and when you can live with a greeting that is approximate and a call that has no failover. A realtime agent still records, still analyses, still runs tools, MCP servers and handoffs.
+
+Switching between them is a normalization, not an error: setting `realtime` clears `stt`, `llm` and `tts`, and setting them back means also setting `realtime` to null. See [channels](/agents/channels).
+
+### The fields on each slot
+
+| Slot | Fields |
+| --- | --- |
+| `stt` | `provider`, `model`, `fallback` |
+| `llm` | `provider`, `model`, `reasoning_effort`, `priority`, `builtin_tools`, `fallback` |
+| `tts` | `provider`, `model`, `voice`, `speed`, `expressive`, `stability`, `similarity_boost`, `fallback` |
+| `realtime` | `provider`, `model`, `voice`, `speed` |
+
+`voice_name` also exists on `tts` and `realtime`. It is a display label for the dashboard and is ignored when the agent is compiled.
+
+`speed` accepts 0.5 to 2.0 as a number, and is then checked against the chosen model's own range — the tables below carry it. A model with no speed control refuses anything but `1.0`. Leaving `voice` null uses the entry's default voice. `stability` and `similarity_boost` belong to the ElevenLabs voice you picked and are refused on every other provider; see [voices](/agents/voices).
+
+## Choosing
+
+The language is the first constraint, not the last. Pick the language, then models that cover it — a model that publishes languages and does not speak the one you chose is a save error, and a model with `language_required` refuses Auto outright. See [language](/agents/language).
+
+After that:
+
+- **Speech-to-text is the biggest lever on how the agent feels.** A `streaming` model ends the turn on its own detector; a batch model transcribes each utterance in one request, which is cheaper and adds roughly half a second before the agent replies. Word-count interruption also stops working on a batch model, because there are no interim transcripts. See [speech-to-text and turn detection](/agents/speech-to-text-and-turn-detection).
+- **The language model is where thinking time is spent.** On a call, every second of reasoning is silence — take the least the model will accept. See [thinking and provider tools](/agents/reasoning-and-builtin-tools).
+- **Text-to-speech is where the agent's character is.** Price per character ranges over a factor of twenty-five across this catalog, and the two models that speak delivery tags are the only ones [expressive delivery](/agents/expressive-delivery) works on.
+- **Mixing providers is normal.** The three cascade slots are independent, and the agent's single `language` is translated into each provider's own spelling for you.
+
+### The priority lane
+
+`llm.priority` asks the provider to schedule this model's turns ahead of standard traffic, which steadies the worst case rather than speeding up the average. It costs between 1.75x and 2.5x the standard token price depending on the model, so read [the priority lane](/agents/priority-lane) before switching it on.
+
+## Reference
+
+A snapshot of the catalog. **`GET /v1/catalog` wins if the two disagree.** Prices are USD and are what the provider bills you on your own key — Talqing adds only its platform fee.
+
+### Language models
+
+Every entry below runs on `text`, `voice` and `video` and reads an image, with two exceptions marked in the table: `gemini-3.8-flash` and `gemini-3.7-flash` are **text only**, because neither can stop thinking (their floor is `low`, not `minimal`) and a one-sentence reply measured 6.5s against 1.9-2.6s for the Gemini models above them. Neither reads an image either — our key cannot get a request through to those two to prove that it does, and an unprobed model is not given the flag. "Thinking" is the model's `reasoning_efforts`, ordered fastest first; the first value is what an agent gets until its author picks another, and an empty cell means the model has no such setting.
+
+| Provider | Model | Thinking efforts | Provider tools | Priority lane | Price per 1M tokens (in / cached in / out) |
+| --- | --- | --- | --- | --- | --- |
+| xai | `grok-4.7` | minimal, low, medium, high | `web_search`, `x_search`, `code_interpreter`, `file_search` | yes | $2.00 / $0.50 / $6.00 |
+| xai | `grok-4.6` | minimal, low, medium, high | `web_search`, `x_search`, `code_interpreter`, `file_search` | yes | $2.00 / $0.50 / $6.00 |
+| xai | `grok-4.5` | minimal, low, medium, high | `web_search`, `x_search`, `code_interpreter`, `file_search` | yes | $2.00 / $0.30 / $6.00 |
+| xai | `grok-4.3` | none, minimal, low, medium, high | `web_search`, `x_search`, `code_interpreter`, `file_search` | yes | $1.25 / $0.20 / $2.50 |
+| openai | `gpt-6-astra` | low, medium, high | `web_search`, `code_interpreter`, `file_search` | yes | $10.00 / $1.00 / $50.00 |
+| openai | `gpt-6-sol` | none, low, medium, high | `web_search`, `code_interpreter`, `file_search` | yes | $2.00 / $0.20 / $10.00 |
+| openai | `gpt-5.6-sol` | none, low, medium, high | `web_search`, `code_interpreter`, `file_search` | yes | $5.00 / $0.50 / $30.00 |
+| openai | `gpt-5.6-terra` | none, low, medium, high | `web_search`, `code_interpreter`, `file_search` | yes | $2.00 / $0.20 / $12.00 |
+| openai | `gpt-5.6-luna` | none, low, medium, high | `web_search`, `code_interpreter`, `file_search` | yes | $0.20 / $0.02 / $1.20 |
+| openai | `gpt-5.5` | none, low, medium, high | `web_search`, `code_interpreter`, `file_search` | yes | $5.00 / $0.50 / $30.00 |
+| openai | `gpt-5.4` | none, low, medium, high | `web_search`, `code_interpreter`, `file_search` | yes | $2.50 / $0.25 / $15.00 |
+| openai | `gpt-5.4-mini` | none, low, medium, high | `web_search`, `code_interpreter`, `file_search` | yes | $0.75 / $0.075 / $4.50 |
+| openai | `gpt-5.4-nano` | none, low, medium, high | `web_search`, `code_interpreter`, `file_search` | no | $0.20 / $0.02 / $1.25 |
+| openai | `gpt-4.1` | — | `web_search`, `code_interpreter`, `file_search` | yes | $2.00 / $0.50 / $8.00 |
+| openai | `gpt-4.1-mini` | — | `web_search`, `code_interpreter`, `file_search` | yes | $0.40 / $0.10 / $1.60 |
+| gemini | `gemini-3.8-flash` (text only, no image input) | low, medium, high | `google_search`, `url_context`, `code_execution` | yes | $1.50 / $0.15 / $7.50 |
+| gemini | `gemini-3.7-flash` (text only, no image input) | low, medium, high | `google_search`, `url_context`, `code_execution` | yes | $1.50 / $0.15 / $7.50 |
+| gemini | `gemini-3.6-flash` | minimal, low, medium, high | `google_search`, `url_context`, `code_execution` | yes | $1.50 / $0.15 / $7.50 |
+| gemini | `gemini-3.5-flash` | minimal, low, medium, high | `google_search`, `url_context`, `code_execution` | yes | $1.50 / $0.15 / $9.00 |
+| gemini | `gemini-3.5-flash-lite` | minimal, low, medium, high | `google_search`, `url_context`, `code_execution` | yes | $0.30 / $0.03 / $2.50 |
+| gemini | `gemini-3.1-flash-lite` | minimal, low, medium, high | `google_search`, `url_context`, `code_execution` | yes | $0.25 / $0.025 / $1.50 |
+
+The default for a new agent is `openai/gpt-5.6-luna`.
+
+`gpt-6-sol` reads images but reads them *badly*: handed a picture of the number
+4731, it answered 4631 on most attempts, where `gpt-6-astra`, `grok-4.7` and the
+Gemini models read the same file correctly. `vision: true` means an agent on the model can be sent a photo, never
+that it will get it right.
+
+### OpenRouter
+
+[OpenRouter](https://openrouter.ai) is a gateway rather than a vendor: one key reaches roughly 260 tool-capable language models from about thirty labs — Anthropic, Meta, DeepSeek, Qwen, Moonshot, Mistral, Z.AI and the rest, alongside the OpenAI and Google models listed above. Save an OpenRouter key under [provider keys](/get-started/provider-keys) and every one of them becomes a legal `llm.provider` / `llm.model` pair.
+
+Because the list is that large and moves that often — roughly six models a week — OpenRouter's models are not in `GET /v1/catalog`. Search them instead:
+
+<CodeGroup>
+```bash cURL
+curl "https://api.in.talqing.com/v1/catalog/models?q=claude" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const page = await talqing.catalog.models.search({ q: "claude", limit: 20 });
+for (const entry of page.models) {
+  console.log(entry.model, entry.context_length, entry.pricing);
+}
+```
+
+```python Python
+page = talqing.catalog.models.search(q="claude", limit=20)
+for entry in page["models"]:
+    print(entry["model"], entry["context_length"], entry["pricing"])
+```
+</CodeGroup>
+
+With no `q` the results are ordered by how much traffic each model actually handles, so the first page is the models people run rather than the ones that sort first alphabetically. `next_cursor` pages through the rest. Set the `model` on your agent to the exact slug the search returned — `anthropic/claude-haiku-4.5`, `deepseek/deepseek-v4-flash`, `meta-llama/llama-3.3-70b-instruct`.
+
+**What is listed.** Every model that outputs text and supports tool calling. That second filter is mostly a modality filter: it removes music, image and translation models, classifiers, and the bare completion models no agent could use. Four kinds of slug are excluded on purpose:
+
+| Excluded | Why |
+| --- | --- |
+| `…:free` | Request-capped per day against your account's lifetime spend. A published agent must not stop working because your workspace crossed a line nobody set. |
+| `…:batch` | Asynchronous. There is no live turn to serve. |
+| `~author/model-latest` | A moving target. Publishing freezes an agent so a version means something, and a slug whose model changes underneath makes the version diff a lie. |
+| `openrouter/auto` and the other router slugs | The model that runs is not the model you configured. Use `llm.fallback`, which names a real model on each side. |
+
+**Thinking.** `reasoning_efforts` is built from what each model reports it accepts, intersected with Talqing's own vocabulary — OpenRouter's `xhigh` and `max` sit above `high` and are not offered, because nothing running a voice agent wants them. `none` is added wherever thinking can be switched off at all, and it is the default, so a Claude agent does not pause on every turn. Around a quarter of these models cannot stop thinking; the editor says so under the model.
+
+**Images.** `vision` here comes from the model's declared input modalities rather than from a probe of our own, which is the one place in this catalog that is true. It is safe because the failure is loud: OpenRouter answers an image sent to a text-only model with a `404`, so a wrong flag produces an error naming the cause rather than a model that quietly answers about a picture it never saw. As everywhere else, `vision: true` means the model *can* read an image, not that it will read it correctly.
+
+**Price.** The rates in the search results are the *cheapest* host's, and OpenRouter picks a host per request — the same model measured 2.4x apart on two consecutive calls. So on Automatic the editor's estimate is a floor; with [hosts](#hosts) chosen it is priced at the dearest of them, and is a ceiling. Your invoice is not an estimate: every OpenRouter line is priced from the exact charge OpenRouter reported for those requests, which you can reconcile against your own OpenRouter activity page.
+
+**Routing.** Talqing sends two routing preferences on every request and neither is configurable. Requests are sorted by latency, because the default price-balanced routing was measured taking 88 seconds to answer "what is the capital of France?"; and hosts that train on prompts are refused outright. See [data retention and privacy](/platform/data-retention-and-privacy).
+
+#### Hosts
+
+OpenRouter serves each model from several hosts — Groq, Cerebras, DeepInfra, Azure and so on — and they differ a lot in speed: on `openai/gpt-oss-120b` the fastest answers in under 200 ms and the slowest in about two seconds. `llm.hosts` restricts a model to the hosts you name. Only those hosts will serve it, the fastest of them answers each request, and if one fails mid-request OpenRouter moves to the next within the same request. Leave it unset (Automatic) to let any host serve. `llm.fallback` and `analysis.model` each take their own; post-call analysis that follows the agent's model follows its hosts too.
+
+The valid values are the `host` of each entry in the model's host list, fastest first. Latency and throughput are filled in when the workspace has an OpenRouter key:
+
+<CodeGroup>
+```bash cURL
+curl "https://api.in.talqing.com/v1/catalog/models/hosts?model=openai/gpt-oss-120b" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const { hosts } = await talqing.catalog.models.hosts({ model: "openai/gpt-oss-120b" });
+for (const host of hosts) {
+  console.log(host.host, host.latency_p50_ms, host.pricing);
+}
+```
+
+```python Python
+page = talqing.catalog.models.hosts(model="openai/gpt-oss-120b")
+for host in page["hosts"]:
+    print(host["host"], host["latency_p50_ms"], host["pricing"])
+```
+</CodeGroup>
+
+```json
+"llm": {
+  "provider": "openrouter",
+  "model": "openai/gpt-oss-120b",
+  "hosts": ["groq", "cerebras/fp16"]
+}
+```
+
+- **A host that stops serving the model is skipped.** The turn moves to `llm.fallback` only when *none* of the hosts can serve it. Publishing warns about each host that no longer serves the model, and refuses when none does.
+- **Some hosts are never listed**: those whose policy is to train on prompts, which Talqing's routing would refuse anyway; endpoints that cannot call tools; and OpenRouter's queued `/flex` tier, which trades latency for price.
+- **A host's bare name covers all its endpoints.** `azure` matches `azure/us` and `azure/eu` too, which is why the editor labels it "Azure · All endpoints" when it is listed beside them. Service tiers such as `openai/fast` are matched only when named in full.
+- **Speech-to-text has no host selection.** OpenRouter's transcription endpoint ignores routing preferences.
+
+**Not available here.** OpenRouter models take no provider-side tools and no priority lane — those are properties of a vendor's own API, and this is a gateway. Everything else works: fallbacks, handoffs, tasks, tools and post-call analysis.
+
+The same key also reaches OpenRouter's speech-to-text models — see [below](#openrouter-speech-to-text).
+
+### Speech-to-text
+
+Voice and video only. "On Auto" is what happens when `config.language` is null. Language counts are the codes the entry publishes; the codes themselves come back from the catalog endpoint.
+
+| Provider | Model | Streaming | On Auto | Languages | Price per audio second |
+| --- | --- | --- | --- | --- | --- |
+| xai | `xai-stt` | yes | detects (`en` is sent, and only affects number formatting) | 25 | $0.0000556 |
+| xai | `xai-stt-batch` | no | detects (`en` is sent, and only affects number formatting) | 25 | $0.0000278 |
+| sarvam | `saaras:v3` | yes | detects | 23 | $0.0000833 |
+| sarvam | `saaras:v4` | yes | detects | 23 | $0.0000833 |
+| sarvam | `saaras:v3-realtime` | yes | detects | 23 | $0.0000833 |
+| raya | `bakbak-stt` | no | **no detection — transcribes as English** | 23 | $0.000065 |
+| soniox | `stt-rt-v5` | yes | detects | 60 | $0.0000333 |
+| elevenlabs | `scribe_v2_realtime` | yes | detects | 19 | $0.0001084 |
+| elevenlabs | `scribe_v2` | no | detects | 19 | $0.0000611 |
+| openai | `gpt-live-transcribe` | yes | detects | 57 | $0.0002833 |
+| openai | `gpt-transcribe` | no | detects | 57 | $0.000075 |
+| deepgram | `nova-3-general` | yes | detects and code-switches | 35 | $0.0000967 |
+| deepgram | `nova-3` | yes | **no detection — transcribes as English** | 35 | $0.00008 |
+| deepgram | `flux-general-en` | yes | English only | 1 | $0.0001083 |
+| deepgram | `flux-general-multi` | yes | detects | 35 | $0.00013 |
+
+<Warning>
+Two entries detect nothing and transcribe every caller as English on Auto: `raya/bakbak-stt` and `deepgram/nova-3`. On Raya the failure is not symmetric — English audio read as Hindi comes back transliterated with its meaning intact, but Hindi audio read as English comes back with words missing, as a successful transcription with nothing to detect it by. If the agent takes non-English calls on either of these, set `config.language` rather than relying on Auto.
+</Warning>
+
+A streaming model bills the open socket for the whole call; a batch model bills only the utterances it was handed, which is roughly the caller's share of the conversation. The default for a new agent is `sarvam/saaras:v3`.
+
+Sarvam serves three: `saaras:v3` is the one Sarvam still recommends, `saaras:v4` adds Global English alongside Indian English, and `saaras:v3-realtime` is a different endpoint that returns partial transcripts while the caller is still speaking. All three cost the same.
+
+#### OpenRouter speech-to-text
+
+The same [OpenRouter](#openrouter) key reaches about twenty speech-to-text models — Whisper, Deepgram Nova-3, NVIDIA Parakeet, Qwen3 ASR, Voxtral, Grok STT and more. Like its language models they are searched rather than listed, with `kind=stt`, and every result is a legal `stt.provider: "openrouter"` / `stt.model` pair:
+
+<CodeGroup>
+```bash cURL
+curl "https://api.in.talqing.com/v1/catalog/models?kind=stt&q=whisper" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const page = await talqing.catalog.models.search({ kind: "stt", q: "whisper" });
+```
+
+```python Python
+page = talqing.catalog.models.search(kind="stt", q="whisper")
+```
+</CodeGroup>
+
+What differs from the table above:
+
+- **Every one is batch.** OpenRouter has no streaming transcription, so each utterance goes out as one request after the caller stops speaking. On a 4.6-second utterance that added between 0.6 and 3.4 seconds before the agent could reply, depending on the model; `openai/whisper-large-v3` took 11.6 seconds, and the editor says so under it. What they buy is price: the cheapest are about $0.012 per hour of speech, a tenth of the cheapest streaming model here.
+- **A fallback must be another batch model**, because one voice detector ends every turn for both. That means `xai/xai-stt-batch`, `raya/bakbak-stt`, `elevenlabs/scribe_v2`, `openai/gpt-transcribe` or another OpenRouter model. A Deepgram, Soniox or Sarvam fallback is refused at publish.
+- **The language is always detected.** OpenRouter publishes no language list per model, and a code a model does not really support comes back as a transcript in the *wrong* language rather than as an error. So none is ever sent. `config.language` still sets text-to-speech and turn detection; the transcription detects for itself.
+- **Price.** The listed rate is the cheapest host's, and the invoice uses what OpenRouter reported charging per request — the same model measured 3.3x apart on identical requests. `openai/gpt-4o-transcribe` and `openai/gpt-4o-mini-transcribe` are priced per token, so the editor shows no per-minute estimate for them.
+- **Privacy.** OpenRouter ignores routing preferences on this endpoint, so the no-training policy Talqing sends with every language-model request does not reach it. See [data retention and privacy](/platform/data-retention-and-privacy).
+
+`openai/gpt-transcribe` exists twice: as `openai` + `gpt-transcribe` in the table above, on your OpenAI key and billed by OpenAI, and as `openrouter` + `openai/gpt-transcribe`, on your OpenRouter key. They are separate selections and never collide, but they read almost the same in a dropdown.
+
+### Text-to-speech
+
+Voice and video only. Speed is the model's own accepted range.
+
+| Provider | Model | Languages | Auto | Speed | Voice settings | Expressive tags | Price |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| xai | `xai-tts` | 21 | yes | 0.7 – 1.5 | no | yes | $0.000015 / char |
+| sarvam | `bulbul:v3` | 11 | yes (the model takes the language from the text) | 0.5 – 2.0 | no | no | $0.00003 / char |
+| raya | `m1` | 13 | yes, speaks `en` | 0.5 – 1.5 | no | no | $0.0000039 / char |
+| raya | `standard` | 13 | yes, speaks `en` | 0.5 – 1.5 | no | no | $0.0000039 / char |
+| soniox | `tts-rt-v2` | 63 | **no — a language is required** | 0.7 – 1.3 | no | no | $0.0000141 / char |
+| elevenlabs | `eleven_turbo_v2_5` | 32 | yes | 0.8 – 1.2 | yes | no | $0.00005 / char |
+| elevenlabs | `eleven_flash_v2_5` | 32 | yes | 0.8 – 1.2 | yes | no | $0.00005 / char |
+| elevenlabs | `eleven_v3` | 33 | yes | no speed control | yes | yes | $0.00010 / char |
+| elevenlabs | `eleven_v3_conversational` | 33 | yes | no speed control | yes | yes | $0.00005 / char |
+| openai | `gpt-4o-mini-tts` | not language-aware | n/a | 0.5 – 2.0 | no | no | $0.60 in / $12.00 out per 1M tokens |
+| openai | `tts-1` | not language-aware | n/a | 0.5 – 2.0 | no | no | $0.000015 / char |
+| openai | `tts-1-hd` | not language-aware | n/a | 0.5 – 2.0 | no | no | $0.00003 / char |
+| deepgram | `flux` | English only, encoded in the voice | n/a | no speed control | no | no | $0.000045 / char |
+| deepgram | `aura-2` | encoded in the voice | n/a | no speed control | no | no | $0.00003 / char |
+| deepgram | `aura-1` | encoded in the voice | n/a | no speed control | no | no | $0.000015 / char |
+
+"Voice settings" means the model reads the `stability` and `similarity_boost` of the voice you picked. Only ElevenLabs sells them, and sending them anywhere else is a save error. "Expressive tags" means the model has a delivery-tag dialect the agent can be taught — `xai/xai-tts`, `elevenlabs/eleven_v3` and `elevenlabs/eleven_v3_conversational` are the only three, and the xAI dialect is not the ElevenLabs one. The default for a new agent is `sarvam/bulbul:v3` with the voice `shubh`. Leave `voice` out and the model's own default voice is saved with the agent.
+
+`eleven_v3_conversational` is v3's delivery at half v3's price and is the one to reach for on a live call; `deepgram/flux` is Deepgram's voice-agent text-to-speech, English only, at 1.5x Aura-2.
+
+Voices are browsed separately, per provider and model, because most rosters are fetched live from the provider. See [voices](/agents/voices).
+
+### Realtime (speech-to-speech)
+
+Voice and video only. One of these replaces `stt`, `llm` and `tts` together.
+
+| Provider | Model | Reads images | Languages | Speed | Voice roster |
+| --- | --- | --- | --- | --- | --- |
+| openai | `gpt-realtime-2.1` | yes | 57, detects on Auto | 0.5 – 2.0 | 10 voices, default `marin` |
+| openai | `gpt-realtime-2.1-mini` | yes | 57, detects on Auto | 0.5 – 2.0 | 10 voices, default `marin` |
+| openai | `gpt-live-1` | **no** | steered from the prompt only | no speed control | 6 voices, default `marin` |
+| gemini | `gemini-3.8-live` | yes | 19, code-switches on its own | no speed control | 30 voices, default `Puck` |
+| gemini | `gemini-2.5-flash-native-audio-preview-12-2025` | yes | 19, code-switches on its own | no speed control | 30 voices, default `Puck` |
+| xai | `grok-voice-think-fast-2.0` | **no** | steered from the prompt only | no speed control | fetched live, default `ara` |
+| xai | `grok-voice-think-fast-1.0` | **no** | steered from the prompt only | no speed control | fetched live, default `ara` |
+
+Pricing, USD per 1M tokens except where noted:
+
+| Model | Text in | Cached text in | Audio in | Cached audio in | Text out | Audio out | Per session minute |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `gpt-realtime-2.1` | $4.00 | $0.40 | $32.00 | $0.40 | $24.00 | $64.00 | — |
+| `gpt-realtime-2.1-mini` | $0.60 | $0.06 | $10.00 | $0.30 | $2.40 | $20.00 | — |
+| `gpt-live-1` | $0 | $0 | $0 | $0 | $0 | $0 | $0.05 |
+| `gemini-3.8-live` | $0.75 | — | $3.00 | — | $4.50 | $12.00 | — |
+| `gemini-2.5-flash-native-audio-preview-12-2025` | $0.50 | — | $3.00 | — | $2.00 | $12.00 | — |
+| `grok-voice-think-fast-2.0` | $0 | $0 | $0 | $0 | $0 | $0 | $0.08 |
+| `grok-voice-think-fast-1.0` | $0 | $0 | $0 | $0 | $0 | $0 | $0.05 |
+
+<Warning>
+`openai/gpt-live-1` is the one model here with two caveats of its own.
+
+It **cannot be handed off from.** The model refuses new instructions once a call is connected, and a handoff is exactly that, so an agent that names this model and a handoff destination is refused on save.
+
+Its **$0.05/min is not the whole bill.** GPT-Live runs its reasoning and every tool call on a second model — `gpt-5.6-luna` — billed separately at that model's own per-token rates. Both appear on the call, the session minutes as a realtime line and the reasoning as an LLM line.
+</Warning>
+
+xAI bills speech-to-speech by the minute of audio rather than by token, which is why its token rates are a real zero rather than a missing figure.
+
+<Note>
+Two provider charges on this pipeline are not in Talqing's cost figures. The OpenAI entries run a separate transcription model so the call has a transcript at all; OpenAI bills it and reports no quantity we can meter. xAI charges per client text event, which nothing on the wire counts. Both land on your provider bill, not your Talqing balance.
+</Note>
+
+<Warning>
+The two `grok-voice-*` entries silently drop an image. They accept it, echo the item back with the picture removed, and then answer confidently about a photo they never saw. An agent on one of them cannot be sent an image at all.
+</Warning>
+
+### Avatar
+
+| Provider | Model | Channel | Price |
+| --- | --- | --- | --- |
+| anam | `anam` | `video` | $0.16 per minute |
+
+Billed on wall-clock minutes for the whole call, idle included, on top of whatever produces the agent's audio. The faces are a separate gallery — see [video avatars](/agents/video-avatars).
+
+### Noise cancellation
+
+Voice and video only, off unless you turn it on, and it needs an ai-coustics key like any other provider. `enhancement_level` runs 0.0 to 1.0 and defaults to 0.8.
+
+| Provider | Model | What it does |
+| --- | --- | --- |
+| aicoustics | `quail_vf_s` | Isolates the one person talking to the agent, suppressing other voices, echo and background noise. |
+| aicoustics | `quail_vf_l` | The larger Voice Focus model — same job, significantly more CPU, no documented accuracy gain. |
+| aicoustics | `quail_l` | Keeps every voice and removes only noise — a speakerphone, a room, a distant speaker. |
+
+No price is listed because there is nothing for Talqing to meter: ai-coustics bills your own account directly. See [audio processing](/agents/audio-processing).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Thinking and provider tools" href="/agents/reasoning-and-builtin-tools">
+    How long the model may think, and the tools its provider runs for it.
+  </Card>
+  <Card title="Model fallbacks" href="/agents/model-fallbacks">
+    A second provider per stage, and every rule it has to satisfy.
+  </Card>
+  <Card title="Provider keys" href="/get-started/provider-keys">
+    Bring the keys the models above run on.
+  </Card>
+</CardGroup>

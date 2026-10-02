@@ -1,0 +1,83 @@
+---
+title: "Overview"
+description: "Run an agent task over a list, read every draft it wrote, and send the rows you pick — on a schedule you set."
+---
+
+An email batch is four things: a list of rows, an [agent task](/tasks/overview) that drafts one email per row, a connected Resend account to send through, and a mapping that says which column carries the address, the subject and the body.
+
+Creating a batch only drafts. Sending is a separate act: a person creates a **send** — over the rows they picked, or over every row as it finishes drafting — which can be scheduled for Monday, held to business hours, paced at one email a minute, paused, and cancelled at any point.
+
+<Warning>
+**Five things to know before you create a batch.**
+
+1. **Resend's terms prohibit unsolicited email.** Their Acceptable Use Policy says you are "prohibited from sending unsolicited messages of any kind, including cold outreach, purchased lists, or scraped contact data" and that "all mail must be sent to recipients who have explicitly opted in to receive communications from you", with opt-outs honoured within 7 days. This runs on **your** Resend account under **your** agreement with them. Read [resend.com/legal/acceptable-use](https://resend.com/legal/acceptable-use) before you upload a list.
+2. **Nothing is sent that you have not reviewed and selected.** Creating a batch starts drafting and nothing else. No timer, no scheduler and no model ever sends an email on Talqing.
+3. **Every row runs the task's current PUBLISHED version**, re-read as drafting goes. Publishing a better prompt mid-batch changes every row drafted after that moment — and the batch tells you which version wrote which rows, so you can redraft the ones the old prompt produced.
+4. **There is no spend cap on drafting.** Every row runs the task and spends your model tokens — plus whatever the tools and MCP servers it calls charge — whether or not the draft is ever sent. A five-thousand-row batch costs five thousand task runs with zero emails sent. There **is** a ceiling on sending: `send_daily_cap`, 200 a day by default.
+5. **Talqing reports what it sent, not what landed.** A row that reads `Sent` means Resend accepted it. Deliveries, bounces and spam complaints live in the Resend dashboard, and watching them there is how a sending domain survives.
+</Warning>
+
+## Why it is built this way
+
+The interesting work is the task. Looking a contact up, reading their last order, checking what they actually bought, and writing a paragraph that is true about them — that is an agent task with tools attached, and it is the same object you would run on its own.
+
+A batch is the machinery around one: run that task once per row, keep every result, and put the whole thing in front of a person as a spreadsheet before anything leaves the building. Drafting and sending are two separate jobs with a human decision between them, and that decision is the only safeguard this feature has.
+
+## The lifecycle
+
+<Steps>
+<Step title="Create">
+You post the list, the task, the Resend account and the field map. Everything wrong with the combination comes back as one 400 listing every problem — a column the mapping names that does not exist, a task variable your list has no column for, a sending domain that is not verified. If it is accepted the batch is `scheduled` and a drafting job exists for it.
+
+See [creating a batch](/email/creating-a-batch).
+</Step>
+
+<Step title="Draft">
+Drafting starts at `start_at` or immediately and keeps `draft_concurrency` rows in flight. It runs at any hour: nobody receives a draft, so restricting the hours one is written in gates nothing. Each row's task output is written onto the row beside its uploaded columns. When the last row lands the batch becomes `drafted` — shown in the dashboard as **Ready to review** — and nothing about it is scheduled any more.
+
+**A `draft` means a draft that can be sent.** A row whose task ran fine and still produced nothing mailable — an address the enrichment could not find — is `draft_failed`, not `draft`, so every count and every "send all drafts" on the page means what it says. Fix the cell and the row becomes a `draft` again. A row that no run of the task could ever make sendable — its address column is empty, and the task does not write that column — is skipped at upload and never paid for.
+
+See [monitoring a batch](/email/monitoring).
+</Step>
+
+<Step title="Review">
+Read the drafts. Every cell is editable, and an edit sits on top of what the model wrote rather than replacing it. Rows you do not want go to `skipped`, which is reversible. Any row can be **redrafted** — including every row an older version of the task wrote, once you have improved it.
+
+See [reviewing and sending](/email/reviewing-and-sending).
+</Step>
+
+<Step title="Send">
+Pick the rows and create a send — or create one over every row, and each draft goes out as it lands. It mails real people and cannot be undone — but it is a thing you can steer: give it a start time, business hours, a gap between emails and a daily ceiling, pause it when something looks wrong and fix or redraft what it is about to send, and cancel it at any point.
+
+**The safeguard here is a rate, not a row count.** A brand-new sending domain that emits five thousand emails in an afternoon is a domain nobody's inbox trusts afterwards, and no review gate undoes that.
+
+See [reviewing and sending](/email/reviewing-and-sending).
+</Step>
+</Steps>
+
+## What it costs
+
+Talqing charges no platform fee on an email batch. A task run has no duration to bill, and sending goes over your own Resend account.
+
+What a batch costs is your own provider spend: the model tokens each task run burns on your [provider keys](/get-started/provider-keys), plus anything the task's tools and MCP servers charge per call. The batch page reports the model half of that as a running total. Nothing anywhere caps it.
+
+## Where it is
+
+Email batches live under **Email → Outbound** in the dashboard, at `https://app.talqing.com/email/outbound`. Batches are **regional**, like everything else a workspace owns: a batch created against `https://api.in.talqing.com` does not exist in `https://api.us.talqing.com`. The same personal access token works in both — see [regions](/get-started/regions).
+
+Two things must exist before the **New batch** button does anything: a connected Resend account, and at least one agent task.
+
+<CardGroup cols={2}>
+<Card title="Connect Resend" href="/email/setup">
+The integration, verified domains, and choosing what a batch sends from.
+</Card>
+<Card title="Create a batch" href="/email/creating-a-batch">
+The merged column space, the field map, and everything refused at create.
+</Card>
+<Card title="Review and send" href="/email/reviewing-and-sending">
+Editing rows, redrafting, duplicates, and creating a send you can steer.
+</Card>
+<Card title="Agent tasks" href="/tasks/overview">
+The thing that actually writes each email.
+</Card>
+</CardGroup>

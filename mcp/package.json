@@ -1,0 +1,47 @@
+{
+  "name": "@talqing/mcp",
+  "version": "0.8.0",
+  "description": "MCP server for building Talqing AI voice, video and text agents from Claude Code, Codex, or any MCP client.",
+  "license": "MIT",
+  "homepage": "https://talqing.com",
+  "bugs": {
+    "email": "hello@talqing.com"
+  },
+  "keywords": [
+    "talqing",
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "agents",
+    "voice"
+  ],
+  "type": "module",
+  "bin": {
+    "talqing-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "tools.json",
+    "SKILL.md",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.9.3"
+  }
+}

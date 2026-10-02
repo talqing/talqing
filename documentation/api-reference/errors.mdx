@@ -1,0 +1,218 @@
+---
+title: "Errors"
+description: "One error envelope at every status code, every code that can come back, and what to retry."
+---
+
+Every error the API returns has the same body, at every status code, on both planes. There is nothing to branch on and no second shape to guard against.
+
+```json
+{
+  "detail": {
+    "message": "config is invalid",
+    "errors": ["llm: unknown model gpt-4.9"]
+  }
+}
+```
+
+Both fields are **always present**. `message` is one sentence you can show a person. `errors` lists the individual problems when a failure had more than one; when it did not, `errors` is an empty array — never absent, never `null`.
+
+```json
+{
+  "detail": {
+    "message": "agent not found",
+    "errors": []
+  }
+}
+```
+
+Write your handler against `detail.message` and `detail.errors` and it will work everywhere, including on a failure you have never seen.
+
+## Request validation
+
+A request that does not match the operation's schema comes back as **422**, with one line per problem in the form `field.path: problem`.
+
+```json
+{
+  "detail": {
+    "message": "invalid request",
+    "errors": [
+      "config.channel: Input should be 'voice', 'video' or 'text'",
+      "config.llm.model: Field required"
+    ]
+  }
+}
+```
+
+The path is the key you actually sent — the `body`, `query` and `path` prefixes are stripped, so `config.llm.model` is what to look for in your payload, not `body.config.llm.model`.
+
+When there is exactly one problem, that line is also the `message`, so a single-issue failure reads well without opening `errors`:
+
+```json
+{
+  "detail": {
+    "message": "config.timezone: unknown IANA timezone: 'Asia/Kolkatta'",
+    "errors": ["config.timezone: unknown IANA timezone: 'Asia/Kolkatta'"]
+  }
+}
+```
+
+A **400** carries the same shape but means something different: the request parsed and matched the schema, and a rule rejected it. An unknown model, a tool that is not published, a broken operation tree.
+
+## Every status code
+
+| Code | What it means here | Retry? |
+| --- | --- | --- |
+| `200` | Success. A delete answers `200` with `{"ok": true}` unless noted below | — |
+| `201` | Created: agents, tools, tasks, integrations, triggers, webhooks, secrets, carrier accounts, batches, chats, outbound calls | — |
+| `202` | Accepted, the work continues in the background: `POST /v1/chats/{id}/end`, `DELETE /v1/chats/{id}` and `DELETE /v1/calls/{session_id}` | — |
+| `204` | No content: `DELETE /v1/calls/{session_id}/recording` | — |
+| `302` | The recording endpoints redirect to a short-lived signed media URL. Follow it | — |
+| `400` | Well formed, refused on the merits. `detail.errors` lists each problem | **No.** Fix the request |
+| `401` | No credential, a malformed one, a deleted token, or a user no longer in this workspace | **No.** Final |
+| `402` | **Out of credits.** New calls are refused; calls already running are unaffected | Only once you have added credit |
+| `403` | The credential is good; this role may not do this | **No.** Ask an ADMIN, or act as someone who has the role |
+| `404` | No such resource in this workspace — or, from a regional base URL, no such operation at all, which usually means you are pointed at the wrong host | **No** |
+| `409` | The resource's current state forbids this: a name already taken, a batch already finished, a call still in progress | Only once the state changes |
+| `422` | Schema validation failed. One `field.path: problem` line per issue | **No** |
+| `500` | An unhandled failure on our side | **Yes**, with backoff |
+| `502` | A provider we called on your behalf did not answer or refused — a voice catalog, a provider-key verification, the code-execution service | **Yes**, with backoff |
+| `503` | The control plane was unreachable, so the request could not be authorized at all. Transient | **Yes**, with backoff |
+
+<Note>
+There is no `429`. Nothing on the platform rate-limits inbound requests — see [limits](/platform/limits). A `429` you receive came from one of your own providers being relayed.
+</Note>
+
+### 402, in full
+
+`402` appears in exactly two places: `POST /v1/calls/token` (minting a web call token) and `POST /v1/calls/outbound` (placing a phone call). Nowhere else returns it.
+
+```json
+{
+  "detail": {
+    "message": "This workspace is out of credits. Add credits in Settings → Billing to start new calls. Calls already in progress are unaffected.",
+    "errors": []
+  }
+}
+```
+
+The other two credit gates reach no HTTP caller: an inbound phone call is refused at the door and reads back with `close_reason: "insufficient_credits"`, and a running batch pauses rather than failing. The balance is per region, so this is the balance of whichever base URL you called. See [pricing and credits](/get-started/pricing-and-credits).
+
+### 401 versus 403 versus 503
+
+All three come out of the same authorization step and they mean three different things.
+
+| | Means | Do |
+| --- | --- | --- |
+| `401` | The credential is bad, revoked, or belongs to someone no longer in this workspace | Fix the credential. Retrying is pointless |
+| `403` | The credential is fine; the **role** behind it is not enough. `your role is view-only — ask an organization admin for editor access`, or `only an organization admin can do this` | Change the role, or use a credential that has it |
+| `503` | We could not reach the control plane to ask who you are | **Retry with backoff.** Your credential may be perfectly good |
+
+Treating a `503` like a `401` — clearing credentials, forcing a re-login, alerting a human — is the wrong reaction to a network blip. They are opposite verdicts: one is final, one is transient.
+
+### 502 means a provider, not us
+
+A `502` is Talqing having called something on your behalf and not got an answer. It shows up when a provider-key check cannot reach the provider, when a voice or avatar gallery is unavailable, when a carrier's API does not respond, and when the code-execution service is unreachable.
+
+It is specifically **not** a verdict on what you sent. A `502` from `PUT /v1/byok/{provider}` means we could not verify the key, so nothing was stored and your existing key is untouched — retrying costs one click. See [provider keys](/get-started/provider-keys).
+
+## Validation responses are not errors
+
+`POST /v1/agents/{agent_id}/validate` and `POST /v1/tools/{tool_id}/validate` answer **200** whatever they find. The verdict is the body:
+
+```json
+{
+  "errors": ["llm: no OpenAI API key for this workspace - add one under BYOK"],
+  "warnings": ["the greeting reads {{system_vars.now}}, which is a machine timestamp a text-to-speech voice cannot say - use {{system_vars.time}} or {{system_vars.date}} in a spoken line"]
+}
+```
+
+Both keys are always present.
+
+**`errors` block a publish. `warnings` do not.** A publish with warnings succeeds and hands the warnings back on the publish response. So an empty `errors` array means "this will publish", not "this is good" — read the warnings anyway, because they are where the things that will surprise a caller live.
+
+Trying to publish with errors present returns `400` with those same lines in `detail.errors`. See [validation](/agents/validation).
+
+## Retrying
+
+**Retry `500`, `502` and `503`, with exponential backoff. Retry nothing else.** Every other code is a verdict on the request itself, and sending it again changes nothing except your bill.
+
+Neither SDK retries for you. A failed call raises immediately, once — there is no hidden backoff loop, so what you write is what happens.
+
+### There is no idempotency key
+
+<Warning>
+**No write endpoint takes an idempotency key.** A retried `POST` is a second request. For an operation that reaches the real world — placing a call, sending an email, running a task, charging a card — that means it happens twice.
+</Warning>
+
+There is one exception and three things to do instead:
+
+- **Chat messages dedupe themselves.** `POST /v1/chats/{id}/messages` requires `client_message_id`, a UUID you generate. Re-sending with the same one returns the same turn rather than posting a second message, so retrying that call is safe by construction.
+- **Names are unique per workspace.** A retried create for an agent, tool or task answers `409 an agent with that name already exists` rather than making a second copy. That `409` is evidence the first attempt worked — treat it as success and go and read the resource.
+- **Read before you retry anything that spends money.** After a timeout on `POST /v1/calls/outbound`, list calls filtered by `contact_key` or `batch_id` before dialling again. The call record is written before the carrier is contacted, so a call that got as far as our side is visible even if the response never reached you.
+- **Let batches do the retrying.** A [call batch](/telephony/batch-calling) or [email batch](/email/creating-a-batch) has `max_attempts` and `retry_after_minutes` built in, and will not re-dial a recipient it already reached. Driving one call at a time from your own loop gives up all of that.
+
+## How the SDKs surface an error
+
+Both SDKs raise **one exception type** for every non-2xx, carrying the same fields the envelope does.
+
+<CodeGroup>
+```typescript TypeScript
+import { TalqingApiError } from "@talqing/sdk";
+
+try {
+  await talqing.agents.publish({ agent_id: agentId });
+} catch (error) {
+  if (error instanceof TalqingApiError) {
+    console.error(error.status, error.message); // 400 config is invalid
+    for (const problem of error.errors) console.error(" -", problem);
+  } else {
+    throw error; // never reached the API: DNS, abort, offline
+  }
+}
+```
+
+```python Python
+from talqing import TalqingAPIError
+
+try:
+    talqing.agents.publish(agent_id)
+except TalqingAPIError as error:
+    print(error.status_code, error)  # 400 config is invalid
+    for problem in error.errors:
+        print(" -", problem)
+    print(error.detail)  # the decoded {"message", "errors"}
+```
+
+```bash cURL
+# -f hides the body on a failure, which is the one thing you want. Use -w instead.
+curl -sS -o response.json -w '%{http_code}\n' \
+  -X POST https://api.in.talqing.com/v1/agents/$AGENT_ID/publish \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+
+jq -r '.detail.message, (.detail.errors[]? | " - " + .)' response.json
+```
+</CodeGroup>
+
+| | TypeScript | Python |
+| --- | --- | --- |
+| Type | `TalqingApiError` | `TalqingAPIError` |
+| Status | `.status` | `.status_code` |
+| Message | `.message` | `str(error)` |
+| Per-field problems | `.errors: string[]` | `.errors: list[str]` |
+| Raw response | `.response: Response` | `.response: httpx.Response` |
+| Decoded `detail` | — | `.detail` |
+
+`TalqingApiError` is branded so `instanceof` holds even when a dependency graph pulls in both the ESM and the CommonJS build of the package. Without that, the check above would silently fall through and the error would keep propagating.
+
+A failure that **never reached the API** — DNS, an aborted request, a proxy's HTML `502` — has no envelope to parse. TypeScript rethrows the transport's own error unchanged. Python raises `TalqingAPIError` with the raw body text as the message and an empty `errors`, so the type stays uniform even when the body is not ours.
+
+The TypeScript client also takes an `onUnauthorized` callback, fired once when the API answers `401`. The credentials are gone, so every other in-flight call will fail identically — handling it in one place beats every caller re-deriving it. The error is still thrown afterwards.
+
+<CardGroup cols={2}>
+<Card title="Limits" href="/platform/limits">
+  What you can cross, and the two limits that do not exist.
+</Card>
+<Card title="Authentication" href="/get-started/authentication">
+  Where 401 and 403 come from, and how a role change reaches a token.
+</Card>
+</CardGroup>

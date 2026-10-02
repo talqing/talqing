@@ -1,0 +1,255 @@
+---
+title: "Handoff operation"
+description: "The handoff operation, for when the tree decides where the conversation goes — and how it differs from handoffs on the agent."
+---
+
+`handoff` moves the conversation to another agent from inside an operation tree.
+Use it when the **tree** decides where the call goes — after an `http` lookup,
+inside an `if` — rather than when the model does.
+
+```json
+{
+  "kind": "handoff",
+  "config": {
+    "target_agent_id": "9c1e6f42-7b30-4a55-9d18-2f0a6c4b8e31",
+    "context": "transcript",
+    "message": "Let me bring in our enterprise team."
+  }
+}
+```
+
+Handoff moves the conversation between **agents on this platform**. To reach a
+person, use [`transfer`](/tools/transfer).
+
+## This operation, or the agent's `handoffs` field
+
+Both exist, and they answer different questions.
+
+| | `handoffs` on the agent | The `handoff` operation |
+| --- | --- | --- |
+| Who decides | The **model**, from the caller's words | The **tree**, from data it fetched |
+| How you write it | One line per edge on `config.handoffs` | A tool with a name, a schema and a lifecycle |
+| Typical trigger | "I want to talk about my bill" | `account.tier == "enterprise"` |
+| What the caller sees | The model picks a desk | Nothing — it happens inside a tool call |
+
+If the destination is a desk the caller can ask for, put it on the agent's
+[`handoffs`](/teams/handoffs) field. That is one line per edge and the model
+routes it. Reach for this operation for the procedural case: look the account
+up, and *if* it is enterprise, hand to the enterprise desk.
+
+## Naming the target
+
+Exactly one of these, never both and never neither.
+
+| Field | What it names |
+| --- | --- |
+| `target_agent_id` | A stored agent in this workspace. It must already be **published**. |
+| `agent_name` | A member of the [agent team](/teams/agent-teams-on-a-call) this call is running, by name. |
+
+Getting it wrong is refused at save:
+
+```
+handoff: set target_agent_id (a stored agent) or agent_name (a team member)
+handoff: set either target_agent_id or agent_name, not both
+```
+
+Validating or publishing the tool checks the stored target for you:
+
+```
+handoff target agent 9c1e6f42-7b30-4a55-9d18-2f0a6c4b8e31 is not published
+```
+
+`agent_name` cannot be checked that early — the roster is decided by the call
+this tool ends up running on, not by the tool — so it comes back as a warning
+instead:
+
+```
+hands off to 'Enterprise desk', which resolves only when this agent runs in a
+team that defines it
+```
+
+Publishing the **agent** checks more: a handoff edge has to keep the same
+channel and the same pipeline on both sides, and a video handoff has to keep the
+same avatar. Those refusals are covered in [handoffs](/teams/handoffs).
+
+## `context`
+
+`context` decides what the next agent starts with. It takes the same three words
+as an agent's own `conversation.context`, because it is the same question asked
+about the next agent rather than about the next call.
+
+| Value | The target starts with |
+| --- | --- |
+| `transcript` (default) | Every turn of the conversation so far, verbatim |
+| `summary` | The text you supply, plus `recent_turns` verbatim turns (two by default) |
+| `none` | Nothing, unless you set `recent_turns` |
+
+The full policy model — what a summary is and is not, and why "summary is not
+privacy" — is in [context policies](/teams/context-policies). What follows is
+only what is different about writing it here.
+
+### `summary` is a value, not a request
+
+Under `context: "summary"` a `summary` is **required**, and it is the text
+itself. There is no second model call: whatever this field resolves to is what
+crosses.
+
+That is because this tree runs *after* the model's tool call. There is no
+argument being written at that moment to take a summary from, so you point the
+field at where the text comes from:
+
+| Source | Write |
+| --- | --- |
+| A property on this tool's own `json_schema` that the model filled | `{{args.summary}}` |
+| Something an earlier `http` or `code` operation published | `{{tooldata.brief}}` |
+| Fixed prose | `"The caller is an enterprise customer asking about SSO."` |
+
+```json
+{
+  "kind": "handoff",
+  "config": {
+    "target_agent_id": "9c1e6f42-7b30-4a55-9d18-2f0a6c4b8e31",
+    "context": "summary",
+    "summary": "{{args.summary}}",
+    "recent_turns": 3
+  }
+}
+```
+
+With `{{args.summary}}`, declare it on the tool's `json_schema` and describe it
+properly — it is the model's job to write it, and the description is the only
+instruction it gets:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Two or three sentences for the next agent: what the caller wants, what you have already checked, and anything you have promised them."
+    }
+  },
+  "required": ["summary"]
+}
+```
+
+A `summary` under any other context is an error, not a field that quietly does
+nothing:
+
+```
+handoff: `summary` only applies to context 'summary', not 'transcript'
+handoff: context 'summary' needs a `summary` - point it at where the
+text comes from, e.g. {{args.summary}}
+```
+
+### `recent_turns`
+
+`recent_turns` (1–10) is the tail of the conversation that crosses verbatim —
+alongside a summary, or in place of one under `none`. It works exactly as it
+does on `handoffs[]`. Left unset it means "the policy's own answer": two turns
+under `summary`, none under `none`.
+
+Under `transcript` it is refused rather than ignored, because every turn is
+already crossing:
+
+```
+handoff: `recent_turns` does not apply to context 'transcript', which
+already carries every turn - use context 'summary' or 'none'
+```
+
+Past ten turns the honest answer is `context: "transcript"`.
+
+## `message`
+
+`message` is spoken while the target loads. It is queued *before* the target is
+built — loading a target compiles its prompt, its tools and its voice — so the
+caller hears "connecting you to billing" during that wait rather than after it.
+
+There is no flag to make it finish first, and it does not need one: queued
+speech is drained before the target's own greeting runs, so the line always
+plays to the end.
+
+The target then speaks its own `greeting`, or opens with a generated line if it
+has none. If it has an `on_enter` hook, that runs first.
+
+## Terminal, and capped
+
+`handoff` is terminal in its chain: nothing may follow it in the top-level list
+or inside a branch, and branches do not rejoin. Anything that has to happen on
+the way out goes above it.
+
+A single call is capped at 25 handoffs in total — a backstop against a routing
+loop between two agents, not a budget you should ever approach. Past it, the
+agent tells the caller it cannot pass them on again.
+
+## A worked example
+
+Look the account up, and route on what came back. The `if` gives you two chains;
+each one ends in its own `handoff`.
+
+```json
+[
+  {
+    "kind": "http",
+    "config": {
+      "method": "GET",
+      "url": "https://api.example.com/accounts/{{args.account_id}}",
+      "headers": { "Authorization": "Bearer {{secrets.CRM_API_KEY}}" },
+      "timeout": 8
+    },
+    "silent": true,
+    "publish_fields": [{ "path": "tier", "store": "tooldata" }]
+  },
+  {
+    "kind": "if",
+    "config": { "left": "{{tooldata.tier}}", "op": "eq", "right": "enterprise" },
+    "then": [
+      {
+        "kind": "handoff",
+        "config": {
+          "target_agent_id": "9c1e6f42-7b30-4a55-9d18-2f0a6c4b8e31",
+          "message": "You're on our enterprise plan — let me bring in your account team.",
+          "context": "summary",
+          "summary": "{{args.summary}}",
+          "recent_turns": 3
+        }
+      }
+    ],
+    "else": [
+      {
+        "kind": "handoff",
+        "config": {
+          "target_agent_id": "4f2a8d61-05c7-4b93-8a2e-6c1d90fb3527",
+          "message": "Let me pass you to our support team.",
+          "context": "transcript"
+        }
+      }
+    ]
+  }
+]
+```
+
+<Note>
+In a [test run](/tools/testing-and-publishing) a `handoff` is simulated: the
+target agent is never loaded or compiled — a test must not build a second agent
+as a side effect — and the step reports the resolved target, message, context and
+summary. The run reports `handed_off: true` and stops there, which is what the
+operation does to the chain on a real call too.
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Handoffs" href="/teams/handoffs">
+    The `handoffs` field, where the model does the routing.
+  </Card>
+  <Card title="Context policies" href="/teams/context-policies">
+    What `transcript`, `summary` and `none` actually carry.
+  </Card>
+  <Card title="Conditional handoffs" href="/teams/conditional-handoffs">
+    Routing decided by a tool tree, from the team's point of view.
+  </Card>
+  <Card title="Transfer" href="/tools/transfer">
+    Reaching a person rather than another agent.
+  </Card>
+</CardGroup>

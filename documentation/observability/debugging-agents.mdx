@@ -1,0 +1,379 @@
+---
+title: "Debugging agents"
+description: "Symptom first: where to look, which field answers it, and what to change."
+---
+
+Something went wrong on a call. This page is organised by what you noticed, not
+by what the system calls it.
+
+## Read the run before theorizing
+
+Open the call. Almost every question on this page is answered by three things
+that are already on `GET /v1/calls/{session_id}`:
+
+1. **`snapshot`** — the verdict. `snapshot.ok` is `true` when nothing was found;
+   `snapshot.issues` lists every problem as `{kind, message}`, and it
+   is written from the run's own timings, errors and tool activity rather than
+   from anything you have to interpret.
+2. **`transcript`** — what was said, with **every tool call and its result
+   inline**. When a model did something unexpected, the reason is usually the
+   line above it.
+3. **`session.userdata`** — the state the call ended with. A tool that wrote the
+   wrong value shows up here before it shows up anywhere else.
+
+`events` sits beside them: the durable runtime trace, with `agent.ready`,
+`tool.started` / `tool.ended`, `provider.failed` / `provider.recovered`,
+`hold.started` / `hold.ended`, `session.error` and more. It is where to look
+when the transcript reads fine and the call still went wrong.
+
+Everything below assumes you have that page open. See
+[calls](/observability/calls) for the full field reference.
+
+### Finding the calls worth opening
+
+<CodeGroup>
+```bash cURL
+curl -G https://api.in.talqing.com/v1/calls \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "agent_id=8f2b41c7-6d90-4a3e-b512-0c7a9e34d118" \
+  --data-urlencode "outcome=failure" \
+  --data-urlencode "limit=50"
+```
+
+```typescript TypeScript
+const page = await talqing.calls.list({
+  agent_id: "8f2b41c7-6d90-4a3e-b512-0c7a9e34d118",
+  outcome: "failure",
+  limit: 50,
+});
+
+for (const call of page.items) {
+  console.log(call.id, call.close_reason_label, call.summary);
+}
+```
+
+```python Python
+from talqing import paginate
+
+for call in paginate(
+    talqing.calls.list,
+    agent_id="8f2b41c7-6d90-4a3e-b512-0c7a9e34d118",
+    outcome="failure",
+):
+    print(call["id"], call["close_reason_label"], call["summary"])
+```
+</CodeGroup>
+
+`outcome` is the verdict [post-call analysis](/observability/call-analysis)
+reached; `close_reason` filters by how a call ended. To see which endings
+dominate rather than to list them, read `endings` from `GET /v1/observability`.
+
+## The playbook
+
+<AccordionGroup>
+
+<Accordion title="The agent said something wrong, or made something up">
+**Look at**: the `transcript`, top to bottom, and specifically the
+`function_call_output` items above the bad line.
+
+**The field that answers it**: whether the wrong fact was already in the tool
+result. A tool that returned stale or empty data is a tool problem; a tool that
+returned the right data and an agent that said something else is a prompt
+problem.
+
+**Then check, in this order:**
+
+- **Did a tool return it?** If `function_call_output` carries the wrong value,
+  fix the tool, not the prompt. Test it in isolation — see
+  [testing and publishing](/tools/testing-and-publishing).
+- **Did the agent have anything to answer from?** If the fact is not in the
+  prompt and no tool returned it, the model had nothing to go on but its own
+  memory.
+- **Did the prompt invite it?** An instruction that says what to do but never
+  says what to do when the information is missing gets a plausible invention.
+  Say "if you do not have it, say so" explicitly. See
+  [prompting](/agents/prompting).
+- **Was it a variable that never resolved?** Check `session.userdata` and the
+  call's `vars`. A template that resolved to nothing produces a sentence with a
+  hole in it. See [variables](/agents/variables).
+
+**Do not** fix this by adding fields to post-call analysis. Analysis is what a
+reader inferred after the fact; it never reaches a live call.
+</Accordion>
+
+<Accordion title="The agent was slow">
+**Look at**: `snapshot.response_latency` — `avg_ms`, `p95_ms`, `max_ms` and
+`samples`. The p95 is the one that matters. A call that was *sometimes* slow is
+what callers complain about, and a mean hides it.
+
+**The threshold ships on the response**: `snapshot.slow_response_threshold_ms`
+is `3500`. Past that, `snapshot.issues` says
+`Slow responses: p95 time to first word was …`.
+
+Then read `snapshot.response_stages`, an ordered list of `{kind, ms, label}` that
+adds up to the average:
+
+| `kind` | What it measures | If it is the big one |
+| --- | --- | --- |
+| `stt` | Caller stops talking until the final transcript arrives | A batch STT model waits for the utterance to end before it starts. Switch to a streaming one. See [speech to text](/agents/speech-to-text-and-turn-detection). |
+| `endpoint` | The wait for turn detection to agree the caller is done | Tighten the endpointing windows. See [turn handling](/agents/turn-handling). |
+| `llm_step`, `tool` | The model choosing a tool, and the tool running, before anything was said | Have the agent say a line before it calls the tool, or make the tool faster. |
+| `llm` | Asked for the reply until the model's first token | A smaller model, a shorter prompt, a lower `reasoning_effort`, or the [priority lane](/agents/priority-lane). A long prompt that is not being cached also lands here — check `cost.cache_hit_ratio` in [observability](/observability/overview). |
+| `tts` | Model's first token until the first byte of audio | A faster TTS model. See [voices](/agents/voices). |
+
+`other` is what is left over. A realtime agent has no
+separate STT or TTS leg, so those two stages are absent on one — see
+[realtime](/agents/realtime).
+
+**Also check `snapshot.slow_tool_calls_in_silence`.** A tool over
+`slow_tool_threshold_ms` (`8000`) with nothing being spoken over it is a caller
+sitting in silence. The fix is usually not a faster tool but a `say` operation
+before the slow step, or `long_running_task` on the tool. See
+[speech operations](/tools/speech-operations) and
+[tools overview](/tools/overview).
+
+`snapshot.connection` splits connection quality into `agent` and `caller`. A
+`poor` reading on the caller's side is their network, not your stack, and it is
+reported separately for exactly that reason.
+</Accordion>
+
+<Accordion title="The agent called the wrong tool, or called one with bad arguments">
+**Look at**: the `function_call` item in the transcript. `data.name` is the tool
+it picked and `data.arguments` is what it decided to send — not what your schema
+said, but what the model actually chose.
+
+**The field that answers it**: the tool's `description`, and each property's
+description in its `json_schema`. Those are the only instructions the model gets
+about a tool. If two tools' descriptions could both plausibly cover the request,
+the model will pick one at random and you will see it here.
+
+**The fixes, in order of how often they work:**
+
+- **Sharpen the descriptions.** Say when to use the tool and when not to. Say
+  the format each argument takes and what it means. See
+  [schema and description](/tools/schema-and-description).
+- **Split the tool.** One capability per tool. A tool that does three things has
+  a description that describes three things, and a model that guesses among
+  them.
+- **Look for an overlap.** Two tools whose purposes shade into each other is the
+  usual cause of "it called the wrong one". A prompt section plus a lookup tool
+  that both answer "what are your hours" is the same problem.
+- **Say it in the prompt.** Ordering and preconditions ("always confirm the
+  spelling before calling `create_ticket`") belong in the system prompt, not in
+  the tool description. See [prompting](/agents/prompting).
+
+If the call ended `agent_start_failed` instead, the model never got to choose:
+two attached tools presented the same name. Read `session.error`, which says
+which.
+</Accordion>
+
+<Accordion title="A tool failed">
+**Look at**: the `function_call_output` item, where `data.is_error` is `true` and
+`data.output` is what the model was told. Then `events`, for the
+`tool.started` / `tool.ended` pair with its timing.
+
+**The counts are on the snapshot:**
+
+| Field | Meaning |
+| --- | --- |
+| `tool_calls` | How many ran. |
+| `tool_call_failures` | How many reported a failure. |
+| `unfinished_tool_calls` | How many were still running when the call ended — **not** the same as a failure, and only counted once the call is terminal. |
+| `slow_tool_calls` | Over `slow_tool_threshold_ms`. A background tool is never counted here, however long its work ran — it hands the turn back at dispatch, so nobody waited. |
+| `slow_tool_calls_in_silence` | The subset with nothing spoken over them. The only version that is a defect. |
+
+**The fixes:**
+
+- **Read what the caller heard.** The model is handed the error text and speaks
+  its own version of it. If the caller was told something misleading, the fix is
+  the tool's `on_error` handling, not the prompt. See
+  [tool failures](/tools/failures).
+- **Reproduce it outside a call.** `POST /v1/tools/{tool_id}/run` executes the
+  tree with arguments you supply and shows every operation's result. See
+  [testing and publishing](/tools/testing-and-publishing).
+- **Check the credential.** A `{{secrets.NAME}}` that does not exist raises
+  rather than substituting an empty string, which is deliberate. See
+  [secrets](/platform/secrets).
+
+`snapshot.provider_failures` and `provider_recoveries` are the different
+question of a model provider failing over to its backup mid-call. See
+[model fallbacks](/agents/model-fallbacks).
+</Accordion>
+
+<Accordion title="The agent hung up early">
+**Look at**: `session.close_reason` first. It answers who ended the call, and
+the answer is not what the name suggests.
+
+| Reason | Who hung up |
+| --- | --- |
+| `user_initiated` | **The agent.** An `end_call` operation ran. |
+| `task_completed` | The agent, having finished what it was doing. |
+| `end_call` | The agent, on a chat. |
+| `participant_disconnected` | **The caller.** |
+| `api_end` | You: `POST /v1/chats/{id}/end`. |
+| `replaced` | A newer chat with the same contact took its place. |
+
+**If it was the agent** (`user_initiated` or `task_completed`), find the
+`end_call` in the tool tree that fired and read the condition above it in the
+transcript. An `end_call` operation reached by a branch whose condition is too
+loose is the usual cause — see [end call](/tools/end-call). Check also that
+the goodbye is not the *only* thing on that path: an `end_call` with nothing
+before it hangs up mid-sentence.
+
+**If it was the caller**, read the two turns before the disconnect. A caller
+hanging up on the greeting is usually a wrong number or an unwanted call, and
+[call analysis](/observability/call-analysis) will have skipped it as
+`too_short` rather than counting it against your success rate.
+
+**If it was `transferred`**, nobody hung up: the call went to a person and our
+session ended there. `session.transfer.outcome` says whether it connected. Both
+the duration and the recording measure our part only. See
+[transfers](/telephony/transfers).
+
+The full list is in [close reasons](/observability/close-reasons).
+</Accordion>
+
+<Accordion title="The call never connected">
+**Look at**: `session.close_reason` and its bucket. This is the one symptom
+where the bucket does most of the work, because it says whose problem it is.
+
+| Bucket | Meaning | Where to go |
+| --- | --- | --- |
+| `caller_unreachable` | Busy, no answer, declined, not in service. The carrier reached out and nobody was there. | Nothing to fix. |
+| `carrier_fault` | The trunk misbehaved. | [Telephony troubleshooting](/telephony/troubleshooting) and [carrier accounts](/telephony/carrier-accounts). |
+| `configuration` | The call arrived and there was nothing valid to run. | The table in [close reasons](/observability/close-reasons) names the fix for each. |
+| `platform` | Ours. | Raise it with support with the call id. |
+
+The four `configuration` reasons worth knowing by sight:
+
+- `missing_published_definition` / `unpublished_agent_failed` — **publish the
+  agent**. A draft cannot answer a call. See [versions](/agents/versions).
+- `insufficient_credits` — top up. See
+  [pricing and credits](/get-started/pricing-and-credits).
+- `prepare_failed` — the definition would not compile for this call. Run
+  `validate` on the agent; see [validation](/agents/validation).
+- `agent_start_failed` — it compiled and died before its first word. Read
+  `session.error` on the call.
+
+**If there is no call record at all**, the call never reached an agent. Check
+the number's `readiness` — `live` is the only value that answers calls — and
+that a **published `voice` agent** is assigned to it. See
+[phone numbers](/telephony/phone-numbers).
+</Accordion>
+
+<Accordion title="The caller was cut off mid-sentence">
+**Look at**: `snapshot.interruptions`, `snapshot.false_interruptions` and
+`snapshot.false_interruptions_resumed`.
+
+A **false interruption** is the agent stopping because it thought the caller had
+started speaking when they had not — a cough, a door, background speech.
+`false_interruptions_resumed` counts the ones where the agent picked its own
+sentence back up, which is what `resume_false_interruption` is for. A high
+`false_interruptions` with a low resumed count is the setting being off. See
+[turn handling](/agents/turn-handling).
+
+**Then check the audio path:**
+
+- `snapshot.noise_cancellation_failed` — when `true`, the enhancer turned itself
+  off and the call ran on raw audio, which makes every endpointing decision
+  worse. It appears in `snapshot.issues` as
+  `Noise cancellation failed and the call ran on raw audio`. See
+  [audio processing](/agents/audio-processing).
+- `snapshot.connection` — `poor` or `lost` on the caller's side explains
+  clipping that has nothing to do with your configuration.
+
+**If the agent was cut off rather than the caller**, look at
+`snapshot.pace.talk_over_turns` and `pace.longest_agent_turn_ms`. A very long
+agent turn is a monologue callers interrupt; shortening it in the prompt fixes
+more of this than any endpointing knob.
+
+**If the whole call was cut off**, check the duration. A PSTN call is force-ended
+at three hours, and a leg with no media for more than 120 seconds is dropped by
+the carrier side — which is what a transfer left on hold too long looks like.
+</Accordion>
+
+<Accordion title="The agent did not remember a returning caller">
+**Look at**: `config.conversation.context` on the agent that **answered**. It
+defaults to `none`, which starts every call clean. Nothing else about memory
+matters until this is set.
+
+| `context` | What a new call gets |
+| --- | --- |
+| `none` | Nothing. A brand-new conversation every time. |
+| `summary` | Background on recent conversations with this person. |
+| `transcript` | The same conversation carried on. |
+
+**Then check, in order:**
+
+- **Is `contact_key` the same?** Memory is keyed to the person, and
+  `contact_key` is *your* stable id for them, not `conversation_id` — which is
+  new on every call. Two calls with different `contact_key` values are two
+  different people as far as the platform is concerned. See
+  [conversations](/observability/conversations).
+- **Is analysis writing summaries?** `context: "summary"` reads the summaries
+  post-call analysis writes, and nothing else produces them. Publishing an agent
+  that asks for `"summary"` with analysis or its summary switched off is
+  refused — but analysis can be switched off *after* publishing, and then the
+  summaries quietly stop. See [call analysis](/observability/call-analysis).
+- **Is `initialize_userdata` on?** It is what carries what the agent learned
+  about the person into the next call. It applies to `summary` and `transcript`
+  only.
+- **Was the history erased?** `session.content_deleted_at` on the old calls, or
+  a retention policy that has passed. Erasing a person's last remaining call
+  also erases what your agents remember about them. See
+  [data retention](/platform/data-retention-and-privacy).
+
+Full reference: [conversation memory](/agents/conversation-memory) and
+[userdata](/agents/userdata).
+</Accordion>
+
+<Accordion title="Costs are higher than expected">
+**Look at**: the `cost` section of `GET /v1/observability` before any single
+call. It splits the range by kind, provider and model, and the answer is
+normally one line dominating the rest.
+
+| Field | The question it answers |
+| --- | --- |
+| `analysis_cost` | What [post-call analysis](/observability/call-analysis) is costing. Roughly 5% of a call is expected; much more means a very long transcript or a large analysis model. |
+| `priority_cost` | How much ran in the premium lane. One flag can double an LLM line. See [priority lane](/agents/priority-lane). |
+| `cache_hit_ratio` | How much of your input was served from the provider's prompt cache. A long system prompt with a low ratio is the most common avoidable cost on this platform. |
+| `avatar_cost` | Avatar minutes are **wall-clock, idle included**. A video call where nobody spoke for two minutes still paid for two minutes of avatar. See [video avatars](/agents/video-avatars). |
+| `realtime_cost` | Speech-to-speech bills audio tokens at several times the text rate. A realtime agent and a cascade agent are not comparable per minute. See [realtime](/agents/realtime). |
+
+**Then the things that surprise people:**
+
+- **Voicemail is billed as an answered call.** An outbound call that reaches a
+  greeting connects, runs, records and bills. [Voicemail
+  detection](/agents/voicemail) keeps it short; it does not make it free.
+- **Hold time is inside the bill.** `snapshot.pace.hold_ms` is time parked on
+  hold music during a bridged transfer — inside the duration, inside the
+  recording, and silent.
+- **A re-analysis is charged again.** Backfilling analysis inserts a new usage
+  row rather than replacing the old one, because both model calls really
+  happened. The platform fee does not move; your provider bill does.
+- **Provider cost is not debited from credits.** If your credit balance is
+  falling faster than you expect, it is the platform fee, not model
+  spend — that goes to your own providers directly.
+
+Full breakdown: [costs](/observability/costs).
+</Accordion>
+
+</AccordionGroup>
+
+## When the call record itself is the problem
+
+| What you see | What it means |
+| --- | --- |
+| `snapshot.issues` contains `The agent never became ready before the call ended` | The run never got going. Read `close_reason` — it is almost always a `configuration` reason. |
+| `cost` is `null` on a finished call | `billing_status` is `pending` (the process died before pricing it, and nothing will price it later) or `unpriceable` (the call metered something the catalog prices none of — raise it with support). |
+| An empty transcript on a call with a real duration | Check `session.content_deleted_at`. That field is what tells an erased call apart from a silent one. |
+| No `session.completed` webhook for a call that plainly ended | The process running it died before it could finish, so the call was never priced and never announced. Reconcile from `GET /v1/calls` rather than from deliveries. See [webhooks](/observability/webhooks). |
+
+<CardGroup cols={2}>
+  <Card title="Calls" href="/observability/calls">
+    Every field on the record this page reads.
+  </Card>
+  <Card title="Close reasons" href="/observability/close-reasons">
+    Every ending, its bucket and its fix.
+  </Card>
+</CardGroup>

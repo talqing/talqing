@@ -1,0 +1,355 @@
+---
+title: "Writing a task prompt"
+description: "A task prompt carries the work and not the ending, and getting that wrong is the direct cause of the two most common task failures."
+---
+
+A task prompt is a different craft from an agent prompt. Nobody is listening, so
+none of the speech rules apply — but the run has to *finish*, and the prompt is
+what makes it finish. The two failures almost every task hits, `no_output` and
+`step_limit`, both trace back to something the prompt did or did not say.
+
+[Prompting an agent](/agents/prompting) covers the conversational half and
+deliberately does not cover this.
+
+## The ending is a tool description, not prompt text
+
+When a run starts, the task gains a generated tool named `submit_result`, built
+from your `output` fields. **Nothing at all is appended to your prompt** — what
+the model reads is your text and nothing else.
+
+So the thing that tells the model calling that tool is how a run ends is the
+tool's own description, `submit_result_description`. It is a required field on
+the task, and a new task starts with:
+
+```text
+Submit results if you are sure that you have achieved the goal of this task
+```
+
+**Make it specific to your task.** "Achieved" means something different for every
+task, and saying what it means here is part of building the task, in the same way
+the output field descriptions are:
+
+```text
+Submit the qualified lead and finish. Calling this IS how the result is produced
+— a written summary is not a result and nobody reads it. Send every field; send
+null for anything you could not determine rather than omitting it or guessing.
+```
+
+The full shape is in [inputs and output](/tasks/inputs-and-output#how-the-output-is-actually-collected).
+
+<Warning>
+**Nothing else tells the model that a prose answer is not a result.** Leave the
+stub in place and a model is free to decide a well-written paragraph counts, and
+the run fails as `no_output` with a prompt that was never the problem. Publishing
+refuses a blank description, but it cannot tell you the one you left there says
+too little.
+</Warning>
+
+<Note>
+**Never declare a tool named `submit_result`.** The name is reserved
+workspace-wide — creating a tool with it is refused with
+`'submit_result' is reserved by the platform`.
+</Note>
+
+So your prompt carries the **work**, not the exit. Everything about how the run
+ends is handled. Everything about what the run is for, where to look, and what
+counts as a good answer is yours.
+
+## The shape that works
+
+Five things, in this order.
+
+| Section | What goes in it |
+| --- | --- |
+| What this is for | Who the model is being, and what a finished run has produced. Two sentences. |
+| What it is given | The inputs, named as the `{{vars.…}}` the prompt reads, with what each one is. |
+| How to do the work | The steps, in order. Which tool to call when, and when to stop calling it. |
+| What counts as done | The standard each field has to meet before the model submits. |
+| What to do when something cannot be found | Explicitly: send `null` and move on. Without this the model keeps looking. |
+
+The last one is the section people leave out, and it is the one that costs
+steps. A model with no permission to fail keeps searching, and a task that keeps
+searching runs out of rounds.
+
+Here is a complete prompt for a research task:
+
+```text
+You research companies so that a salesperson can open a conversation without
+wasting anybody's time. A finished run is a short, accurate profile plus one
+opening line they could send as written.
+
+WHAT YOU ARE GIVEN
+- {{vars.domain}} — the company's web domain, e.g. northwind.example.
+- {{vars.our_product}} — what we sell, so the opening line can connect the two.
+
+HOW TO WORK
+1. Search for the domain and read the company's own site first. Their own
+   words beat a directory listing.
+2. If the site does not say what they sell, read the pricing page and then the
+   careers page, in that order, before you look anywhere else.
+3. Check once whether they are hiring for a role that would use what we sell.
+   One search. If it comes back empty, that is the answer.
+4. Stop as soon as you can fill every field. More searching after that costs
+   time and changes nothing.
+
+STANDARDS
+- Never state a fact you did not read. Where two sources disagree, the
+  company's own site wins.
+- The opening line is one sentence a person would actually send. No greeting,
+  no sign-off, no exclamation marks, under 25 words.
+
+WHEN YOU CANNOT FIND SOMETHING
+Send null for that field and carry on. A null is a correct answer and a guess
+is not. Do not spend further searches on a field you have already failed to
+find once.
+```
+
+Note what is not in it: no instruction to call `submit_result` and no list of
+the output fields. The first lives in `submit_result_description`, the second in
+each field's own description — the prompt would only be repeating them.
+
+## Field descriptions are part of the prompt
+
+Every output field is sent, so the model has to say something about every one of
+them; a field with `required` off may also be `null` — "I could not find it". The field's
+`description` is the only instruction it gets about what belongs there, because
+that description becomes the argument's description in the generated tool
+schema. It is literally the prompt for that value.
+
+Which means a vague description does not produce a vague value. It produces a
+*different* value on every run.
+
+| Description | What comes back |
+| --- | --- |
+| `"Company size"` on a string field | `"240 employees"` on one run, `"mid-size"` on the next, `"~200, based in Pune"` on the third. Every one of them is a reasonable reading, and nothing downstream can compare them. |
+| `"One of: 1-10, 11-50, 51-200, 201-1000, 1000+. Pick the band their own careers page or an employee listing supports. Send null rather than inferring one from the size of their website."` | One of five strings, or `null`. A column you can group by. |
+| `"The opening line"` on a string field | Sometimes a sentence, sometimes a paragraph, sometimes a full email with a greeting and a sign-off, because "line" does not carry a length. |
+| `"One sentence under 25 words that names something specific you read on their site and connects it to what we sell. No greeting and no sign-off. Send null if you found nothing specific enough to be worth saying."` | One sentence, or an honest `null` on a company whose site said nothing. |
+
+The pattern: name the vocabulary or the length, name where to look, and name the
+null case. [Inputs and output](/tasks/inputs-and-output#writing-a-description-the-model-can-act-on)
+has more pairs.
+
+<Note>
+**Descriptions are not templated.** `{{vars.our_product}}` in a field
+description reaches the model as those literal braces — only the prompt is
+substituted. Anything a description needs to know about this run's inputs has to
+be said in the prompt instead.
+</Note>
+
+## Writing for the two failure modes
+
+`no_output` and `step_limit` are the same event underneath: the run ended
+without calling `submit_result`. They are reported apart because the fix is
+different, and doing the other one is wasted work.
+
+| | `no_output` | `step_limit` |
+| --- | --- | --- |
+| What happened | The model finished and wrote prose instead of calling the tool. | Every round of an attempt was spent and no result came back. |
+| `steps_used` against `max_steps` | Below the cap. | At the cap. This is exactly what separates the two. |
+| Where the trace ends | An assistant message. | A tool call, usually one of a long run of them. |
+| What it is | A prompt problem. | A scope problem. |
+| The fix | Say what the task is for and that finishing means producing the result. | Raise `max_steps`, or narrow what the task does. |
+
+**Do not rewrite a prompt that reported `step_limit`.** The prompt was not at
+fault, and the fix is a number in the task's Limits section. Rewriting it is the
+one piece of work these two error types exist to stop you doing.
+
+`attempts` tells you how much the platform already tried on your behalf. A run
+that ends with no result is re-prompted rather than failed, up to twice, so
+`attempts` is 1, 2 or 3 — and **each re-prompt starts the step budget over**.
+Read it beside the status:
+
+- **`attempts: 1` on a completed run** is the healthy shape. It worked first go.
+- **`attempts: 2` or `3` on a completed run** means one or two earlier attempts
+  ended with no result and were thrown away. It worked, at two or three times
+  the tokens, and it will start failing as soon as the work gets slightly
+  harder. Fix it now rather than when it breaks.
+- **A `no_output` failure** means every attempt ended in prose. The re-prompts
+  already told the model to produce the result and it still did not, so the
+  problem is upstream of that: look for a sentence in your prompt pulling it
+  towards an essay — "write a summary", "produce a report", "explain".
+- **A `step_limit` failure with `attempts: 3`** is three separate attempts that
+  each burned the full step budget, so a task with `max_steps: 25` did up to 75
+  rounds of work before anything gave up. The clock stopped it, not `max_steps`.
+
+Every `error.type`, and what each one sends you to change, is in
+[errors and limits](/tasks/errors-and-limits).
+
+## Prompting for tools and MCP servers
+
+The model can only call what is attached, and it decides what to call from the
+tool's own name and description — the same as an agent. What a task's prompt
+adds is **order**, because a task's work usually has one.
+
+- **Name tools by the name the model sees.** For a tool that is its `name`. For
+  an MCP tool it is the namespaced `exposed_name` — an integration with a
+  `tools_namespace` of `crm` turns the server's `search` into `crm_search`, and
+  a prompt saying "use search" names nothing. `GET /v1/integrations/{integration_id}/mcp-tools`
+  lists both names for every tool a server offers. See
+  [MCP servers](/integrations/mcp-servers).
+- **Say the order, and say when to stop.** "Call `crm_search` first with the
+  domain. Only if it returns no rows, fall back to `web_lookup`." A model given
+  three tools and no order will often call all three.
+- **Say what an empty result means.** This is the single highest-value sentence
+  in most task prompts. "If `crm_search` returns an empty list, the company is
+  not a customer — say so and move on. Do not search again with a different
+  query." Without it, an empty result reads to the model as a failed attempt,
+  and it retries until the steps run out.
+- **Say what not to call.** A task attached to a write-capable MCP server should
+  be told which of its tools are off limits, in the prompt, as well as narrowed
+  through `allowed_tools` on the integration.
+
+<Tip>
+**A task can be told to think.** Nobody is waiting on silence, so
+`reasoning_effort` on the model costs seconds and tokens rather than a caller's
+patience — and a prompt that says "work out which source is more likely to be
+current before you read either" is a reasonable instruction here in a way it
+never is on a voice call. See
+[reasoning and builtin tools](/agents/reasoning-and-builtin-tools).
+</Tip>
+
+## Iterating
+
+Run it, read the trace, change one thing.
+
+The [trace](/tasks/running-and-runs#the-trace) is every tool call and everything
+the model wrote, in order, and it answers the question a prompt edit should be
+based on. Four things it tells you:
+
+| What the trace shows | What the prompt is missing |
+| --- | --- |
+| The same tool called five times with slightly different arguments | What an empty or unhelpful result means, and permission to stop |
+| A tool never called at all | Which tool to use for which part of the work, by its exposed name |
+| A long assistant message and no `submit_result` | What the task is for. The model is answering a question rather than doing a job — check `submit_result_description` too, since that is what says prose is not an answer |
+| `submit_result` called, refused, called again | A field description the model could not satisfy — usually a type or a vocabulary it was never told |
+
+That last one is worth reading closely: when the arguments do not match the
+schema the model is told what is wrong and may call the tool again, so a run can
+finish successfully having wasted two rounds on a description nobody wrote
+properly.
+
+**Change one thing between runs.** A task run is cheap and reproducible in a way
+a call is not — the same `vars` produce a comparable run every time — so there
+is no reason to bundle three edits and guess which one worked.
+
+## Complete examples
+
+<AccordionGroup>
+<Accordion title="A research task">
+
+```json
+{
+  "config": {
+    "name": "Profile a lead",
+    "prompt": "You research companies so that a salesperson can open a conversation without wasting anybody's time. A finished run is a short, accurate profile plus one opening line they could send as written.\n\nWHAT YOU ARE GIVEN\n- {{vars.domain}} - the company's web domain.\n- {{vars.our_product}} - what we sell, so the opening line can connect the two.\n\nHOW TO WORK\n1. Search for the domain and read the company's own site first.\n2. If the site does not say what they sell, read the pricing page and then the careers page, in that order.\n3. Check once whether they are hiring for a role that would use what we sell. One search. If it comes back empty, that is the answer.\n4. Stop as soon as you can fill every field.\n\nSTANDARDS\n- Never state a fact you did not read. Where two sources disagree, the company's own site wins.\n\nWHEN YOU CANNOT FIND SOMETHING\nSend null for that field and carry on. A null is a correct answer and a guess is not. Do not spend further searches on a field you have already failed to find once.",
+    "llm": {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "medium",
+      "builtin_tools": [{ "type": "web_search" }]
+    },
+    "vars": [
+      { "name": "domain", "description": "The company's web domain, e.g. northwind.example", "required": true },
+      { "name": "our_product", "description": "What we sell, in a few words", "default": "warehouse automation software" }
+    ],
+    "output": [
+      { "name": "company_name", "type": "string", "description": "The company's trading name as it appears on their own site, without the legal suffix. Send null if the domain does not resolve to a company you can identify." },
+      { "name": "what_they_sell", "type": "string", "description": "One or two sentences on the product and who buys it, in the plainest words you can. Send null if you could not read enough to say." },
+      { "name": "employee_band", "type": "string", "description": "One of: 1-10, 11-50, 51-200, 201-1000, 1000+. Pick the band their own careers page or an employee listing supports. Send null rather than inferring one from the size of their website." },
+      { "name": "hiring_for_a_fit", "type": "boolean", "description": "True if they have an open role whose responsibilities would use what we sell, false if you searched and found none. Send null only if you could not search at all." },
+      { "name": "opening_line", "type": "string", "description": "One sentence under 25 words that names something specific you read on their site and connects it to what we sell. No greeting and no sign-off. Send null if you found nothing specific enough to be worth saying." }
+    ],
+    "max_steps": 30,
+    "timeout_seconds": 240
+  }
+}
+```
+
+`max_steps` is raised above the default 25 because a research task genuinely
+searches, and `timeout_seconds` is raised with it — the step budget is the
+runaway guard and the clock is the real bound.
+
+</Accordion>
+
+<Accordion title="A classification task">
+
+```json
+{
+  "config": {
+    "name": "Triage an inbound message",
+    "prompt": "You are the first reader of every message that arrives in the support inbox. Your job is to route it and to say how urgent it is. You do not answer it.\n\nWHAT YOU ARE GIVEN\n- {{vars.message}} - the raw text of the message, as the customer wrote it.\n- {{vars.plan}} - the plan the sender is on, or empty if we do not know.\n\nHOW TO DECIDE\nRead the whole message before you decide anything. Route on what the customer wants, not on the words they used: 'this is broken' about an invoice is billing, not technical.\n\nUrgency is about consequence, not tone. Someone who cannot use the product right now is urgent. Someone who is angry about a feature request is not.\n\nWHEN THE MESSAGE IS AMBIGUOUS\nPick the queue that would waste the least of the customer's time if you are wrong, and say in needs_human why it was hard to place. Do not refuse to route.",
+    "llm": { "provider": "openai", "model": "gpt-5.6-luna" },
+    "vars": [
+      { "name": "message", "description": "The raw text of the inbound message", "required": true },
+      { "name": "plan", "description": "The sender's plan, if known", "default": "" }
+    ],
+    "output": [
+      { "name": "queue", "type": "string", "description": "Exactly one of: billing, technical, sales, account, other. Route on what the customer wants rather than the words they used. Send null only if the message is empty." },
+      { "name": "is_urgent", "type": "boolean", "description": "True if the sender is blocked from using the product right now or reports an outage; false for a question, a complaint or a feature request. Send null if the message gives no signal either way." },
+      { "name": "needs_human", "type": "boolean", "description": "True if this should not get an automated reply - a legal threat, a cancellation, a message about a person's safety, or one you could not confidently place. False otherwise. Send null never; decide." },
+      { "name": "one_line_summary", "type": "string", "description": "What the customer wants, in one sentence under 20 words, written for the agent who picks this up. No greeting, no restating the queue. Send null if the message is empty." }
+    ],
+    "max_steps": 3,
+    "timeout_seconds": 60
+  }
+}
+```
+
+`max_steps: 3` is deliberate. The task calls no tools, so a healthy run uses one
+step — the `submit_result` call itself — and a run that somehow needs thirty
+rounds has gone wrong in a way that should fail fast rather than burn tokens.
+
+Notice `needs_human` says "Send null never; decide". Every field is nullable in
+the generated tool and there is no way to turn that off, so a field that must
+always have a value says so in its description.
+
+</Accordion>
+
+<Accordion title="An extraction task">
+
+```json
+{
+  "config": {
+    "name": "Pull the terms out of a quote",
+    "prompt": "You read supplier quotes and pull out the four numbers our finance team needs. You extract; you do not calculate, convert or negotiate.\n\nWHAT YOU ARE GIVEN\n- {{vars.quote_text}} - the full text of one quote, as it arrived.\n\nHOW TO WORK\nRead the whole document before you fill anything in. Quotes bury the real total in a footnote more often than not, so a number in a table is not automatically the answer.\n\nTake every value verbatim from the document. If the document states a figure twice and they disagree, use the one in the totals section and note nothing - the disagreement is finance's problem, not yours.\n\nWHEN A TERM IS NOT IN THE DOCUMENT\nSend null. Do not infer a payment term from an invoice date, do not annualise a monthly figure, and do not convert a currency. A null tells finance to go and ask; a computed number tells them nothing is wrong.",
+    "llm": { "provider": "openai", "model": "gpt-5.6-luna", "reasoning_effort": "low" },
+    "vars": [
+      { "name": "quote_text", "description": "The full plain text of the quote", "required": true }
+    ],
+    "output": [
+      { "name": "supplier_name", "type": "string", "description": "The supplier's name exactly as it appears on the document. Send null if the document does not name one." },
+      { "name": "total_amount", "type": "number", "description": "The grand total as a bare number, no currency symbol and no thousands separators, taken from the totals section. Send null if the document states no total." },
+      { "name": "currency", "type": "string", "description": "The three-letter ISO code for the currency the total is in, e.g. INR or USD. Send null if the document uses a symbol you cannot resolve to one code." },
+      { "name": "payment_terms_days", "type": "integer", "description": "Days from invoice to payment due, as a whole number, e.g. 30 for 'net 30'. Send null if the document does not state a payment term - never infer one from a date." }
+    ],
+    "max_steps": 3,
+    "timeout_seconds": 90
+  }
+}
+```
+
+The whole prompt is about what *not* to do, because extraction fails by the model
+being helpful: converting a currency, annualising a figure, reading a term off a
+date. `total_amount` is a `number` and `payment_terms_days` an `integer`, so
+neither can come back as `"₹4,20,000"` or `"net 30"`.
+
+</Accordion>
+</AccordionGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Errors and limits" href="/tasks/errors-and-limits">
+    Every `error.type`, and the two budgets that bound a run.
+  </Card>
+  <Card title="Inputs and output" href="/tasks/inputs-and-output">
+    The generated `submit_result` tool, and required-and-nullable.
+  </Card>
+  <Card title="Running and runs" href="/tasks/running-and-runs">
+    Read a run, its trace, `attempts` and `steps_used`.
+  </Card>
+  <Card title="Tools and MCP servers" href="/tasks/tools-and-mcps">
+    Attach the things the prompt tells the model to call.
+  </Card>
+</CardGroup>

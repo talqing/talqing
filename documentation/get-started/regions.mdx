@@ -1,0 +1,157 @@
+---
+title: "Regions"
+description: "Two regions, two base URLs. Everything a workspace owns is regional; your identity and your token are not."
+---
+
+Talqing runs in two regions. A region is where your agents, your calls and your credit balance physically live, and **you choose one purely by base URL** — there is no region field anywhere in the API and nothing to enable.
+
+| Slug | Name | API base URL | Default |
+| --- | --- | --- | --- |
+| `in` | India (Bangalore) | `https://api.in.talqing.com` | |
+| `us` | United States (San Francisco) | `https://api.us.talqing.com` | Yes |
+
+The dashboard is one app at `https://app.talqing.com` and works against either.
+
+## What is regional and what is global
+
+This is the distinction to get right before you build anything, because it decides where a resource you created can be found.
+
+| Regional — belongs to the base URL it was created against | Global — the same everywhere |
+| --- | --- |
+| Agents, tools, agent tasks | Your Google identity and sign-in |
+| Calls, conversations, sessions, contacts | Which workspaces you belong to, and your role in each |
+| Phone numbers, carrier accounts | Invites |
+| Integrations and triggers | Personal access tokens |
+| Secrets and provider keys | Payments and checkout |
+| The credit balance and its ledger | The region list itself |
+
+**Your workspace already exists in every region.** There is no enablement step, no per-region status and nothing to switch on. An empty region and a region you have never used look exactly the same, which is why every screen in the dashboard names the region it is showing you.
+
+<Note>
+Provider keys are regional. A key you added in `in` is not present in `us`, and an agent you rebuild in `us` will refuse to publish until you add it there too. See [provider keys](/get-started/provider-keys).
+</Note>
+
+## One token, two base URLs
+
+A [personal access token](/get-started/authentication) names your workspace, not a place. The same token authenticates against both regions, and nothing in the token, the header or any request body says which region you are in.
+
+<CodeGroup>
+```bash cURL
+# The same token. The only difference is the host.
+curl https://api.in.talqing.com/v1/agents \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+
+curl https://api.us.talqing.com/v1/agents \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+import { TalqingClient } from "@talqing/sdk";
+
+const india = new TalqingClient({
+  baseUrl: "https://api.in.talqing.com",
+  token: process.env.TALQING_API_KEY,
+});
+
+const us = new TalqingClient({
+  baseUrl: "https://api.us.talqing.com",
+  token: process.env.TALQING_API_KEY,
+});
+```
+
+```python Python
+from talqing import Talqing
+
+india = Talqing(token=TOKEN, base_url="https://api.in.talqing.com")
+us = Talqing(token=TOKEN, base_url="https://api.us.talqing.com")
+```
+</CodeGroup>
+
+The TypeScript client requires `baseUrl` and has no default. `Talqing.from_env()` in Python reads `TALQING_BASE_URL` and raises if it is missing, rather than picking a region for you.
+
+## Running the same agent in two regions
+
+There is no copy, sync or replication between regions. Running one agent in both means creating it twice.
+
+<Steps>
+<Step title="Add the provider keys in the second region">
+Point at `https://api.us.talqing.com` and add a key for every provider the agent's model stack names. Publishing is refused without them, naming the provider.
+</Step>
+
+<Step title="Create the agent again">
+Read the config out of the first region and POST it to the second. The config is a plain object, so this is a read and a write.
+
+```bash
+curl -sS https://api.in.talqing.com/v1/agents/$AGENT_ID \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  | jq '{config}' \
+  | curl -sS -X POST https://api.us.talqing.com/v1/agents \
+      -H "Authorization: Bearer $TALQING_API_KEY" \
+      -H "Content-Type: application/json" --data-binary @-
+```
+
+Anything the config references by id — a tool, a phone number — has to exist in the second region first, with its own ids. Ids do not travel.
+</Step>
+
+<Step title="Publish it, and buy credit there">
+Publishing is per region, so the new agent starts at version 1 in `us` regardless of what its twin is on in `in`.
+
+Then buy credit **in `us`**. This is the part that surprises people: a balance in India does not pay for a call in the United States. See below.
+</Step>
+</Steps>
+
+Two agents built this way drift independently. Publishing in one region changes nothing in the other, and neither does a rollback.
+
+## Credit does not cross a region
+
+The credit balance is a regional record, and there is no transfer between regions. You can hold $50 in India and $0 in the United States, and in that state:
+
+- A call started against `https://api.in.talqing.com` runs.
+- The same call against `https://api.us.talqing.com` is refused with `402` and reads back with `close_reason: "insufficient_credits"`.
+
+Buying credit is decided the same way — by which region's API you called, never by a field in the request. The [signup credit](/get-started/pricing-and-credits) is granted in *every* region, so a new workspace starts with the same balance in both.
+
+The dashboard labels every balance, ledger, pack list and low-balance banner with the region it belongs to. A bare number is what makes someone with money in one region think it vanished.
+
+## Choosing a region
+
+Pick the one your callers are in. Media travels from the caller to the region's workers and back on every turn, so distance is added latency on every single reply, and it is the one cost you cannot tune away with a faster model.
+
+- Callers in India → `in`.
+- Callers in the United States, Europe or anywhere else → `us`.
+
+If you are picking a region to satisfy a **data-residency** requirement rather than for latency, read [where your data lives](/platform/data-retention-and-privacy#where-your-data-lives) first — `in` keeps its database in Bangalore but its recordings and image attachments in Singapore, and that distinction is the whole answer for some readers.
+
+If you are serving both, run the agent in both and point each phone number at the region local to its callers. There is no penalty for using two — the workspace already exists in each.
+
+Your workspace's *home region* is only where the dashboard opens by default. It grants nothing, blocks nothing, and does not stop you working in the other one.
+
+## The region switcher
+
+The dashboard's region switcher is a mode, not a filter. Switching is a full navigation: the agent list, the call history, the numbers and the credit balance all change to that region's. Nothing is merged across regions in any view, and there is no all-regions total anywhere in the product.
+
+If a page is unexpectedly empty after switching, you are almost certainly looking at the other region's data — or rather, at the absence of it.
+
+## The control plane
+
+Signing in, workspaces, members, roles, personal access tokens and payments do not live in a region. They live on a separate host, `https://api.control.talqing.com`, which is why none of them appears in the regional API, the SDKs or the MCP server. A regional base URL answers `404` for those paths; that is you aiming at the wrong host, not a missing feature.
+
+Every authenticated regional request asks the control plane who you are, which has one consequence worth writing a branch for:
+
+| From a regional call | Means | Retry? |
+| --- | --- | --- |
+| `401` | The credential is bad, revoked, or no longer a member of this workspace | No. This is final |
+| `503` | The control plane could not be reached, so the request could not be authorized at all | **Yes**, with backoff. Your credential may be perfectly good |
+
+A `503` is transient and says nothing about your token. Treating it like a `401` — clearing credentials, forcing a re-login — is the wrong response to a network blip.
+
+## Next
+
+<CardGroup cols={2}>
+<Card title="Pricing and credits" href="/get-started/pricing-and-credits">
+  The platform fee, the packs, and why the balance is per region.
+</Card>
+<Card title="Authentication" href="/get-started/authentication">
+  Tokens, the Bearer header, and what 401 versus 403 means.
+</Card>
+</CardGroup>

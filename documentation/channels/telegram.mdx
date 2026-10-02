@@ -1,0 +1,276 @@
+---
+title: "Telegram"
+description: "Put a published text agent behind a Telegram bot: the bot token, the integration, and the trigger that binds them."
+---
+
+A Telegram bot answered by one of your text agents takes three things: a bot, an
+integration holding its token, and a **trigger** binding inbound messages to a
+published agent.
+
+Telegram is a **channel** integration. It is never attached to an agent config
+under `mcps` — it lends an agent no tools, and adding it there is refused. The
+binding lives entirely in the trigger. See
+[triggers](/integrations/triggers) for the model; this page is the walkthrough.
+
+<Note>
+Telegram and [WhatsApp](/channels/whatsapp) are the messaging channels Talqing
+has. There is no Slack or SMS.
+</Note>
+
+## Set it up
+
+<Steps>
+  <Step title="Create a bot with BotFather">
+    In Telegram, message [@BotFather](https://t.me/BotFather) and send
+    `/newbot`. Give it a display name and a username. BotFather answers with a
+    token shaped `123456789:AAH…`. That token is the bot — treat it like a
+    password.
+
+    You do **not** paste a webhook URL into BotFather. Talqing registers the
+    webhook for you when you enable the trigger.
+  </Step>
+
+  <Step title="Create the integration">
+    It takes two fields: the bot token, and a webhook secret of your own choosing.
+
+    The secret is any string of 1–256 characters made of letters, digits,
+    underscores and hyphens. Telegram sends it back in the
+    `X-Telegram-Bot-Api-Secret-Token` header on every delivery, and Talqing
+    refuses a delivery that does not carry it — it is what stops anyone who
+    guesses the callback URL from feeding your agent messages.
+
+    Both values are stored as [workspace secrets](/platform/secrets)
+    (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`) and reads return the
+    reference, never the value.
+
+    <CodeGroup>
+    ```bash cURL
+    curl -X POST https://api.in.talqing.com/v1/integrations \
+      -H "Authorization: Bearer $TALQING_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "display_name": "Northwind support bot",
+        "provider": "telegram",
+        "credentials_ref": "123456789:AAHc3xR2pL9wV5nT7bY4cH6jZ1aS0dF8kQm",
+        "webhook_config": { "secret_token": "nw-bot-7f3ac21e9b" }
+      }'
+    ```
+
+    ```typescript TypeScript
+    const integration = await talqing.integrations.create({
+      createIntegrationRequest: {
+        display_name: "Northwind support bot",
+        provider: "telegram",
+        credentials_ref: "123456789:AAHc3xR2pL9wV5nT7bY4cH6jZ1aS0dF8kQm",
+        webhook_config: { secret_token: "nw-bot-7f3ac21e9b" },
+      },
+    });
+    ```
+
+    ```python Python
+    integration = talqing.integrations.create(
+        display_name="Northwind support bot",
+        provider="telegram",
+        credentials_ref="123456789:AAHc3xR2pL9wV5nT7bY4cH6jZ1aS0dF8kQm",
+        webhook_config={"secret_token": "nw-bot-7f3ac21e9b"},
+    )
+    ```
+    </CodeGroup>
+
+    The create call reaches Telegram's `getMe` before the row is written, so a
+    token Telegram will not accept fails here rather than producing a connection
+    that looks fine and cannot work. The bot's id and username are stored from
+    that answer — the bot id is what conversation keys are built from, which is
+    why it comes from Telegram rather than from parsing the token.
+
+    One bot is one integration: a second connection for the same bot is refused
+    with `a Telegram integration with that bot already exists`.
+  </Step>
+
+  <Step title="Publish the agent">
+    The trigger only accepts an agent that **exists, is published, and whose
+    published version is on the `text` channel**. A draft is not enough — live
+    traffic runs the published version, and there is nothing else for a trigger
+    to point at.
+  </Step>
+
+  <Step title="Create the trigger">
+    <CodeGroup>
+    ```bash cURL
+    curl -X POST "https://api.in.talqing.com/v1/integrations/$INTEGRATION_ID/triggers" \
+      -H "Authorization: Bearer $TALQING_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "trigger_type": "telegram.message.inbound",
+        "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+        "reply_mode": "public_reply",
+        "enabled": true
+      }'
+    ```
+
+    ```typescript TypeScript
+    const trigger = await talqing.integrations.triggers.create({
+      integration_id: integration.id,
+      createIntegrationTriggerRequest: {
+        trigger_type: "telegram.message.inbound",
+        agent_id: "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+        reply_mode: "public_reply",
+        enabled: true,
+      },
+    });
+
+    console.log(trigger.status); // "active"
+    ```
+
+    ```python Python
+    trigger = talqing.integrations.triggers.create(
+        integration.id,
+        trigger_type="telegram.message.inbound",
+        agent_id="9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+        reply_mode="public_reply",
+        enabled=True,
+    )
+
+    print(trigger["status"])  # "active"
+    ```
+    </CodeGroup>
+
+    Enabling is what registers the webhook. Talqing calls Telegram's
+    `setWebhook` with a callback URL it owns and `allowed_updates: ["message"]`,
+    then writes that URL onto the trigger's `provider_subscription_ref` and sets
+    `status: "active"`.
+  </Step>
+
+  <Step title="Message the bot">
+    Open a private chat with the bot in Telegram and send it something. You should
+    see a typing indicator, then the reply.
+
+    The chat appears under **Conversations**.
+  </Step>
+</Steps>
+
+## When enabling fails
+
+The webhook registration is part of enabling, so a failure is visible
+immediately rather than as a bot that silently never answers.
+
+| What you get | Why |
+| --- | --- |
+| `400` `publish the agent before enabling this trigger` | The agent has no published version. |
+| `400` `telegram.message.inbound requires a published text agent` | The published version is a voice or video agent. |
+| `400` `activate or reconnect this integration before enabling a trigger` | The integration is not `active`. |
+| `400` `this integration already has an enabled trigger of that type` | One enabled trigger per integration and type. Disable or delete the other one. |
+| `400` `Telegram bot identity check failed: …` | The bot token stopped working. The trigger is left at `error`. |
+| `502` `Telegram webhook registration failed: …` | Telegram refused `setWebhook`, message included. The trigger is left at `error`. |
+
+Both of the last two leave the trigger row in place at `status: "error"`. Fix the
+cause and `PATCH` it enabled again — the registration is retried each time.
+
+Disabling or deleting a trigger calls `deleteWebhook` on a best-effort basis, so
+Telegram stops delivering. Disabling or deleting the whole integration does the
+same. Messages sent to the bot meanwhile are dropped when the webhook is
+registered again, not answered late.
+
+## `reply_mode`
+
+What happens with the agent's answer.
+
+| Value | On Telegram |
+| --- | --- |
+| `public_reply` | The reply is sent to the chat. This is the default and the one you want. |
+| `none` | The agent runs and its reply is written to the conversation, but nothing is sent. The item settles `skipped`. Useful for shadowing a live bot. |
+| `internal_note` | **Not usable here.** Telegram's Bot API has no private-note surface for a chat, so the message is never sent and the item settles `skipped` with `provider telegram does not support reply_mode:internal_note`. |
+
+The value is accepted by the API in all three cases — the refusal happens at
+delivery, not at save — so setting `internal_note` produces an agent that appears
+to work and says nothing.
+
+## What Telegram actually delivers
+
+**Private chats only.** A message from a group, supergroup or channel is
+discarded. The bot works in a one-to-one chat with a person and nowhere else.
+
+**Text messages only.** A photo, sticker, voice note, document or location in a
+private chat is ignored — the agent is not told it arrived and does not answer it.
+So an agent that can read images on the web cannot read one sent to it here.
+
+The bot's own messages are ignored, and a delivery whose secret header does not
+match is refused with `403`.
+
+## How a Telegram person becomes a chat
+
+The first message from a person creates a contact and starts a
+[chat](/channels/text-conversations) with the trigger's agent, automatically.
+You do not start one.
+
+| | |
+| --- | --- |
+| `contact_key` | `telegram:<bot_id>:<chat_id>` — which is why `telegram:` is a reserved prefix your own keys may not use. |
+| `surface` | `telegram` |
+| `userdata` | Seeded with a `telegram` object holding `chat_id`, `user_id` and, when Telegram sends them, `username` and `display_name`. Read them as `{{userdata.telegram.display_name}}` in the prompt. |
+
+**Every message from that person joins the same chat until it ends.** There is
+no inactivity timeout: they come back a week later and the agent has everything
+they said, and a handoff made last week still holds. A chat ends when the agent
+runs [`end_call`](/tools/end-call), or when you call
+`POST /v1/chats/{id}/end`. Their next message then starts a new chat — in a new
+conversation, unless the agent's
+[`conversation.context`](/agents/conversation-memory) is `transcript`.
+
+Ending matters: [analysis](/observability/call-analysis) and the
+`session.completed` webhook happen when a chat ends, so an agent that never ends
+its chats never produces either. Give it an `end_call` tool and say in the prompt
+when the conversation is over.
+
+Point the trigger at a different agent while a chat is open, and the next
+message ends the old chat (`close_reason: "replaced"`) and starts a new one with
+the new agent.
+
+The thread is on the **Conversations** page with a live timeline, and readable
+over the API like any other — `GET /v1/chats?contact_key=telegram:123456789:987654321`
+for the chats, `GET /v1/conversations?contact_key=…` for the threads. See
+[conversations](/observability/conversations).
+
+`{{vars.*}}` cannot be supplied on a Telegram chat: nothing starts it with a
+request body, so every agent runs on its declared defaults. Anything that varies
+per person belongs in `userdata`.
+
+## While the agent works
+
+A typing indicator is shown in the chat for the whole turn, cold start included,
+and refreshed every four seconds — Telegram expires the hint after five. It stops
+when the reply lands.
+
+**A reply longer than 4096 characters is split into several messages.** Telegram's
+own cap. The split falls on the last newline or space inside the limit, so the
+parts read as whole sentences rather than mid-word fragments, and an unbroken run
+of characters is cut hard at the limit. The conversation timeline still holds
+**one item** for the message the model produced; the split is transport only.
+
+If a later part fails after earlier ones are already in the chat, the item is
+marked `failed` rather than retried — retrying would show the person the delivered
+parts twice.
+
+## Running the same agent elsewhere
+
+Nothing about the agent is Telegram-specific. The same published text agent can
+serve a Telegram trigger and your own app's
+[chats](/channels/text-conversations) at the same time; each person is a
+separate contact, keyed by their own `contact_key`.
+
+Republishing the agent reaches Telegram on the next message, open chats
+included.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Triggers" href="/integrations/triggers">
+    The trigger model, statuses, and every rule enabling one checks.
+  </Card>
+  <Card title="Chats" href="/channels/text-conversations">
+    How a chat starts and ends, its items, and what it costs.
+  </Card>
+  <Card title="Conversations" href="/observability/conversations">
+    Reading a Telegram thread back, and the sessions inside it.
+  </Card>
+</CardGroup>

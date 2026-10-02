@@ -1,0 +1,272 @@
+---
+title: "Carrier accounts"
+description: "Connect Plivo, Twilio, Vobiz or Exotel, and finish the setup each one needs."
+---
+
+A carrier account is the credential Talqing uses to reach a phone network on
+your behalf. Every phone number hangs off one. You connect the account you
+already have with that carrier — Talqing never resells you phone service, and
+the carrier's invoice stays yours.
+
+Four carriers are supported. Nothing else can be connected.
+
+| Carrier | Account info | Credentials | Work in the carrier's console |
+| --- | --- | --- | --- |
+| Plivo | `auth_id` | `auth_token` | None |
+| Twilio | `account_sid` | `auth_token` | None |
+| Vobiz | `auth_id` | `auth_token` | None |
+| Exotel | `account_sid`, `region`, `subdomain` | `api_key`, `api_token` | **One step**, before inbound calls work |
+
+`GET /v1/telephony/providers` returns the same list at runtime, with the exact
+field keys, labels, defaults and hints the dashboard renders. Read it rather
+than guessing field names.
+
+## Connecting an account
+
+Two calls. The first records the credential and checks it against the carrier;
+the second builds the carrier-side setup.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/telephony/accounts \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "plivo",
+    "display_name": "Plivo production",
+    "account_info": { "auth_id": "MAZDKXNJYWMWJHYZJHZT" },
+    "credentials": { "auth_token": "your-auth-token" }
+  }'
+```
+
+```typescript TypeScript
+const account = await talqing.telephony.accounts.create({
+  createTelephonyAccountRequest: {
+    provider: "plivo",
+    display_name: "Plivo production",
+    account_info: { auth_id: "MAZDKXNJYWMWJHYZJHZT" },
+    credentials: { auth_token: "your-auth-token" },
+  },
+});
+await talqing.telephony.accounts.provision({ account_id: account.id });
+```
+
+```python Python
+account = talqing.telephony.accounts.create(
+    provider="plivo",
+    display_name="Plivo production",
+    account_info={"auth_id": "MAZDKXNJYWMWJHYZJHZT"},
+    credentials={"auth_token": "your-auth-token"},
+)
+talqing.telephony.accounts.provision(account["id"])
+```
+</CodeGroup>
+
+`display_name` is yours and must be unique in the workspace. Connecting a second
+account with the same carrier identity — the same Plivo Auth ID, the same Twilio
+or Exotel Account SID — is a `409`.
+
+### Credentials become workspace secrets
+
+Send a credential as plaintext and Talqing stores it as a
+[workspace secret](/platform/secrets) named after the carrier and the field —
+`PLIVO_AUTH_TOKEN`, `EXOTEL_API_TOKEN` — and keeps only the reference. If that
+name is already taken by something else, a suffixed name is allocated rather
+than overwriting it.
+
+You can also pass a secret you created yourself:
+
+```json
+{ "credentials": { "auth_token": "{{secrets.PLIVO_AUTH_TOKEN}}" } }
+```
+
+The API never echoes a resolved credential. `GET` on an account returns the
+`{{secrets.NAME}}` reference map and nothing else.
+
+Creating an account validates the credential against the carrier immediately. A
+credential the carrier rejects leaves the account in `error` with the carrier's
+own message on `status_message` — the account is still there, so you can fix it
+with a `PATCH` rather than starting again.
+
+A `PATCH` to `credentials` **merges**, so you can rotate one key without
+re-sending the others. Run provision again afterwards.
+
+### What provisioning builds
+
+`POST /v1/telephony/accounts/{account_id}/provision` creates the carrier-side
+objects that let calls flow in both directions, and the outbound identity
+Talqing dials with. Run it after connecting an account, and again after
+replacing its credentials.
+
+It is safe to repeat. It converges the carrier side to what the account should
+have rather than creating a second copy of anything. The response's `status` and
+`setup_steps` say what is working and what is left.
+
+## Account statuses
+
+| Status | What it means | What to do |
+| --- | --- | --- |
+| `pending` | Recorded, not yet validated. | Nothing; it resolves within the create call. |
+| `connected` | The credential works. The carrier side is not built yet. | Run provision. The dashboard shows this as **Setup incomplete**. |
+| `provisioning` | Provisioning is running. | Wait. |
+| `ready` | Fully set up. Numbers can be imported, assigned and dialled from. | — |
+| `error` | The last operation failed. `status_message` carries the carrier's reason. | Fix the cause, then provision again. |
+| `disabled` | You stopped it. Inbound routing for every number on it was torn down. | `PATCH` `status` back to `connected`, then re-provision each number. |
+
+`PATCH` accepts only `disabled` and `connected` on `status`. The other four are
+states the platform writes.
+
+<Warning>
+Disabling an account tears down inbound routing for **every number on it**,
+immediately, before the row flips — so calls cannot keep arriving at a carrier
+the dashboard already shows as off. Re-enabling the account does not put that
+routing back on its own: each number needs
+`POST /v1/telephony/phone-numbers/{number_id}/provision` again.
+</Warning>
+
+## Setup steps you do in the carrier's console
+
+Some carrier work happens in the carrier's own product, and no API can read it
+back. That is what an account's `setup_steps` are for: each step carries a
+`title`, a `detail`, numbered `instructions`, a link to the carrier's own
+documentation, and `done`.
+
+A step marked `user_confirmable: true` cannot be checked over any API. You do
+it, then you tell Talqing you have done it:
+
+```json
+PATCH /v1/telephony/accounts/{account_id}
+{ "console_setup_confirmed": true }
+```
+
+<Warning>
+While a `user_confirmable` step is outstanding, **inbound calling on that
+account's numbers does not work**, whatever else the dashboard says. Read
+`setup_complete` and `setup_steps` rather than inferring readiness from
+`status`. Outbound calling is unaffected.
+</Warning>
+
+Confirming flips `can_inbound` to true on every non-disabled number on the
+account. Setting it back to `false` reverses that just as broadly.
+
+## Per-carrier setup
+
+<AccordionGroup>
+  <Accordion title="Plivo">
+    **Account info:** `auth_id` — from the Plivo console home page, in the form
+    `MAXXXXXXXX`.
+
+    **Credentials:** `auth_token` — the auth token shown beside it.
+
+    Everything else is driven over Plivo's API. Provisioning leaves nothing for
+    you to do in the Plivo console, and the account has no setup steps.
+  </Accordion>
+
+  <Accordion title="Twilio">
+    **Account info:** `account_sid` — from the Twilio console home page, in the
+    form `ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`.
+
+    **Credentials:** `auth_token` — the auth token shown beside it.
+
+    Twilio's API host is the same worldwide, so there is no region or subdomain
+    to copy across. Provisioning leaves nothing for you to do in the Twilio
+    console, and the account has no setup steps.
+  </Accordion>
+
+  <Accordion title="Vobiz">
+    **Account info:** `auth_id` — from the Vobiz console home page, in the form
+    `MA_XXXXXXXX`.
+
+    **Credentials:** `auth_token` — the auth token shown beside it.
+
+    Vobiz serves every account from one global API host, so there is no region
+    or subdomain to copy across. Provisioning leaves nothing for you to do in
+    the Vobiz console, and the account has no setup steps.
+  </Accordion>
+
+  <Accordion title="Exotel — the one with a console step">
+    **Account info**
+
+    | Field | Default | Where it comes from |
+    | --- | --- | --- |
+    | `account_sid` | — | Exotel's API Settings page. |
+    | `region` | `Mumbai` | As shown in the Exotel console. Recorded for reference only. |
+    | `subdomain` | `api.in.exotel.com` | As shown in the Exotel console — this is the API host. A wrong subdomain reads as "Authorization failed", not as a region error. |
+    | `outbound_edge_host` | `in.voip.exotel.com` | Optional. Exotel's outbound edge for India, from their Network & Firewall Configuration page. It is not shown anywhere in the Exotel console. Leave it as it is unless your account is outside India. |
+    | `outbound_edge_port` | `443` | Optional. `443` for TLS, `5070` for TCP. |
+    | `outbound_transport` | `tls` | Optional. `tls` or `tcp`. Exotel does not support UDP. |
+
+    **Credentials:** `api_key` and `api_token`, both from Exotel's API Settings
+    page.
+
+    **The console step.** Exotel can only hand an incoming call to a Flow, never
+    straight to a connection. So your numbers need a small Flow that passes the
+    call to Talqing. It takes about two minutes, once per account — not once per
+    number.
+
+    <Steps>
+      <Step title="Create a Custom App">
+        In Exotel's App Bazaar, under Custom Apps, click **Create**. Name it
+        something like "Talqing inbound".
+      </Step>
+      <Step title="Add the Connect applet">
+        Drag the **Connect** applet from Voice Applets onto **Call Start**.
+        Leave "Configure using flow builder here" selected, and leave both
+        **Primary URL** boxes empty — those are for calling a webhook of your
+        own, not for reaching Talqing.
+      </Step>
+      <Step title="Point it at Talqing">
+        Under **Dial Whom**, pick **Dial phone number(s)** and paste the value
+        the setup step gives you — it begins `sip:` — into that box, then save
+        the Flow. The box asks for a phone number; the `sip:` prefix is what
+        overrides that and tells Exotel to hand the call over instead of
+        dialling anyone. Read the value from `setup_steps` on the account
+        (the dashboard renders it with a Copy button); it is specific to your
+        account.
+      </Step>
+      <Step title="Attach your numbers to the Flow">
+        In **ExoPhones**, click **Assign ExoPhones to Flow**, tick every number
+        Talqing should answer and the Flow you just made, then click **Attach
+        Flow**. A number still showing "Install an App" is not connected yet.
+      </Step>
+      <Step title="Confirm it here">
+        `PATCH /v1/telephony/accounts/{account_id}` with
+        `{"console_setup_confirmed": true}`, or press the confirm button in the
+        dashboard.
+      </Step>
+    </Steps>
+
+    Until you confirm, **every Exotel number imports with inbound disabled** —
+    its `readiness` reads `needs_carrier_setup` and it cannot be assigned an
+    agent. Outbound calling from those numbers works the whole time.
+  </Accordion>
+</AccordionGroup>
+
+## Disconnecting an account
+
+`DELETE /v1/telephony/accounts/{account_id}` is permanent, and it is guarded on
+both sides.
+
+- **Every number on the account must be `disabled` first.** A number that is
+  `pending`, `provisioning`, `active` or `error` blocks the delete with
+  `disable all phone numbers on this account before deleting it`. This is what
+  stops a delete quietly taking live numbers off the air.
+- **The carrier-side teardown has to succeed.** Talqing removes the objects it
+  created on your carrier account before dropping the row that records their
+  ids. If the carrier refuses — an expired credential, an API outage — the
+  delete fails with a `502` naming the carrier's reason, and nothing is removed
+  here. Fix the credential and retry.
+
+Only objects Talqing created are touched. Nothing you built yourself in the
+carrier's console is deleted, and your numbers stay yours.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Phone numbers" href="/telephony/phone-numbers">
+    Import the numbers this account owns and put an agent on one.
+  </Card>
+  <Card title="Troubleshooting" href="/telephony/troubleshooting">
+    Credential expiry, setup that will not finish, numbers stuck in error.
+  </Card>
+</CardGroup>

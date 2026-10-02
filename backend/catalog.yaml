@@ -1,0 +1,2563 @@
+# ============================================================================
+# talqing provider catalog. Drives editor dropdowns, the cost estimator,
+# and metering prices. Adding a model = editing this file (+ a factory if a new
+# provider). Pricing units: LLM per-1M tokens; STT per audio second;
+# TTS per character. ALL PRICES IN USD (Sarvam converted from INR at 1 USD =
+# 100 INR). All entries compile to REAL plugin instances (never model strings
+# → never the LiveKit Cloud inference gateway).
+# ============================================================================
+
+providers:
+  xai:
+    label: xAI
+    logo_url: https://x.ai/favicon.ico
+    enabled: true
+  openai:
+    label: OpenAI
+    logo_url: https://auth-cdn.oaistatic.com/assets/favicon-hQZ_bs-n.svg
+    enabled: true
+  gemini:
+    label: Gemini
+    logo_url: https://gemini.google/images/spark_4c.png
+    enabled: true
+  sarvam:
+    label: Sarvam
+    logo_url: https://dashboard.sarvam.ai/icon.svg?icon.088160iueq3g1.svg
+    enabled: true
+  raya:
+    label: Raya
+    logo_url: https://getraya.app/favicon.ico
+    enabled: true
+  soniox:
+    label: Soniox
+    logo_url: https://soniox.com/favicon.ico
+    enabled: true
+  elevenlabs:
+    label: ElevenLabs
+    logo_url: https://elevenlabs.io/favicon.ico
+    enabled: true
+  deepgram:
+    label: Deepgram
+    logo_url: https://deepgram.com/favicon.ico
+    enabled: true
+  anam:
+    label: Anam
+    logo_url: https://framerusercontent.com/images/gkFtw8nRt1oMSA2A8R4PiZTFUg.png
+    enabled: true
+  aicoustics:
+    label: ai-coustics
+    logo_url: https://framerusercontent.com/images/wzHDeVOUnA3g6kGKRrz0akwe6ww.png
+    enabled: true
+  # The one provider whose models are NOT in this file. One key reaches ~260
+  # tool-capable language models and ~20 speech-to-text ones, the lists move
+  # weekly, and shipping them here would add ~20k tokens to `GET /catalog` —
+  # which the CoPilot loads on every model call. They come from a live registry
+  # instead (`services/catalog/openrouter.py`) and the editor searches it;
+  # everything else about them behaves like any other entry.
+  #
+  # `models:` is what makes that work on a voice call, one block per kind the
+  # registry serves. A voice job process holds no registry, so every field the
+  # runtime reads to BUILD the client is declared once here rather than per
+  # model — the only per-model read left is the LLM thinking effort, which
+  # publishing freezes onto the config.
+  #
+  # No `temperature` in `extra`, unlike the xAI entries: it is not universal
+  # here. `anthropic/claude-sonnet-5` does not list it in `supported_parameters`
+  # at all, and one value cannot be right for 260 models from 30 vendors.
+  openrouter:
+    label: OpenRouter
+    logo_url: https://openrouter.ai/apple-touch-icon.png
+    enabled: true
+    browse: search
+    models:
+      llm:
+        api: chat_completions
+        base_url: https://openrouter.ai/api/v1
+        supports_prompt_cache_key: true   # accepted, and doubles as the sticky-routing key
+        extra: {}
+      stt:
+        base_url: https://openrouter.ai/api/v1
+        # Every OpenRouter transcription model is request/response — the gateway
+        # has no streaming transcription surface at all (`/api/v1/realtime`
+        # 404s). Declared here because the voice job decides turn detection from
+        # it before any client exists, and holds no registry to ask.
+        streaming: false
+        extra: {}
+
+# `api` picks the LiveKit client class build_llm constructs. `chat_completions`
+# and `responses` are both the OpenAI plugin pointed at the provider's own
+# `base_url`, and only the second can carry `builtin_tools` — the tools the
+# provider runs on its own servers mid-turn. `native` is the provider's own
+# plugin, taken only when the compatibility endpoint cannot express something
+# worth having: Gemini serves no /responses at all, so its server-side tools are
+# reachable nowhere else.
+#
+# `reasoning_efforts` is the thinking knob the agent editor offers: every value
+# THIS model was measured to accept, declared fastest first. The first one is
+# also the default every agent on the model gets until its author picks another,
+# which is why the order is validated rather than trusted — the fastest setting
+# is the only safe default when a voice caller hears thinking as silence.
+# These lists are probed, never read off a provider's docs; they disagree with
+# those docs on several models (see the notes per family). No `reasoning_efforts`
+# at all = no such knob: nothing goes on the wire and the editor shows no control.
+#
+# `builtin_tools[].options[].path` is where a value goes inside the tool object,
+# which is not the same as its `key`: xAI and OpenAI both nest domain filters
+# under `filters`, while xAI's image switches are top-level. On a `native` entry
+# the tool is a typed object rather than JSON, so `path` is the single field name
+# on it. The editor renders whatever is declared here from `type`, so a new
+# provider is a catalog edit.
+#
+# Deliberately NOT declared: `image_generation` (LiveKit only logs server-side
+# tool output, so the image would be billed and dropped — there is no surface for
+# it yet) and `mcp` (Talqing attaches MCP servers itself through
+# compiler/integrations.py, where we control the tool list and see every call).
+llm:
+  # `vision: true` means this exact model was PROBED reading an image — a 640x480
+  # picture with a number in it, sent as `input_image` + a data URL through
+  # /responses or `inline_data` through generateContent, exactly as the runtime
+  # sends one. Every entry below passed. False is the default in `LLMEntry`, so a
+  # model added without a probe cannot silently claim to see, and there is a
+  # realtime model that would have.
+  - provider: xai
+    channel: [text, voice, video]
+    model: grok-4.3
+    label: "Grok 4.3 (xAI)"
+    vision: true
+    api: responses
+    # Every value accepted (probed 2026-08-07). Note "minimal" is not the floor
+    # it sounds like on xAI — it burned MORE thinking tokens than "low" on a
+    # trivial prompt — so "none" remains the only setting that truly stops it.
+    reasoning_efforts: [none, minimal, low, medium, high]
+    base_url: https://eu-west-1.api.x.ai/v1     # EU LLM region; STT/TTS stay on api.x.ai via plugin defaults
+    pricing: { input_per_1m: 1.25, cached_input_per_1m: 0.20, output_per_1m: 2.50 }
+    priority:
+      pricing: { input_per_1m: 2.50, cached_input_per_1m: 0.40, output_per_1m: 5.00 }
+    # lowered from the provider default (~1.0): action agents must follow
+    # tool-calling instructions, not pattern-complete their own prior
+    # confirmations (hallucinated-tool-call mitigation); 0.5 keeps
+    # conversational variety
+    extra: { temperature: 0.5 }
+    # Anchored on the first xAI entry so grok-4.5 and grok-4.6 share one
+    # definition — every xAI text model offers the same server-side tools.
+    builtin_tools: &xai_builtin_tools
+      - type: web_search
+        label: "Web search"
+        description: >-
+          Searches the live web and reads pages before answering, so the agent
+          can talk about things that happened after the model was trained.
+        price_note: "Billed by xAI at $5.00 per 1,000 searches, on top of tokens. Talqing's cost estimate does not include it."
+        options:
+          # xAI rejects a request that carries both, so they are declared as a
+          # conflicting pair rather than left to 400 on a live call.
+          - key: allowed_domains
+            path: [filters, allowed_domains]
+            label: "Allowed domains"
+            type: string_list
+            max_items: 5
+            conflicts_with: [excluded_domains]
+            description: "Up to 5 domains, without the https:// prefix."
+          - key: excluded_domains
+            path: [filters, excluded_domains]
+            label: "Excluded domains"
+            type: string_list
+            max_items: 5
+            conflicts_with: [allowed_domains]
+            description: "Up to 5 domains, without the https:// prefix."
+          - key: enable_image_understanding
+            path: [enable_image_understanding]
+            label: "Enable image understanding"
+            type: boolean
+            description: "Costs image tokens, not a tool call. Also applies to X search when both are on."
+          - key: enable_image_search
+            path: [enable_image_search]
+            label: "Enable image search"
+            type: boolean
+            description: "Returns images as markdown embeds in the reply. Billed at the web search rate."
+      - type: x_search
+        label: "X search"
+        description: "Searches posts, profiles and threads on X."
+        price_note: "Billed by xAI at $5.00 per 1,000 searches, on top of tokens. Talqing's cost estimate does not include it."
+        options:
+          - key: allowed_x_handles
+            path: [allowed_x_handles]
+            label: "Allowed X handles"
+            type: string_list
+            max_items: 20
+            conflicts_with: [excluded_x_handles]
+            description: "Up to 20 handles, without the @."
+          - key: excluded_x_handles
+            path: [excluded_x_handles]
+            label: "Excluded X handles"
+            type: string_list
+            max_items: 20
+            conflicts_with: [allowed_x_handles]
+            description: "Up to 20 handles, without the @."
+          - key: from_date
+            path: [from_date]
+            label: "From date"
+            type: string
+            description: "ISO 8601 date, e.g. 2026-01-31."
+          - key: to_date
+            path: [to_date]
+            label: "To date"
+            type: string
+            description: "ISO 8601 date, e.g. 2026-01-31."
+          - key: enable_image_understanding
+            path: [enable_image_understanding]
+            label: "Enable image understanding"
+            type: boolean
+          - key: enable_video_understanding
+            path: [enable_video_understanding]
+            label: "Enable video understanding"
+            type: boolean
+      - type: code_interpreter
+        label: "Code interpreter"
+        description: >-
+          Writes and runs Python in a sandbox to work something out — arithmetic,
+          dates, parsing — instead of guessing at it. No network, no filesystem,
+          nothing kept between requests.
+        price_note: "Billed by xAI at $5.00 per 1,000 runs, on top of tokens. Talqing's cost estimate does not include it."
+        # xAI's code interpreter takes no configuration at all — unlike OpenAI's,
+        # which requires a container. Same tool name, different object.
+      - type: file_search
+        label: "Collections search"
+        description: >-
+          Searches documents you have uploaded to xAI as a collection. The
+          collection lives in your xAI account, and you create and fill it at
+          console.x.ai.
+        price_note: "Billed by xAI at $2.50 per 1,000 searches, plus xAI's collection storage. Talqing's cost estimate does not include it."
+        options:
+          - key: vector_store_ids
+            path: [vector_store_ids]
+            label: "Vector store IDs"
+            type: string_list
+            required: true
+            description: "From console.x.ai, e.g. collection_3be0eec8-…"
+          - key: max_num_results
+            path: [max_num_results]
+            label: "Max num results"
+            type: integer
+  # Offered on voice and video with a caveat the author should know: grok-4.5
+  # cannot stop reasoning. `reasoning_effort: none` 400s ("This model does not
+  # support ..."), and even the floor spends thinking tokens on a trivial prompt
+  # (69 of them on "what is 17*24" at `low`, probed 2026-08-01). Every spoken turn
+  # pays that as silence before the first word, unlike grok-4.3 above, which takes
+  # `none`. Kept available because the latency/quality trade is the agent author's
+  # call, not ours — but grok-4.3 is the safer default for a voice pipeline.
+  - provider: xai
+    channel: [text, voice, video]
+    model: grok-4.5
+    label: "Grok 4.5 (xAI)"
+    vision: true
+    api: responses
+    # No "none": this model rejects it outright (400). "minimal" IS accepted
+    # (probed 2026-08-07), which the 2026-08-01 note above missed when it called
+    # `low` the floor — so the default drops from `low` to `minimal` here.
+    reasoning_efforts: [minimal, low, medium, high]
+    # Global endpoint, not grok-4.3's eu-west-1 host: grok-4.5 is served from
+    # us-east-1 / us-west-2 only, so an EU-pinned base_url would 404.
+    base_url: https://api.x.ai/v1
+    # Standard tier, prompts <200k tokens; xAI bills the whole request at 2x
+    # ($4.00/$0.60/$12.00) once a prompt reaches 200k.
+    pricing: { input_per_1m: 2.00, cached_input_per_1m: 0.30, output_per_1m: 6.00 }
+    # The provider's low-latency lane, requested as `service_tier: priority`.
+    # Declared per model because support and premium both are: OpenAI charges 2x
+    # on its 5.6 family, 2.5x on gpt-5.5, 1.75x on gpt-4.1 and offers no lane at
+    # all on gpt-5.4-nano, so these are transcribed from each vendor's price list
+    # rather than derived from a multiplier. Omit the block and the model has no
+    # lane — agents cannot ask for one and the editor shows no control.
+    #
+    # xAI is a flat 2x, and bills it only when the response confirms
+    # `service_tier: priority` (docs.x.ai/developers/pricing). Measured
+    # 2026-08-08: priority moved grok-4.5's median TTFT 1.565s -> 1.506s, i.e.
+    # nothing worth the premium today. Offered anyway because capacity varies and
+    # the choice is the agent author's to make, not ours.
+    priority:
+      pricing: { input_per_1m: 4.00, cached_input_per_1m: 0.60, output_per_1m: 12.00 }
+    # temperature: same hallucinated-tool-call mitigation as grok-4.3 above.
+    extra: { temperature: 0.5 }
+    builtin_tools: *xai_builtin_tools
+  # Same shape as grok-4.5 above — same API, same global endpoint, same
+  # temperature mitigation, same server-side tools — with grok-4.6's own price
+  # list (docs.x.ai/developers/models/grok-4.6: cached input is $0.50 here, not
+  # grok-4.5's $0.30) and its 500k context.
+  #
+  # Both claims below were PROBED against the live API 2026-09-08, not inherited
+  # from grok-4.5: `none` is rejected ("This model does not support
+  # `reasoning_effort` value `none`") while minimal/low/medium/high are accepted
+  # and spend 66/80/85/137 thinking tokens on "what is 17*24"; and the model read
+  # a 640x480 image with "4731" in it correctly, which is what `vision: true`
+  # asserts here.
+  - provider: xai
+    channel: [text, voice, video]
+    model: grok-4.6
+    label: "Grok 4.6 (xAI)"
+    vision: true
+    api: responses
+    reasoning_efforts: [minimal, low, medium, high]
+    # us-east-1 / us-west-2 only, so the global host rather than grok-4.3's
+    # EU-pinned one.
+    base_url: https://api.x.ai/v1
+    # Standard tier, prompts <200k tokens; xAI bills the whole request at 2x
+    # ($4.00/$1.00/$12.00) once a prompt reaches 200k.
+    pricing: { input_per_1m: 2.00, cached_input_per_1m: 0.50, output_per_1m: 6.00 }
+    priority:
+      pricing: { input_per_1m: 4.00, cached_input_per_1m: 1.00, output_per_1m: 12.00 }
+    extra: { temperature: 0.5 }
+    builtin_tools: *xai_builtin_tools
+  # xAI's current flagship (September 2026), and grok-4.6's price list unchanged
+  # — same rates, same 500k context, same 2x band at 200k prompt tokens.
+  #
+  # PROBED 2026-09-22, and the probe disagrees with xAI's own docs, which is why
+  # the list below is not the one they publish. They document low / medium /
+  # high (default) / xhigh; `minimal` is in fact accepted, and was the cheapest
+  # turn measured — 52 thinking tokens on "what is 17*24" against low's 60 and
+  # high's 72 — so it leads the list and becomes the default a voice agent gets.
+  # `none` is rejected ("This model does not support `reasoning_effort` value
+  # `none`"), so like grok-4.5 and grok-4.6 every spoken turn pays some thinking
+  # before the first word; grok-4.3 remains the only xAI model that can stop.
+  #
+  # `xhigh` is accepted by this model and deliberately not offered: nothing in a
+  # voice pipeline wants the slowest setting, grok-4.6 takes it too without our
+  # listing it, and `ReasoningEffort` stops at `high` for every provider.
+  - provider: xai
+    channel: [text, voice, video]
+    model: grok-4.7
+    label: "Grok 4.7 (xAI)"
+    # Probed 2026-09-22: read "4731" off a 640x480 image, the same test every
+    # other `vision: true` entry here passed.
+    vision: true
+    api: responses
+    reasoning_efforts: [minimal, low, medium, high]
+    # NOT grok-4.3's eu-west-1 host. That endpoint 404s this model outright
+    # ("The model grok-4.7 does not exist or your team does not have access to
+    # it", measured 2026-09-22) — it is served globally and from us.api.x.ai.
+    base_url: https://api.x.ai/v1
+    # Standard tier, prompts <200k tokens; xAI bills the whole request at 2x
+    # ($4.00/$1.00/$12.00) once a prompt reaches 200k.
+    pricing: { input_per_1m: 2.00, cached_input_per_1m: 0.50, output_per_1m: 6.00 }
+    priority:
+      pricing: { input_per_1m: 4.00, cached_input_per_1m: 1.00, output_per_1m: 12.00 }
+    # temperature: same hallucinated-tool-call mitigation as the entries above,
+    # and accepted alongside a thinking effort here (probed) — unlike gpt-5.6,
+    # which 400s on the pair.
+    extra: { temperature: 0.5 }
+    builtin_tools: *xai_builtin_tools
+  # `cache_write_per_1m` appears only on the GPT-5.6 and GPT-6 entries, and that
+  # is the whole rule rather than an omission elsewhere: OpenAI charges for
+  # WRITING the prompt cache from GPT-5.6 onward and not before it, at a flat
+  # 1.25x the same lane's input rate (its own published rule, not a multiplier we invented
+  # — the priority figures below are 1.25x the priority input rate for that
+  # reason). Measured 2026-09-08 on /responses with a 1694-token prompt:
+  # gpt-5.6-luna reports cache_write_tokens 1691 on the cold call and 0 on the
+  # warm one, while gpt-5.4-nano and gpt-4.1-mini report 0 on both. xAI reports
+  # none either. So a metered write with no rate here is a real gap, and
+  # `price_llm_usage` quarantines the session rather than billing it at zero.
+  # `warm_prompt_cache` makes one write on purpose at the start of every voice
+  # call, so this is the common case and not an edge one.
+  #
+  # OpenAI's current flagship (GPT-6 Astra), and the most expensive model in this
+  # catalog by a distance: $10/1M in and $50/1M out is 25x gpt-5.6-luna's rates
+  # at the same 800-in/250-out minute the estimator assumes. Offered on voice
+  # because the choice is the agent author's, not ours — but read the $/min the
+  # editor shows before putting it on a phone line.
+  #
+  # PROBED 2026-09-22. The effort enum is a third spelling again: this model
+  # rejects BOTH "none" and "minimal" ("Supported values are: 'low', 'medium',
+  # 'high', 'xhigh', and 'max'"), where every GPT-5.x entry below takes "none"
+  # and rejects "minimal". `low` measured zero thinking tokens on a trivial
+  # prompt, so it is a usable floor rather than a nominal one; `xhigh` and `max`
+  # are real values here and deliberately unoffered, as on grok-4.7 above.
+  #
+  # It also rejects `temperature` outright ("Unsupported parameter"), at every
+  # effort rather than only while thinking — hence the empty `extra`, and one
+  # more reason the xAI entries' temperature mitigation is declared per model.
+  - provider: openai
+    channel: [text, voice, video]
+    model: gpt-6-astra
+    label: "GPT-6 Astra (OpenAI)"
+    # Probed 2026-09-22: read "4731" off a 640x480 image.
+    vision: true
+    api: responses
+    # Its own list, NOT `*openai_reasoning_efforts` — see the probe above.
+    reasoning_efforts: [low, medium, high]
+    pricing: { input_per_1m: 10.00, cached_input_per_1m: 1.00, cache_write_per_1m: 12.50, output_per_1m: 50.00 }
+    # `value: fast`, and the split is GENERATIONAL rather than per model. OpenAI
+    # renamed the lane "Fast mode" on 2026-07-30 and takes either spelling on the
+    # wire, but what it REPORTS back differs: asked for either `priority` or
+    # `fast`, all three GPT-6 entries answer `service_tier: "fast"`, while
+    # gpt-5.6-sol, gpt-5.6-luna and gpt-5.4 all still answer `priority` whichever
+    # was asked (measured 2026-09-22 and 2026-09-23). Billing charges the tier the
+    # response confirms, and `scripts/probe_service_tier.py` compares the two, so
+    # the value we send has to be the one that comes back.
+    priority:
+      value: fast
+      pricing: { input_per_1m: 20.00, cached_input_per_1m: 2.00, cache_write_per_1m: 25.00, output_per_1m: 100.00 }
+    extra: {}
+    # Anchored so every OpenAI entry below shares one definition. Note that the
+    # same tool *name* is a different object at each provider: OpenAI requires a
+    # container on code_interpreter and takes richer web-search filters, while
+    # xAI's code interpreter takes no configuration at all.
+    #
+    # OpenAI documents that web search "does not support gpt-5 with minimal
+    # reasoning" and that gpt-5.4 at effort "none" "may produce lower-quality
+    # results" — and "none" is what these entries default to. Search still runs;
+    # the caveat is quality, not a 400, and an author who cares about it can now
+    # raise the effort on the model itself.
+    builtin_tools: &openai_builtin_tools
+      - type: web_search
+        label: "Web search"
+        description: >-
+          Searches the live web and reads pages before answering, so the agent
+          can talk about things that happened after the model was trained.
+        price_note: "Billed by OpenAI at $10.00 per 1,000 searches, plus the tokens of everything it reads. Talqing's cost estimate does not include it."
+        options:
+          - key: allowed_domains
+            path: [filters, allowed_domains]
+            label: "Allowed domains"
+            type: string_list
+            max_items: 100
+            description: "Subdomains are included. Leave off the https:// prefix."
+          - key: search_context_size
+            path: [search_context_size]
+            label: "Search context size"
+            type: enum
+            choices: [low, medium, high]
+            description: "More context is a better answer and more tokens. OpenAI's default is medium."
+        # NOT offered: OpenAI's `user_location`, which biases results to a city.
+        # It is an object discriminated by a constant `type: approximate`
+        # sibling, and an option here writes one leaf at a time — so we would
+        # either send that constant on every search or invent a way to send it
+        # only alongside a location. Neither is worth it for a knob nobody has
+        # asked for; add a proper option-group if one ever does.
+        #
+        # Also not offered: `blocked_domains`, `external_web_access`,
+        # `return_token_budget`, `search_content_types` and `image_settings`.
+        # They work on the wire but sit outside OpenAI's typed schema (their own
+        # SDKs reach them through extra-field escape hatches), so they are a
+        # documented-elsewhere risk we are not taking on a live call.
+      - type: code_interpreter
+        label: "Code interpreter"
+        description: >-
+          Writes and runs Python in a sandbox to work something out — arithmetic,
+          dates, parsing — instead of guessing at it.
+        price_note: "Billed by OpenAI per container session (from $0.03 per 20 minutes), not per run. Talqing's cost estimate does not include it."
+        # OpenAI requires a container and we can only offer an auto-provisioned
+        # one: a container id would have to be created in the tenant's OpenAI
+        # account first. The memory option below writes inside this object.
+        fixed: { container: { type: auto } }
+        options:
+          - key: memory_limit
+            path: [container, memory_limit]
+            label: "Memory limit"
+            type: enum
+            choices: [1g, 4g, 16g, 64g]
+            description: "Larger tiers cost more per session. OpenAI's default is 1g."
+      - type: file_search
+        label: "File search"
+        description: >-
+          Searches a vector store you have uploaded to OpenAI. The store lives
+          in your OpenAI account, and you create and fill it there.
+        price_note: "Billed by OpenAI at $2.50 per 1,000 searches, plus OpenAI's storage. Talqing's cost estimate does not include it."
+        options:
+          - key: vector_store_ids
+            path: [vector_store_ids]
+            label: "Vector store IDs"
+            type: string_list
+            required: true
+            description: "From platform.openai.com, e.g. vs_…"
+          - key: max_num_results
+            path: [max_num_results]
+            label: "Max num results"
+            type: integer
+            description: "Between 1 and 50."
+  # GPT-6 Sol, released 2026-09-23 alongside GPT-6 Luna — the rest of the family
+  # Astra leads, and unlike Astra both can stop thinking, which is what makes
+  # them usable on a voice turn. Only Sol is carried; see the note below it.
+  #
+  # PROBED 2026-09-23. Their effort enum is `none` / `low` / `medium` (the
+  # provider default) / `high` / `xhigh` / `max`: `none` is accepted and measures
+  # zero thinking tokens, `minimal` is rejected ("Supported values are: 'none',
+  # 'low', 'medium', 'high', 'xhigh', and 'max'"), which is the GPT-5.x shape and
+  # not Astra's — so these two share `*openai_reasoning_efforts` and Astra does
+  # not. 1,050,000-token context on both.
+  #
+  # `temperature` behaves exactly as it does on gpt-5.6: accepted at effort
+  # "none", rejected at any thinking effort ("Unsupported parameter"). Hence the
+  # empty `extra`, and the standing warning against giving the CoPilot's model a
+  # catalog temperature applies here too.
+  #
+  # `cache_write_per_1m` is set because both REPORT a write: 1957 write tokens on
+  # a cold 1960-token prompt and 0 on the warm one, same as gpt-5.6-luna in the
+  # same run. Note a 970-token prompt reports nothing on any of them — that is
+  # under OpenAI's caching floor, not a model difference, and it is the trap to
+  # avoid when re-measuring this.
+  #
+  # ⚠ BOTH MISREAD THE VISION PROBE. Handed the same 640x480 image every other
+  # entry here reads as "4731", gpt-6-luna answered "4631" three times out of
+  # three and gpt-6-sol "4631" twice and "46131" once. They clearly see it — four
+  # digits, three of them right — and they are wrong about it, consistently,
+  # where grok-4.7, gpt-6-astra and gemini-3.8-live all read the same file
+  # correctly. `vision: true` still holds: it means the model CAN be sent an
+  # image, never that it reads one accurately (see the note at the top of `llm:`).
+  # Worth knowing before putting either on a photo-reading agent.
+  - provider: openai
+    channel: [text, voice, video]
+    model: gpt-6-sol
+    label: "GPT-6 Sol (OpenAI)"
+    vision: true
+    api: responses
+    # Anchored here rather than on gpt-5.6-sol below: this is now the first entry
+    # that takes exactly these four, and every GPT-5.x entry takes them too.
+    reasoning_efforts: &openai_reasoning_efforts [none, low, medium, high]
+    pricing: { input_per_1m: 2.00, cached_input_per_1m: 0.20, cache_write_per_1m: 2.50, output_per_1m: 10.00 }
+    priority:
+      value: fast
+      pricing: { input_per_1m: 4.00, cached_input_per_1m: 0.40, cache_write_per_1m: 5.00, output_per_1m: 20.00 }
+    extra: {}
+    builtin_tools: *openai_builtin_tools
+  # gpt-6-luna is deliberately NOT carried, though it is cheaper than
+  # gpt-5.6-luna and as fast. REMOVED 2026-10-01: at effort "none" — the only
+  # effort a voice turn can afford — it mishandles the turn where a tool is
+  # relevant but its arguments are still missing. Replayed straight against
+  # OpenAI, 30 runs per turn shape: "book a technician" with no name or day came
+  # back wrong 30 times in 30 — the question twice in one response (a
+  # `commentary` and a `final_answer` message, or two `final_answer`s, which the
+  # plugin concatenates into a doubled reply), or `book_technician` called with
+  # `{"name":"unknown","day":"unknown"}`. An agent task quit or submitted an
+  # invented address before the caller had answered. gpt-5.6-luna on the same
+  # six turn shapes: 180 clean in 180. Effort "low" fixes gpt-6-luna and costs
+  # ~0.8s to first token, which is why it is not offered that way instead.
+  # Re-probe before bringing it back.
+  # GPT-5.6 family. Every OpenAI reasoning entry below takes the same four
+  # efforts — "none", "low", "medium", "high" — and rejects "minimal" outright
+  # ("Supported values are: 'none', 'low', 'medium', 'high'", probed 2026-08-07),
+  # which is the opposite way round from xAI and Gemini, where "minimal" is the
+  # value the strictest models keep.
+  # Prices are the standard tier at short context; long context bills at 2x.
+  - provider: openai
+    channel: [text, voice, video]
+    model: gpt-5.6-sol
+    label: "GPT-5.6 Sol (OpenAI)"
+    vision: true
+    api: responses
+    reasoning_efforts: *openai_reasoning_efforts
+    # no base_url: OpenAI is the native endpoint of the openai.LLM plugin
+    # (build_llm omits base_url for provider==openai).
+    # The standard rate, deliberately, and not what OpenAI charges today: Sol is
+    # on promotional pricing of $4.00 / $0.40 / $5.00 / $20.00 "at least through
+    # 2026-11-21" (their wording, checked 2026-09-22), with the fast lane
+    # promoted to $8.00 / $0.80 / $10.00 / $40.00. Quoting the standard rate
+    # keeps the estimate stable across the day the promotion ends, at the cost of
+    # reading high until then. Same call as the Gemini Flash line below.
+    pricing: { input_per_1m: 5.00, cached_input_per_1m: 0.50, cache_write_per_1m: 6.25, output_per_1m: 30.00 }
+    # OpenAI renamed this lane "Fast mode" on 2026-07-30 and accepts either
+    # `fast` or `priority` for it. We send `priority` on GPT-5.6 and earlier
+    # because that is what those models report back whichever was asked
+    # (re-measured 2026-09-22), and it is the one value every other provider
+    # takes too. gpt-6-astra answers `fast` instead and so declares it, which is
+    # what `PriorityTier.value` is for. Rates are the short-context column of
+    # OpenAI's fast price list.
+    priority:
+      pricing: { input_per_1m: 10.00, cached_input_per_1m: 1.00, cache_write_per_1m: 12.50, output_per_1m: 60.00 }
+    extra: {}
+    builtin_tools: *openai_builtin_tools
+  - provider: openai
+    channel: [text, voice, video]
+    model: gpt-5.6-terra
+    label: "GPT-5.6 Terra (OpenAI)"
+    vision: true
+    api: responses
+    reasoning_efforts: *openai_reasoning_efforts
+    pricing: { input_per_1m: 2.00, cached_input_per_1m: 0.20, cache_write_per_1m: 2.50, output_per_1m: 12.00 }
+    priority:
+      pricing: { input_per_1m: 4.00, cached_input_per_1m: 0.40, cache_write_per_1m: 5.00, output_per_1m: 24.00 }
+    extra: {}
+    builtin_tools: *openai_builtin_tools
+  - provider: openai
+    channel: [text, voice, video]
+    model: gpt-5.6-luna
+    label: "GPT-5.6 Luna (OpenAI)"
+    vision: true
+    api: responses
+    reasoning_efforts: *openai_reasoning_efforts
+    pricing: { input_per_1m: 0.20, cached_input_per_1m: 0.02, cache_write_per_1m: 0.25, output_per_1m: 1.20 }
+    priority:
+      pricing: { input_per_1m: 0.40, cached_input_per_1m: 0.04, cache_write_per_1m: 0.50, output_per_1m: 2.40 }
+    extra: {}
+    builtin_tools: *openai_builtin_tools
+  - provider: openai
+    channel: [text, voice, video]
+    model: gpt-5.5
+    label: "GPT-5.5 (OpenAI)"
+    vision: true
+    api: responses
+    reasoning_efforts: *openai_reasoning_efforts
+    pricing: { input_per_1m: 5.00, cached_input_per_1m: 0.50, output_per_1m: 30.00 }
+    # 2.5x, not the 2x the 5.6 family charges — the reason these are transcribed.
+    priority:
+      pricing: { input_per_1m: 12.50, cached_input_per_1m: 1.25, output_per_1m: 75.00 }
+    extra: {}
+    builtin_tools: *openai_builtin_tools
+  - provider: openai
+    channel: [text, voice, video]
+    model: gpt-5.4
+    label: "GPT-5.4 (OpenAI)"
+    vision: true
+    api: responses
+    reasoning_efforts: *openai_reasoning_efforts
+    pricing: { input_per_1m: 2.50, cached_input_per_1m: 0.25, output_per_1m: 15.00 }
+    priority:
+      pricing: { input_per_1m: 5.00, cached_input_per_1m: 0.50, output_per_1m: 30.00 }
+    extra: {}
+    builtin_tools: *openai_builtin_tools
+  - provider: openai
+    channel: [text, voice, video]
+    model: gpt-5.4-mini
+    label: "GPT-5.4 mini (OpenAI)"
+    vision: true
+    api: responses
+    reasoning_efforts: *openai_reasoning_efforts
+    pricing: { input_per_1m: 0.75, cached_input_per_1m: 0.075, output_per_1m: 4.50 }
+    priority:
+      pricing: { input_per_1m: 1.50, cached_input_per_1m: 0.15, output_per_1m: 9.00 }
+    extra: {}
+    builtin_tools: *openai_builtin_tools
+  - provider: openai
+    channel: [text, voice, video]
+    model: gpt-5.4-nano
+    label: "GPT-5.4 nano (OpenAI)"
+    vision: true
+    api: responses
+    reasoning_efforts: *openai_reasoning_efforts
+    pricing: { input_per_1m: 0.20, cached_input_per_1m: 0.02, output_per_1m: 1.25 }
+    # No `priority:` deliberately — this model is absent from OpenAI's fast price
+    # list, so the lane is not sold for it. Do not add one by scaling the rates
+    # above: an unpriced tier would bill wrong, and asking for one 400s.
+    extra: {}
+    builtin_tools: *openai_builtin_tools
+  - provider: openai
+    channel: [text, voice, video]
+    model: gpt-4.1
+    label: "GPT-4.1 (OpenAI)"
+    vision: true
+    api: responses
+    pricing: { input_per_1m: 2.00, cached_input_per_1m: 0.50, output_per_1m: 8.00 }
+    # 1.75x here, and the cached rate is 1.75x too ($0.50 -> $0.875).
+    priority:
+      pricing: { input_per_1m: 3.50, cached_input_per_1m: 0.875, output_per_1m: 14.00 }
+    extra: {}
+    builtin_tools: *openai_builtin_tools
+  - provider: openai
+    channel: [text, voice, video]
+    model: gpt-4.1-mini
+    label: "GPT-4.1 mini (OpenAI)"
+    vision: true
+    api: responses
+    pricing: { input_per_1m: 0.40, cached_input_per_1m: 0.10, output_per_1m: 1.60 }
+    priority:
+      pricing: { input_per_1m: 0.70, cached_input_per_1m: 0.175, output_per_1m: 2.80 }
+    extra: {}
+    builtin_tools: *openai_builtin_tools
+  # Gemini text LLMs launched within the last year (as of 2026-08). Specialized
+  # image/live/TTS models are not catalogued here — agents need chat models.
+  #
+  # Every Gemini entry is `api: native`: the livekit-plugins-google client, not
+  # the OpenAI plugin the other providers use. Google's compatibility layer
+  # serves /chat/completions and no /responses at all, so a server-side tool had
+  # nowhere to go — Search grounding, URL context and code execution are only
+  # reachable on the native client, and they are the reason for the switch
+  # (2026-08-08). It also stops flattening what Gemini reports: thinking is a
+  # real `thinking_level`, not a translated `reasoning_effort`, and the plugin
+  # round-trips Gemini's thought_signature itself.
+  #
+  # `base_url` and `supports_prompt_cache_key: false` below are NOT dead. The
+  # LiveKit path no longer reads either, but `services/llm_client.py` — post-call
+  # analysis, a plain AsyncOpenAI rather than a plugin — still
+  # talks to the compatibility endpoint, and it is that endpoint which validates
+  # the body against its own proto and 400s the whole call on a field it does not
+  # know (`prompt_cache_key`, measured 2026-08-07). Nothing is lost by omitting
+  # the key: Gemini caches implicitly for 2.5+ and takes no key on either path.
+  #
+  # Thinking. The native knob is `thinking_level`, whose enum is MINIMAL / LOW /
+  # MEDIUM / HIGH — there is no "none", and sending one 400s. On the four
+  # voice-capable entries `minimal` is the floor and measures ZERO thinking
+  # tokens, so it is the `none` they used to carry under another name. Probed
+  # live 2026-08-08 against generativelanguage.googleapis.com/v1beta/models/*:
+  # generateContent, reading usageMetadata.thoughtsTokenCount (the native
+  # endpoint reports it directly; the compatibility layer never did):
+  #   model                  minimal  low  medium  high   none
+  #   gemini-3.5-flash             0   47      56    82   400
+  #   gemini-3.1-flash-lite        0   96      42    77   400
+  #   gemini-3.6-flash             0   51      65    76   400
+  #   gemini-3.5-flash-lite        0    0      70   101   400
+  # gemini-3.7-flash and gemini-3.8-flash do not have that floor at all, which is
+  # why they are the only text-only entries here — see their own note below.
+  # Probe, never trust the doc, when adding a Gemini model: Google's thinking
+  # docs disagreed with both endpoints, and the accepted values have moved once
+  # already, and 3.7/3.8 dropped a value the four above all take.
+  #
+  # Removed 2026-08-01: gemini-2.5-flash-lite (API returns "no longer available to
+  # new users") and gemini-3-flash-preview (9-11s for a trivial completion vs
+  # 0.8-3s for every other Gemini — unusable on a voice turn).
+  # gemini-3.8-flash and gemini-3.7-flash: the only two entries in this file
+  # restricted to `channel: [text]`, and the reason is measured, not cautious.
+  #
+  # THEY CANNOT STOP THINKING. Both reject the `MINIMAL` thinking level outright
+  # ("Thinking level MINIMAL is not supported for this model") — the level every
+  # other Gemini here uses as its zero-thinking floor — so `low` is the floor,
+  # and `low` thinks: 229 thinking tokens on 3.7 for a one-sentence reply. In the
+  # same run, on the same prompt, a spoken-length answer took a median 1.86s on
+  # gemini-3.5-flash and 2.56s on gemini-3.6-flash against 6.58s (3.7) and 6.46s
+  # (3.8). That is the gemini-3-flash-preview case again, and it is why those two
+  # were removed on 2026-08-01. Three of four calls in that run also returned 503
+  # "experiencing high demand".
+  #
+  # Offered on text because none of that is disqualifying when nobody is waiting
+  # on a silent line: these are Google's current Flash models, 3.8 is their
+  # "most intelligent Flash", and an agent task or a chat agent can spend six
+  # seconds. Re-measure before extending either to voice.
+  #
+  # `vision:` IS NOT PROBED on these two, and is false for that reason rather
+  # than as a finding. Our key answers every request to both models with 429
+  # ("You exceeded your current quota") — the same wall that removed
+  # gemini-3.1-pro-preview, and the standing policy is that an unprobed model
+  # does not get to claim it can see. Both almost certainly read images; prove it
+  # on a key with quota and flip it then. The thinking levels above were measured
+  # before the quota ran out; `medium` on 3.7 and `high` on 3.8 were each seen
+  # only as a 503, which is capacity rather than a refusal.
+  #
+  # PRICE IS THE POST-PROMOTION RATE, deliberately. Google bills $0.75 in /
+  # $0.075 cached / $3.75 out through 2026-12-31 and $1.50 / $0.15 / $7.50 from
+  # 2027-01-01, and this file quotes the second — the same figures gemini-3.6-flash
+  # has carried all along, under the same promotion. The estimate therefore reads
+  # high until the new year rather than doubling on it.
+  - provider: gemini
+    channel: [text]
+    model: gemini-3.8-flash
+    label: "Gemini 3.8 Flash (Google)"
+    vision: false
+    api: native
+    # Its own list, NOT `*gemini_reasoning_efforts`: no MINIMAL on this model.
+    reasoning_efforts: [low, medium, high]
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    supports_prompt_cache_key: false
+    # Google Maps (needs an auth config), File Search (needs stores hosted in the
+    # tenant's Google account) and Vertex RAG (Vertex only) are not offered.
+    #
+    # ADDING A gemini-2.x ENTRY? These tools would silently do nothing on it
+    # whenever the agent also has a function tool. `create_tools_config` DROPS
+    # every provider tool from a mixed request unless the model is Gemini 3 on
+    # the Developer API, and it drops them with a log warning and no error
+    # (livekit/plugins/google/{llm.py,utils.py}, matched against the pinned
+    # 1.8.2 line). An agent task always carries a function tool -- the generated
+    # `submit_result` -- so on a 2.x entry `google_search` would never once run.
+    # Every entry here is gemini-3.x and we do not use Vertex, so today this is
+    # latent. Anything older needs the tools left off, or a guard built.
+    builtin_tools: &gemini_builtin_tools
+      - type: google_search
+        label: "Google Search"
+        description: >-
+          Grounds the answer in live Google results, so the agent can talk about
+          things that happened after the model was trained.
+        price_note: "5,000 free search requests per month, shared across all Gemini 3.x models; then $14.00 per 1,000 requests, plus the tokens of everything it reads. Talqing's cost estimate does not include it."
+        options:
+          # The mirror image of OpenAI's `allowed_domains`: Google's tool filters
+          # by exclusion, so this narrows nothing on its own — it only removes.
+          # `path` is the field name on types.GoogleSearch, which is how the
+          # native builder splats it (compiler/provider_tools.py).
+          - key: exclude_domains
+            path: [exclude_domains]
+            label: "Excluded domains"
+            type: string_list
+            description: "Results from these domains are never used. Leave off the https:// prefix."
+        # NOT offered: `blocking_confidence` (a PhishBlockThreshold enum) and
+        # `time_range_filter` (an Interval object with two timestamps). Neither
+        # is a flat value an option can write, and nobody has asked for either.
+      - type: url_context
+        label: "URL context"
+        description: >-
+          Fetches and reads any URL mentioned in the conversation, so the agent
+          can answer about a page the caller names.
+        price_note: "No separate charge — the fetched page is billed as input tokens at the model's rate."
+      - type: code_execution
+        label: "Code execution"
+        description: >-
+          Writes and runs Python server-side to work something out — arithmetic,
+          dates, parsing — instead of guessing at it.
+        price_note: "No separate charge — the generated code and its results are billed as ordinary input and output tokens at the model's rate."
+    pricing: { input_per_1m: 1.50, cached_input_per_1m: 0.15, output_per_1m: 7.50 }
+    priority:
+      pricing: { input_per_1m: 2.70, cached_input_per_1m: 0.27, output_per_1m: 13.50 }
+      confirms: false
+    extra: {}
+  # Same family, same price list, same missing MINIMAL — see the note above.
+  # Google frames 3.7 as the everyday Flash and 3.8 as the more capable one.
+  - provider: gemini
+    channel: [text]
+    model: gemini-3.7-flash
+    label: "Gemini 3.7 Flash (Google)"
+    vision: false
+    api: native
+    reasoning_efforts: [low, medium, high]
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    supports_prompt_cache_key: false
+    builtin_tools: *gemini_builtin_tools
+    pricing: { input_per_1m: 1.50, cached_input_per_1m: 0.15, output_per_1m: 7.50 }
+    priority:
+      pricing: { input_per_1m: 2.70, cached_input_per_1m: 0.27, output_per_1m: 13.50 }
+      confirms: false
+    extra: {}
+  - provider: gemini
+    channel: [text, voice, video]
+    model: gemini-3.6-flash
+    label: "Gemini 3.6 Flash (Google)"
+    vision: true
+    api: native
+    reasoning_efforts: &gemini_reasoning_efforts [minimal, low, medium, high]
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    supports_prompt_cache_key: false
+    builtin_tools: *gemini_builtin_tools
+    # The standard rate, and not what Google charges today: the whole 3.x Flash
+    # line is half price ($0.75 / $0.075 / $3.75) through 2026-12-31 and reverts
+    # to exactly these figures on 2027-01-01 (checked 2026-09-22). Quoting the
+    # standard rate keeps the estimate stable across that date at the cost of
+    # reading 2x high until it. Same call as gpt-5.6-sol above, and it applies to
+    # the 3.8 and 3.7 entries as well.
+    pricing: { input_per_1m: 1.50, cached_input_per_1m: 0.15, output_per_1m: 7.50 }
+    # A flat 1.8x across every Gemini model, and `confirms: false` on all of
+    # them: Google's compatibility layer validates `service_tier` (a bogus value
+    # 400s with "Valid values are: [default, auto, flex, priority]", measured
+    # 2026-08-08) but returns no `service_tier` on the response. Google documents
+    # an automatic downgrade to standard under load, so a downgraded Gemini turn
+    # is invisible to us and still bills the tenant at 1.8x. That is the known
+    # cost of offering the lane here.
+    priority:
+      pricing: { input_per_1m: 2.70, cached_input_per_1m: 0.27, output_per_1m: 13.50 }
+      confirms: false
+    extra: {}
+  - provider: gemini
+    channel: [text, voice, video]
+    model: gemini-3.5-flash
+    label: "Gemini 3.5 Flash (Google)"
+    vision: true
+    api: native
+    reasoning_efforts: *gemini_reasoning_efforts
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    supports_prompt_cache_key: false
+    builtin_tools: *gemini_builtin_tools
+    pricing: { input_per_1m: 1.50, cached_input_per_1m: 0.15, output_per_1m: 9.00 }
+    priority:
+      pricing: { input_per_1m: 2.70, cached_input_per_1m: 0.27, output_per_1m: 16.20 }
+      confirms: false
+    extra: {}
+  # Removed 2026-08-07: gemini-3.1-pro-preview. Every call on our key 429s
+  # ("You exceeded your current quota") — a plain completion, not just a probe —
+  # while gemini-3.5-flash on the same key answers, so the quota is zero for that
+  # model rather than exhausted across the account. Two sweeps (08-01, 08-07)
+  # therefore never measured one thing about it: whether it accepts effort
+  # "none", or whether thinking stops when it does. It was nonetheless offered on
+  # voice and video with an assumed "none", which is precisely the shipping-blind
+  # case the standing policy above exists to prevent. Restore it by probing it
+  # first: prices below were correct at removal (standard tier ≤200k context —
+  # in 2.00 / cached 0.20 / out 12.00 per 1M).
+  - provider: gemini
+    channel: [text, voice, video]
+    model: gemini-3.5-flash-lite
+    label: "Gemini 3.5 Flash-Lite (Google)"
+    vision: true
+    api: native
+    reasoning_efforts: *gemini_reasoning_efforts
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    supports_prompt_cache_key: false
+    builtin_tools: *gemini_builtin_tools
+    pricing: { input_per_1m: 0.30, cached_input_per_1m: 0.03, output_per_1m: 2.50 }
+    # Google publishes the cached rate here as $0.05, not the $0.054 an exact
+    # 1.8x would give — their rounding, so their number.
+    priority:
+      pricing: { input_per_1m: 0.54, cached_input_per_1m: 0.05, output_per_1m: 4.50 }
+      confirms: false
+    extra: {}
+  - provider: gemini
+    channel: [text, voice, video]
+    model: gemini-3.1-flash-lite
+    label: "Gemini 3.1 Flash-Lite (Google)"
+    vision: true
+    api: native
+    reasoning_efforts: *gemini_reasoning_efforts
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    supports_prompt_cache_key: false
+    builtin_tools: *gemini_builtin_tools
+    pricing: { input_per_1m: 0.25, cached_input_per_1m: 0.025, output_per_1m: 1.50 }
+    priority:
+      pricing: { input_per_1m: 0.45, cached_input_per_1m: 0.045, output_per_1m: 2.70 }
+      confirms: false
+    extra: {}
+stt:
+  # Entries are streaming unless they say `streaming: false`. A non-streaming
+  # (batch) model is wrapped in LiveKit's stt.StreamAdapter, which uses the local
+  # Silero VAD to cut utterances and then POSTs each one — so it trades the
+  # transcription round-trip for price/accuracy, and it bills only the speech
+  # the user actually produced rather than the whole call.
+  - provider: xai
+    channel: [voice, video]
+    model: xai-stt          # synthetic id: xAI exposes one STT service in two modes
+    label: "Grok STT (Streaming)"
+    # xAI always auto-detects; `language` only switches on Inverse Text
+    # Normalization (spoken numbers/currencies → written form) for that language.
+    # Measured 2026-08-03: Hindi audio sent with language=en still came back as
+    # correct Devanagari with language="hi" detected, and English audio sent with
+    # language=hi still came back as English. So Auto is safe here even though a
+    # code is always sent — which it must be, since the plugin hardcodes
+    # format=true and the API 400s on "Field 'language' is required when 'format'
+    # is true". `en` is the ITN default, not a transcription restriction.
+    default_language: en
+    languages: &xai_stt_languages
+      - { code: ar, name: Arabic }
+      - { code: cs, name: Czech }
+      - { code: da, name: Danish }
+      - { code: nl, name: Dutch }
+      - { code: en, name: English }
+      - { code: fil, name: Filipino }
+      - { code: fr, name: French }
+      - { code: de, name: German }
+      - { code: hi, name: Hindi }
+      - { code: id, name: Indonesian }
+      - { code: it, name: Italian }
+      - { code: ja, name: Japanese }
+      - { code: ko, name: Korean }
+      - { code: mk, name: Macedonian }
+      - { code: ms, name: Malay }
+      - { code: fa, name: Persian }
+      - { code: pl, name: Polish }
+      - { code: pt, name: Portuguese }
+      - { code: ro, name: Romanian }
+      - { code: ru, name: Russian }
+      - { code: es, name: Spanish }
+      - { code: sv, name: Swedish }
+      - { code: th, name: Thai }
+      - { code: tr, name: Turkish }
+      - { code: vi, name: Vietnamese }
+    pricing: { per_audio_second: 0.0000556 }   # $0.20/hr streaming
+    extra: { sample_rate: 16000, endpointing: 100, enable_interim_results: true }
+  - provider: xai
+    channel: [voice, video]
+    model: xai-stt-batch    # same service over REST; the plugin picks the mode by call
+    label: "Grok STT (Batch)"
+    streaming: false
+    default_language: en
+    languages: *xai_stt_languages
+    # $0.10/hr REST vs $0.20/hr streaming (x.ai/docs pricing, checked 2026-08-02)
+    # — half price, and the cheapest speech-to-text Talqing offers.
+    pricing: { per_audio_second: 0.0000278 }
+    # endpointing/interim are streaming-only knobs; the StreamAdapter's VAD does
+    # the endpointing here and one REST call returns one final transcript.
+    extra: { sample_rate: 16000 }
+  - provider: sarvam
+    channel: [voice, video]
+    model: saaras:v3
+    label: "Sarvam Saaras v3 (Streaming)"
+    # Saaras auto-detects when told `unknown`, and returns a language_probability
+    # with the transcript. Sent explicitly rather than left unset: the plugin's
+    # own default for this model is en-IN, so an omitted language would quietly
+    # transcribe every caller as English.
+    default_language: unknown
+    languages: &sarvam_saaras_languages
+      - { code: hi-IN, name: Hindi }
+      - { code: ta-IN, name: Tamil }
+      - { code: te-IN, name: Telugu }
+      - { code: bn-IN, name: Bengali }
+      - { code: mr-IN, name: Marathi }
+      - { code: kn-IN, name: Kannada }
+      - { code: ml-IN, name: Malayalam }
+      - { code: gu-IN, name: Gujarati }
+      - { code: pa-IN, name: Punjabi }
+      - { code: od-IN, name: Odia }
+      - { code: en-IN, name: "English (Indian)" }
+      - { code: as-IN, name: Assamese }
+      - { code: ur-IN, name: Urdu }
+      - { code: ne-IN, name: Nepali }
+      - { code: kok-IN, name: Konkani }
+      - { code: ks-IN, name: Kashmiri }
+      - { code: sd-IN, name: Sindhi }
+      - { code: sa-IN, name: Sanskrit }
+      - { code: sat-IN, name: Santali }
+      - { code: mni-IN, name: Manipuri }
+      - { code: brx-IN, name: Bodo }
+      - { code: mai-IN, name: Maithili }
+      - { code: doi-IN, name: Dogri }
+    pricing: &sarvam_stt_pricing { per_audio_second: 0.0000833 }    # ₹30/hr = $0.30/hr @ 1 USD=100 INR
+    extra: {}
+  # Sarvam's latest Saaras, and the platform's default STT: the same class and
+  # the same price as v3 above (₹30/hr covers "Speech to Text" whatever the
+  # model). What v4 adds is Global English alongside Indian English across all
+  # five output modes; the 22 Indic languages are unchanged, which is why the
+  # list is shared.
+  - provider: sarvam
+    channel: [voice, video]
+    model: saaras:v4
+    label: "Sarvam Saaras v4 (Streaming)"
+    default_language: unknown
+    languages: *sarvam_saaras_languages
+    pricing: *sarvam_stt_pricing
+    extra: {}
+  # Sarvam's realtime websocket, which is a DIFFERENT endpoint from the two
+  # entries above and not a mode of them: `saaras:v3-realtime` is the only model
+  # it serves, and the compiler builds `sarvam.STTRealtime` for it rather than
+  # `sarvam.STT` (compiler/factories.py). What it buys is true partial
+  # transcripts — VERIFIED 2026-09-22 against a 3-second clip, 38 interim events
+  # before the final, where the batch class returns the final alone.
+  #
+  # Two spellings differ from the entries above and both are the websocket's,
+  # not a typo: Odia is `or-IN` here and `od-IN` there, and auto-detect is
+  # `auto` rather than `unknown`. The plugin validates the language against its
+  # own set and raises on construction, so a wrong code fails at compile.
+  - provider: sarvam
+    channel: [voice, video]
+    model: saaras:v3-realtime
+    label: "Sarvam Saaras v3 Realtime (Streaming)"
+    default_language: auto
+    languages:
+      - { code: hi-IN, name: Hindi }
+      - { code: ta-IN, name: Tamil }
+      - { code: te-IN, name: Telugu }
+      - { code: bn-IN, name: Bengali }
+      - { code: mr-IN, name: Marathi }
+      - { code: kn-IN, name: Kannada }
+      - { code: ml-IN, name: Malayalam }
+      - { code: gu-IN, name: Gujarati }
+      - { code: pa-IN, name: Punjabi }
+      - { code: or-IN, name: Odia }
+      - { code: en-IN, name: "English (Indian)" }
+      - { code: as-IN, name: Assamese }
+      - { code: ur-IN, name: Urdu }
+      - { code: ne-IN, name: Nepali }
+      - { code: kok-IN, name: Konkani }
+      - { code: ks-IN, name: Kashmiri }
+      - { code: sd-IN, name: Sindhi }
+      - { code: sa-IN, name: Sanskrit }
+      - { code: sat-IN, name: Santali }
+      - { code: mni-IN, name: Manipuri }
+      - { code: brx-IN, name: Bodo }
+      - { code: mai-IN, name: Maithili }
+      - { code: doi-IN, name: Dogri }
+    pricing: *sarvam_stt_pricing
+    # `stream_type` is the plugin's own latency/accuracy dial (fast / balanced /
+    # simulated) and `balanced` is its default, stated here because this is where
+    # a change to it belongs. `endpointing: vad` leaves the turn to Sarvam's
+    # server-side detector, which is what makes this a streaming entry at all.
+    extra: { stream_type: balanced, endpointing: vad }
+  - provider: raya
+    channel: [voice, video]
+    model: bakbak-stt       # synthetic id: Raya's STT names no model, only an endpoint
+    label: "Raya Bakbak STT (Batch)"
+    # Batch by construction, not by choice of endpoint. Raya offers the same
+    # transcription over HTTPS multipart and over `wss://hub.getraya.app/
+    # transcribe`, but the websocket is request/response too — one complete WAV
+    # in, one whole transcript out, no partials and no server-side endpointing.
+    # There is no streaming variant to add later, so this is the only shape the
+    # provider has. See plugins/raya/stt.py for why the HTTP endpoint carries it.
+    streaming: false
+    # No Auto. Measured 2026-08-12 against the live API, and this is the opposite
+    # of what the spec's "Optional language code" implies:
+    #
+    #   `language` selects the OUTPUT SCRIPT, and it is obeyed strictly. One
+    #   Hindi clip came back as Devanagari on `hi`, in Tamil script on `ta`, and
+    #   romanized ("Namaste, Mektikum") on `en`. An English clip sent as `hi`
+    #   came back as Devanagari transliteration of English.
+    #
+    #   A code outside the 23 below is a hard 500 ("Error processing audio:
+    #   'xx'"), and that includes `en-in` — a TTS code, not an STT one. The
+    #   resolver already widens `en-in`/`en-US` to the bare `en` this entry
+    #   publishes, which is what keeps that off the wire.
+    #
+    # ⚠️ `en` is the declared Auto default, and it is the lossy direction. Getting
+    # the language wrong is not symmetric here: English audio read as `hi` comes
+    # back transliterated with its meaning intact, but Hindi audio read as `en`
+    # loses content outright — "मैं आपकी कैसे मदद कर सकता हूँ? कृपया अपना ऑर्डर
+    # नंबर बताइए" returned as "Namaste, I have to say, order number." (measured
+    # 2026-08-12). It arrives as status: success with nothing to detect it by, so
+    # an Indic agent must set its language rather than rely on Auto. Sent
+    # explicitly by the compiler rather than omitted: leaving the field off
+    # happens to behave the same today, but that is Raya's undocumented default,
+    # not a promise.
+    default_language: en
+    # 23 codes, transcribed from the STT OpenAPI + AsyncAPI `LanguageCode` enum.
+    # Note these are the ISO codes (`or`, `en`), not the `xx-IN` spellings Sarvam
+    # uses for the same languages, and not the TTS entries' `en-in`/`en-us` —
+    # `resolve_entry_language` widens and narrows between all three.
+    languages:
+      - { code: hi, name: Hindi }
+      - { code: bn, name: Bengali }
+      - { code: ta, name: Tamil }
+      - { code: te, name: Telugu }
+      - { code: kn, name: Kannada }
+      - { code: ml, name: Malayalam }
+      - { code: mr, name: Marathi }
+      - { code: gu, name: Gujarati }
+      - { code: pa, name: Punjabi }
+      - { code: "or", name: Odia }
+      - { code: as, name: Assamese }
+      - { code: ne, name: Nepali }
+      - { code: ur, name: Urdu }
+      - { code: sd, name: Sindhi }
+      - { code: sa, name: Sanskrit }
+      - { code: ks, name: Kashmiri }
+      - { code: kok, name: Konkani }
+      - { code: mai, name: Maithili }
+      - { code: doi, name: Dogri }
+      - { code: brx, name: Bodo }
+      - { code: mni, name: Manipuri }
+      - { code: sat, name: Santali }
+      - { code: en, name: English }
+    # ₹0.39 per MINUTE of transcribed audio (quoted by Raya; unpublished — it is
+    # on neither getraya.app/bakbak nor the docs, which price TTS only). At
+    # 1 USD=100 INR that is $0.0039/min = $0.000065/audio-second, i.e. $0.234/hr:
+    # a little cheaper than Sarvam Saaras ($0.30/hr), dearer than xAI batch.
+    # Note the unit differs from TTS on the same provider — TTS is per character,
+    # this is per minute — so the two ₹0.39 figures are unrelated.
+    pricing: { per_audio_second: 0.000065 }
+    extra: {}
+  - provider: soniox
+    channel: [voice, video]
+    model: stt-rt-v5
+    label: "Soniox STT Real-time v5"
+    # Soniox also sells `stt-async-v5` and five older real-time models. None are
+    # here: the async ones are an upload-a-file-get-a-job REST API the LiveKit
+    # plugin does not implement at all (`_recognize_impl` raises), and the older
+    # real-time ones cost exactly the same as v5, so offering them would only be
+    # a menu of worse.
+    default_language:           # detects on its own across all 60 below
+    # 60 codes, read from GET /v1/models. Bare ISO 639-1 throughout, and the API
+    # accepts nothing else — `en-US` as a language hint is a hard 400 ("Invalid
+    # language hint"), so `resolve_entry_language`'s widening of `en-US` to the
+    # bare `en` published here is what keeps that off the wire.
+    languages:
+      - { code: af, name: Afrikaans }
+      - { code: sq, name: Albanian }
+      - { code: ar, name: Arabic }
+      - { code: az, name: Azerbaijani }
+      - { code: eu, name: Basque }
+      - { code: be, name: Belarusian }
+      - { code: bn, name: Bengali }
+      - { code: bs, name: Bosnian }
+      - { code: bg, name: Bulgarian }
+      - { code: ca, name: Catalan }
+      - { code: zh, name: Chinese }
+      - { code: hr, name: Croatian }
+      - { code: cs, name: Czech }
+      - { code: da, name: Danish }
+      - { code: nl, name: Dutch }
+      - { code: en, name: English }
+      - { code: et, name: Estonian }
+      - { code: fi, name: Finnish }
+      - { code: fr, name: French }
+      - { code: gl, name: Galician }
+      - { code: de, name: German }
+      - { code: el, name: Greek }
+      - { code: gu, name: Gujarati }
+      - { code: he, name: Hebrew }
+      - { code: hi, name: Hindi }
+      - { code: hu, name: Hungarian }
+      - { code: id, name: Indonesian }
+      - { code: it, name: Italian }
+      - { code: ja, name: Japanese }
+      - { code: kn, name: Kannada }
+      - { code: kk, name: Kazakh }
+      - { code: ko, name: Korean }
+      - { code: lv, name: Latvian }
+      - { code: lt, name: Lithuanian }
+      - { code: mk, name: Macedonian }
+      - { code: ms, name: Malay }
+      - { code: ml, name: Malayalam }
+      - { code: mr, name: Marathi }
+      - { code: "no", name: Norwegian }
+      - { code: fa, name: Persian }
+      - { code: pl, name: Polish }
+      - { code: pt, name: Portuguese }
+      - { code: pa, name: Punjabi }
+      - { code: ro, name: Romanian }
+      - { code: ru, name: Russian }
+      - { code: sr, name: Serbian }
+      - { code: sk, name: Slovak }
+      - { code: sl, name: Slovenian }
+      - { code: es, name: Spanish }
+      - { code: sw, name: Swahili }
+      - { code: sv, name: Swedish }
+      - { code: tl, name: Tagalog }
+      - { code: ta, name: Tamil }
+      - { code: te, name: Telugu }
+      - { code: th, name: Thai }
+      - { code: tr, name: Turkish }
+      - { code: uk, name: Ukrainian }
+      - { code: ur, name: Urdu }
+      - { code: vi, name: Vietnamese }
+      - { code: cy, name: Welsh }
+    # $0.12/hr, derived rather than quoted: Soniox prices real-time STT per token
+    # at $2.00/1M input audio + $4.00/1M output text, and publishes the two
+    # conversion factors — 1 hour of audio ≈ 30,000 input audio tokens, 1 hour of
+    # speech ≈ 15,000 output text tokens. So 0.06 + 0.06 = $0.12/hr, which is the
+    # figure their own pricing page states, and $0.0000333 per audio-second here.
+    # The cheapest streaming STT in this catalog by some distance (ElevenLabs
+    # Scribe v2 Realtime is $0.39/hr, Deepgram Nova $0.26/hr).
+    pricing: { per_audio_second: 0.0000333 }
+    extra: {}
+  - provider: elevenlabs
+    channel: [voice, video]
+    model: scribe_v2_realtime   # the streaming Scribe variant; scribe_v2 below is the batch one
+    label: "ElevenLabs Scribe v2 (Streaming)"
+    default_language:           # Scribe auto-detects; no language hint from config
+    languages: &broad_stt_languages
+      - { code: en, name: English }
+      - { code: es, name: Spanish }
+      - { code: fr, name: French }
+      - { code: de, name: German }
+      - { code: it, name: Italian }
+      - { code: pt, name: Portuguese }
+      - { code: nl, name: Dutch }
+      - { code: pl, name: Polish }
+      - { code: ru, name: Russian }
+      - { code: ja, name: Japanese }
+      - { code: ko, name: Korean }
+      - { code: zh, name: Chinese }
+      - { code: hi, name: Hindi }
+      - { code: ar, name: Arabic }
+      - { code: tr, name: Turkish }
+      - { code: sv, name: Swedish }
+      - { code: da, name: Danish }
+      - { code: id, name: Indonesian }
+      - { code: th, name: Thai }
+    # ElevenAPI Scribe v2 Realtime: $0.39/hr ≈ $0.0001084/audio-sec.
+    pricing: { per_audio_second: 0.0001084 }
+    extra: {}
+  - provider: elevenlabs
+    channel: [voice, video]
+    model: scribe_v2            # batch Scribe: one HTTP request per utterance
+    label: "ElevenLabs Scribe v2 (Batch)"
+    streaming: false
+    default_language:           # Scribe auto-detects; no language hint from config
+    languages: *broad_stt_languages
+    # $0.22/hr ÷ 3600 (elevenlabs.io/pricing/api, checked 2026-08-02). Roughly
+    # 45% cheaper per audio-second than the realtime variant, and it bills only
+    # the utterances the StreamAdapter submits.
+    pricing: { per_audio_second: 0.0000611 }
+    # tag_audio_events defaults to true and the plugin posts it on every batch
+    # request, which would feed "(laughter)"-style annotations to the LLM as if
+    # the caller had said them. `server_vad` is realtime-only (build_stt skips it
+    # for batch anyway), and no_verbatim is left off so the LLM sees what the
+    # caller actually said, fillers included.
+    extra: { tag_audio_events: false }
+  # Replaced gpt-realtime-whisper 2026-09-22. Same $0.017/min, same realtime
+  # transcription socket, and OpenAI's current model for it — "tunable latency,
+  # unstructured context, keyword hints, multiple language hints" against
+  # Whisper's none of those. VERIFIED on that socket the way the runtime opens
+  # it (wss://api.openai.com/v1/realtime?intent=transcription, no turn_detection
+  # — both models reject one with "Turn detection is not supported for this
+  # transcription model", which is why `build_stt` leaves it off): it returned
+  # interim deltas and the correct final. The pinned livekit-plugins-openai
+  # types it alongside whisper in `STTModels`, so nothing else changes.
+  - provider: openai
+    channel: [voice, video]
+    model: gpt-live-transcribe
+    label: "GPT Live Transcribe (Streaming)"
+    default_language:           # empty => the model auto-detects unless the author picks a hint
+    # OpenAI documents this language set for speech-to-text quality; the
+    # realtime transcription guide treats `language` as an optional hint for
+    # these models rather than publishing a separate narrower table.
+    languages: &openai_stt_languages
+      - { code: af, name: Afrikaans }
+      - { code: ar, name: Arabic }
+      - { code: hy, name: Armenian }
+      - { code: az, name: Azerbaijani }
+      - { code: be, name: Belarusian }
+      - { code: bs, name: Bosnian }
+      - { code: bg, name: Bulgarian }
+      - { code: ca, name: Catalan }
+      - { code: zh, name: Chinese }
+      - { code: hr, name: Croatian }
+      - { code: cs, name: Czech }
+      - { code: da, name: Danish }
+      - { code: nl, name: Dutch }
+      - { code: en, name: English }
+      - { code: et, name: Estonian }
+      - { code: fi, name: Finnish }
+      - { code: fr, name: French }
+      - { code: gl, name: Galician }
+      - { code: de, name: German }
+      - { code: el, name: Greek }
+      - { code: he, name: Hebrew }
+      - { code: hi, name: Hindi }
+      - { code: hu, name: Hungarian }
+      - { code: is, name: Icelandic }
+      - { code: id, name: Indonesian }
+      - { code: it, name: Italian }
+      - { code: ja, name: Japanese }
+      - { code: kn, name: Kannada }
+      - { code: kk, name: Kazakh }
+      - { code: ko, name: Korean }
+      - { code: lv, name: Latvian }
+      - { code: lt, name: Lithuanian }
+      - { code: mk, name: Macedonian }
+      - { code: ms, name: Malay }
+      - { code: mr, name: Marathi }
+      - { code: mi, name: Maori }
+      - { code: ne, name: Nepali }
+      - { code: "no", name: Norwegian }
+      - { code: fa, name: Persian }
+      - { code: pl, name: Polish }
+      - { code: pt, name: Portuguese }
+      - { code: ro, name: Romanian }
+      - { code: ru, name: Russian }
+      - { code: sr, name: Serbian }
+      - { code: sk, name: Slovak }
+      - { code: sl, name: Slovenian }
+      - { code: es, name: Spanish }
+      - { code: sw, name: Swahili }
+      - { code: sv, name: Swedish }
+      - { code: tl, name: Tagalog }
+      - { code: ta, name: Tamil }
+      - { code: th, name: Thai }
+      - { code: tr, name: Turkish }
+      - { code: uk, name: Ukrainian }
+      - { code: ur, name: Urdu }
+      - { code: vi, name: Vietnamese }
+      - { code: cy, name: Welsh }
+    # Native streaming STT, via OpenAI's Realtime transcription API.
+    pricing: { per_audio_second: 0.0002833 }    # $0.017/min realtime audio
+    extra: {}
+  # Replaced gpt-4o-transcribe 2026-09-22, which it beats on both axes that
+  # matter here: $0.0045/min against $0.006, and 0.9s against 2.2s to transcribe
+  # the same 3-second clip through /v1/audio/transcriptions (measured, same run,
+  # both returning the identical transcript).
+  #
+  # It also bills differently from everything else on this endpoint: the response
+  # reports `usage.type: "duration"` with whole seconds, where gpt-4o-transcribe
+  # reported audio and text TOKENS. Harmless for us — an STT entry is priced
+  # `per_audio_second` from the duration LiveKit measures, never from a token
+  # count the provider reports — and noted because it is the kind of difference
+  # that would matter to anyone reading OpenAI's usage numbers directly.
+  - provider: openai
+    channel: [voice, video]
+    model: gpt-transcribe       # request/response transcription, not Realtime
+    label: "GPT Transcribe (Batch)"
+    streaming: false
+    default_language:           # empty => the model detects; a picked code is a hard hint
+    languages: *openai_stt_languages
+    # $0.0045/min ÷ 60 (developers.openai.com/api/docs/models/gpt-transcribe,
+    # checked 2026-09-22) — the cheapest OpenAI speech-to-text there is.
+    pricing: { per_audio_second: 0.000075 }
+    extra: {}
+  - provider: deepgram
+    channel: [voice, video]
+    model: nova-3-general
+    label: "Nova-3 Multilingual (Streaming)"
+    # Deepgram's default: it is the one that serves an agent on Auto, where
+    # `multi` lets Nova-3 detect and code-switch instead of being pinned.
+    default_language: multi
+    languages: &deepgram_stt_languages
+      - { code: zh, name: Chinese }
+      - { code: zh-CN, name: "Chinese (Simplified)" }
+      - { code: zh-TW, name: "Chinese (Traditional)" }
+      - { code: da, name: Danish }
+      - { code: nl, name: Dutch }
+      - { code: en, name: English }
+      - { code: en-US, name: "English (US)" }
+      - { code: en-AU, name: "English (Australia)" }
+      - { code: en-GB, name: "English (UK)" }
+      - { code: en-NZ, name: "English (New Zealand)" }
+      - { code: en-IN, name: "English (Indian)" }
+      - { code: fr, name: French }
+      - { code: fr-CA, name: "French (Canada)" }
+      - { code: de, name: German }
+      - { code: hi, name: Hindi }
+      - { code: hi-Latn, name: "Hindi (Latin script)" }
+      - { code: pt, name: Portuguese }
+      - { code: pt-BR, name: "Portuguese (Brazil)" }
+      - { code: es, name: Spanish }
+      - { code: es-419, name: "Spanish (Latin America)" }
+      - { code: es-LATAM, name: "Spanish (Latin America)" }
+      - { code: it, name: Italian }
+      - { code: ja, name: Japanese }
+      - { code: ko, name: Korean }
+      - { code: "no", name: Norwegian }
+      - { code: pl, name: Polish }
+      - { code: sv, name: Swedish }
+      - { code: ta, name: Tamil }
+      - { code: taq, name: Tamasheq }
+      - { code: uk, name: Ukrainian }
+      - { code: tr, name: Turkish }
+      - { code: id, name: Indonesian }
+      - { code: ru, name: Russian }
+      - { code: th, name: Thai }
+      - { code: multi, name: Multilingual auto }
+    # $0.0058/min (Nova-3 multilingual streaming, pay-as-you-go). Revalidate
+    # against your Deepgram plan (Growth/Enterprise rates differ).
+    pricing: { per_audio_second: 0.0000967 }    # $0.0058/min ÷ 60
+    extra: { smart_format: true }
+  - provider: deepgram
+    channel: [voice, video]
+    model: nova-3
+    label: "Nova-3 (Streaming)"
+    # The monolingual SKU. Deepgram's `language` hard-restricts what it will
+    # transcribe — measured 2026-08-03, Hindi audio sent with language=en came
+    # back as the single word "namaste" — so on this model Auto genuinely means
+    # English, not detection, and a caller who speaks anything else is
+    # mistranscribed rather than merely misunderstood.
+    #
+    # We ship it that way on purpose (decided 2026-08-11): every model in the
+    # catalog answers to Auto, and one that cannot detect falls back to English
+    # rather than blocking publish or being explained away in the editor. The
+    # alternative was `multi`, which detects but would run the multilingual
+    # model while billing the monolingual rate below — a worse trade.
+    #
+    # An agent taking non-English calls wants nova-3-general (`multi`) or
+    # flux-general-multi, both of which detect for real.
+    default_language: en
+    languages: *deepgram_stt_languages
+    # $0.0048/min (Nova-3 monolingual streaming, pay-as-you-go). Revalidate against
+    # your Deepgram plan (Growth/Enterprise rates differ).
+    pricing: { per_audio_second: 0.00008 }      # $0.0048/min = $0.00008/audio-sec
+    # Language is only default_language / agent STTSpec — never put language in
+    # extra (build_stt passes it as an explicit kwarg and **extra would duplicate it).
+    extra: { smart_format: true }
+  - provider: deepgram
+    channel: [voice, video]
+    model: flux-general-en
+    label: "Flux English (Streaming)"
+    default_language: en
+    languages:
+      - { code: en, name: English }
+    # $0.0065/min (Flux English streaming, pay-as-you-go, MIP opt-in).
+    pricing: { per_audio_second: 0.0001083 }    # $0.0065/min ÷ 60
+    extra: { sample_rate: 16000 }
+  - provider: deepgram
+    channel: [voice, video]
+    model: flux-general-multi
+    label: "Flux Multilingual (Streaming)"
+    default_language:
+    languages: *deepgram_stt_languages
+    # $0.0078/min (Flux Multilingual streaming, pay-as-you-go, MIP opt-in).
+    pricing: { per_audio_second: 0.00013 }      # $0.0078/min ÷ 60
+    extra: { sample_rate: 16000 }
+
+tts:
+  - provider: xai
+    channel: [voice, video]
+    model: xai-tts          # xAI TTS is a single service (no selectable model id)
+    # LiveKit's xAI plugin reports model="unknown" for the single TTS service.
+    aliases: [unknown]
+    label: "Grok TTS (xAI)"
+    default_language: auto
+    languages:
+      - { code: auto, name: Auto detect }
+      - { code: en, name: English }
+      - { code: ar-EG, name: "Arabic (Egypt)" }
+      - { code: ar-SA, name: "Arabic (Saudi Arabia)" }
+      - { code: ar-AE, name: "Arabic (UAE)" }
+      - { code: bn, name: Bengali }
+      - { code: zh, name: Chinese }
+      - { code: fr, name: French }
+      - { code: de, name: German }
+      - { code: hi, name: Hindi }
+      - { code: id, name: Indonesian }
+      - { code: it, name: Italian }
+      - { code: ja, name: Japanese }
+      - { code: ko, name: Korean }
+      - { code: pt-BR, name: "Portuguese (Brazil)" }
+      - { code: pt-PT, name: "Portuguese (Portugal)" }
+      - { code: ru, name: Russian }
+      - { code: es-MX, name: "Spanish (Mexico)" }
+      - { code: es-ES, name: "Spanish (Spain)" }
+      - { code: tr, name: Turkish }
+      - { code: vi, name: Vietnamese }
+    default_voice: ara       # the editor's picker fetches the full list live
+    supports_speed: true
+    speed_min: 0.7
+    speed_max: 1.5
+    # voices fetched live from xAI (GET /v1/tts/voices via /catalog/voices?provider=xai)
+    pricing: { per_character: 0.000015 }         # $15 / 1M chars
+    extra: {}
+    # Delivery markup, taught to the LLM verbatim — xAI's own syntax, never an
+    # intermediate form of ours, because these are the tags the model already
+    # knows from training data and nothing has to be lowered on the way out.
+    # Nothing else in the pipeline touches them: the provider honours what it
+    # knows and silently drops what it does not, so there is no strip anywhere
+    # and a hallucinated label costs nothing (measured 2026-08-15).
+    #
+    # The vocabulary lives in the prompt and nowhere else — it is only ever used
+    # to tell the model what it may write. The labels are transcribed from the
+    # "Speech Tags" tables at
+    # docs.x.ai/developers/model-capabilities/audio/text-to-speech, in the order
+    # of the doc's own categories (pauses / laughter & crying / mouth sounds /
+    # breathing, then volume & intensity / pitch & speed / vocal style).
+    expressive:
+      prompt: |
+        ## Speaking aloud
+
+        Your words are spoken. Shape how they land with these tags, and nothing else — no
+        markdown, no emoji, no stage directions written out as words.
+
+        At a point in the line: [pause] [long-pause] [laugh] [chuckle] [giggle] [cry]
+        [sigh] [breath] [inhale] [exhale] [tsk] [tongue-click] [lip-smack] [hum-tune]
+
+        Around a phrase, always closed: <emphasis> <whisper> <soft> <loud>
+        <build-intensity> <decrease-intensity> <higher-pitch> <lower-pitch> <slow> <fast>
+        <sing-song> <singing> <laugh-speak>
+
+        Use one only where a real person's voice would do that thing. Most replies need
+        none, and one deliberate tag carries further than three in a row. Never place a
+        pause beside sentence punctuation, never emphasise more than a single word, and
+        keep laughter for something genuinely funny. Match the register of the moment: bad
+        news stays composed however casual the call has been.
+
+        Example: I have you down for [pause] Thursday the <emphasis>ninth</emphasis>.
+        <slow>Your reference is A 7 X 9.</slow>
+  - provider: sarvam
+    channel: [voice, video]
+    model: bulbul:v3
+    label: "Sarvam Bulbul v3 (Indian)"
+    # Auto is allowed, and is the honest setting for a Bulbul agent. v3 takes the
+    # spoken language from the text it is handed and ignores `target_language_code`
+    # outright — measured 2026-08-11 across 7 scripts x 5 codes: Tamil text tagged
+    # `hi-IN` still speaks Tamil, and code-mixed Hinglish stays Hinglish under
+    # every code. So there is no default to set and nothing to require; on Auto the
+    # compiler omits the argument and the plugin's own `en-IN` goes along for the
+    # ride. The 11 below are what Bulbul covers, and they still gate the picker —
+    # an agent that wanders outside them is out of Bulbul's range whatever this says.
+    default_language:
+    languages:
+      - { code: hi-IN, name: Hindi }
+      - { code: ta-IN, name: Tamil }
+      - { code: te-IN, name: Telugu }
+      - { code: bn-IN, name: Bengali }
+      - { code: mr-IN, name: Marathi }
+      - { code: kn-IN, name: Kannada }
+      - { code: ml-IN, name: Malayalam }
+      - { code: gu-IN, name: Gujarati }
+      - { code: pa-IN, name: Punjabi }
+      - { code: od-IN, name: Odia }
+      - { code: en-IN, name: "English (Indian)" }
+    default_voice: shubh
+    supports_speed: true
+    speed_min: 0.5
+    speed_max: 2.0
+    # Sarvam exposes no list-voices API — bulbul:v3's speakers are a fixed,
+    # published enum, declared here so the editor's picker can list them (no
+    # preview: the docs' sample mp3s are presigned S3 links that expire, and
+    # Sarvam ships no sample endpoint). Served per-model via
+    # /catalog/voices?provider=sarvam&model=bulbul:v3.
+    #
+    # These 37 are the complete bulbul:v3 roster, transcribed from
+    # https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/voices and
+    # confirmed against the API — anything off this list is rejected with a 400,
+    # so a name that is merely plausible is an outage for every agent on it.
+    # The 7 legacy speakers the API's error text also names (anushka, abhilash,
+    # manisha, vidya, arya, karun, hitesh) are bulbul:v2-only and 400 on v3.
+    #
+    # `description` is Sarvam's own tone label for the speaker; the picker shows
+    # it under the name, which is the only thing distinguishing 37 first names.
+    # gender drives the picker's gender filter (Sarvam ships neither on the API).
+    voices:
+      - { id: shubh, name: Shubh, gender: male, description: Confident & Bold }
+      - { id: aditya, name: Aditya, gender: male, description: Modern & Crisp }
+      - { id: ritu, name: Ritu, gender: female, description: Expressive & Lively }
+      - { id: priya, name: Priya, gender: female, description: Cheerful & Engaging }
+      - { id: neha, name: Neha, gender: female, description: Energetic & Warm }
+      - { id: rahul, name: Rahul, gender: male, description: Deep & Authoritative }
+      - { id: pooja, name: Pooja, gender: female, description: Cheerful & Engaging }
+      - { id: rohan, name: Rohan, gender: male, description: Confident & Bold }
+      - { id: simran, name: Simran, gender: female, description: Rich & Mature }
+      - { id: kavya, name: Kavya, gender: female, description: Polished & Articulate }
+      - { id: amit, name: Amit, gender: male, description: Steady & Trustworthy }
+      - { id: dev, name: Dev, gender: male, description: Casual & Relatable }
+      - { id: ishita, name: Ishita, gender: female, description: Polished & Articulate }
+      - { id: shreya, name: Shreya, gender: female, description: Energetic & Warm }
+      - { id: ratan, name: Ratan, gender: male, description: Rich & Mature }
+      # Sarvam's voice card says "Casual & Relatable", but the same page and the
+      # best-practices guide both warn in prose that varun is a deep, dramatic
+      # villain voice unfit as a neutral default. The warning is what a user
+      # picking blind from a dropdown needs, so it wins over the card's label.
+      - { id: varun, name: Varun, gender: male, description: Deep & Dramatic — suspense only }
+      - { id: manan, name: Manan, gender: male, description: Clear & Professional }
+      - { id: sumit, name: Sumit, gender: male, description: Deep & Authoritative }
+      - { id: roopa, name: Roopa, gender: female, description: Gentle & Soothing }
+      - { id: kabir, name: Kabir, gender: male, description: Rich & Cinematic }
+      - { id: aayan, name: Aayan, gender: male, description: Professional & Clear }
+      - { id: ashutosh, name: Ashutosh, gender: male, description: Traditional & Narrative }
+      - { id: advait, name: Advait, gender: male, description: Contemporary & Storytelling }
+      - { id: anand, name: Anand, gender: male, description: Warm & Reassuring }
+      - { id: tanya, name: Tanya, gender: female, description: Friendly & Modern }
+      - { id: tarun, name: Tarun, gender: male, description: Professional & Clear }
+      - { id: sunny, name: Sunny, gender: male, description: Cheerful & Upbeat }
+      - { id: mani, name: Mani, gender: male, description: Calm & Composed }
+      - { id: gokul, name: Gokul, gender: male, description: Trustworthy & Dependable }
+      - { id: vijay, name: Vijay, gender: male, description: Confident & Authoritative }
+      - { id: shruti, name: Shruti, gender: female, description: Sweet & Melodious }
+      - { id: suhani, name: Suhani, gender: female, description: Pleasant & Soothing }
+      - { id: mohit, name: Mohit, gender: male, description: Versatile & Adaptable }
+      - { id: kavitha, name: Kavitha, gender: female, description: Graceful & Articulate }
+      - { id: rehan, name: Rehan, gender: male, description: Youthful & Energetic }
+      - { id: soham, name: Soham, gender: male, description: Balanced & Natural }
+      - { id: rupali, name: Rupali, gender: female, description: Elegant & Refined }
+    pricing: { per_character: 0.00003 }          # Bulbul v3: ₹30/10k chars = $0.00003/char @ 1 USD=100 INR
+    extra: { speech_sample_rate: 24000 }
+  # Raya's two TTS models are one service with two disjoint voice rosters: a
+  # voice id from `m1` is rejected by `standard` and vice versa. They are
+  # separate entries so the editor's picker can scope itself to the model the
+  # agent is on (`/catalog/voices?provider=raya&model=…`) — the alternative is a
+  # gallery where two thirds of the voices 404 at synthesis time.
+  #
+  # Both entries share `&raya_tts_languages` and `&raya_tts_extra` below. Raya
+  # prices per character with no model tier, so the rates are identical too.
+  - provider: raya
+    channel: [voice, video]
+    model: m1
+    label: "Raya Bakbak m1"
+    # What an agent on Auto speaks. Raya has no detection to fall back on — the
+    # API 422s on a missing `language` — so something has to be sent, and this is
+    # it. See the note on the STT entry about which way that default should lean.
+    default_language: en
+    languages: &raya_tts_languages
+      - { code: hi, name: Hindi }
+      - { code: mr, name: Marathi }
+      - { code: te, name: Telugu }
+      - { code: kn, name: Kannada }
+      - { code: bn, name: Bengali }
+      - { code: as, name: Assamese }
+      - { code: gu, name: Gujarati }
+      - { code: ne, name: Nepali }
+      - { code: ml, name: Malayalam }
+      - { code: ta, name: Tamil }
+      # Bare `en` alongside the two regionals: all three synthesize (verified
+      # 2026-08-12). Without it, an agent set to plain "English" sits between
+      # `en-in` and `en-us` with no way to break the tie except default_language,
+      # which is needed for Auto instead.
+      - { code: en, name: English }
+      - { code: en-in, name: "English (Indian)" }
+      - { code: en-us, name: "English (US)" }
+    # The plugin's own fallback voice. Overridden the moment the author opens the
+    # picker; it only decides what an agent created over the API without a voice
+    # speaks with. It is an `m1` voice, which is why `standard` below does not
+    # share it.
+    default_voice: 3fe4afbc-3bde-4c97-ab8e-37e3fb8c7ba2
+    supports_speed: true
+    speed_min: 0.5
+    speed_max: 1.5
+    # Voices fetched live from Raya (GET /v1/voices via
+    # /catalog/voices?provider=raya&model=m1) and scoped to this entry's model.
+    # No previews and no gender: the API returns id, name, language and model,
+    # and ships no sample endpoint.
+    voices: []
+    # ₹0.39 / 1k chars (getraya.app/bakbak) = $0.0039 / 1k chars @ 1 USD=100 INR.
+    # Flat across both models. The cheapest TTS Talqing offers by a wide margin —
+    # roughly 1/8 of Sarvam Bulbul v3 and 1/13 of ElevenLabs Flash.
+    pricing: { per_character: 0.0000039 }
+    # `codec: pcm` is what the streaming endpoint actually returns regardless of
+    # this field, sent for honesty rather than effect. `sample_rate` is the
+    # plugin default stated explicitly, since 8000 is also legal and telephony
+    # callers might want it.
+    extra: &raya_tts_extra { codec: pcm, sample_rate: 24000 }
+  - provider: raya
+    channel: [voice, video]
+    model: standard
+    label: "Raya Bakbak Standard"
+    default_language: en
+    languages: *raya_tts_languages
+    # Priyanka, a Hindi voice, read off GET /v1/voices on 2026-08-12 and
+    # confirmed to synthesize. Model-scoped like every Raya voice: this id is
+    # rejected with `unknown voice_id` under `m1`, which is why the two entries
+    # cannot share a default.
+    default_voice: d6a002d0-230c-49b1-a137-b8a7d564b1ae
+    supports_speed: true
+    speed_min: 0.5
+    speed_max: 1.5
+    voices: []
+    pricing: { per_character: 0.0000039 }
+    extra: *raya_tts_extra
+  # Soniox also ships `tts-rt-v1` (and `tts-rt-v1-preview`, an alias of it) at the
+  # same price with 28 voices, 21 of which v2 also has. It is not carried: a
+  # second entry that is cheaper at nothing and smaller at everything is a choice
+  # no author should have to make. Its seven exclusive voices (Maya, Noah, Jack,
+  # Claire, Sofia, Elise, Meera) are what that costs.
+  - provider: soniox
+    channel: [voice, video]
+    model: tts-rt-v2
+    label: "Soniox TTS Real-time v2"
+    # No auto-detect, and not a soft default either: a synthesis request with no
+    # `language` is a 400 ("Missing language"), so `language_required` makes agent
+    # validation refuse an agent on Auto rather than letting the plugin's own
+    # `en` speak English at whoever called.
+    #
+    # It matters more than "which accent". Measured 2026-08-12 by synthesizing
+    # the same English sentence under three codes and reading each back through
+    # Soniox STT: `en` gave "The total is 2024 dollars", `de` turned the number
+    # into "12,047", and `es` rendered the English words through Spanish phonics
+    # into "De tota l'IS 2024" — unintelligible. A wrong language here does not
+    # colour the speech, it destroys it.
+    language_required: true
+    # Nothing to break a tie with: every code below is a bare primary subtag, so
+    # `resolve_entry_language` always matches exactly or widens onto one. Left
+    # empty on purpose — `language_required` above means an agent never arrives
+    # here without a language, and if that ever stops being true `_required_language`
+    # raises instead of quietly picking a language for the caller.
+    default_language:
+    # 63 codes, read from GET /v1/tts-models. Three more than the STT entry
+    # above — Icelandic, Sundanese and Uzbek can be spoken but not transcribed.
+    languages:
+      - { code: af, name: Afrikaans }
+      - { code: ar, name: Arabic }
+      - { code: az, name: Azerbaijani }
+      - { code: be, name: Belarusian }
+      - { code: bg, name: Bulgarian }
+      - { code: bn, name: Bengali }
+      - { code: bs, name: Bosnian }
+      - { code: ca, name: Catalan }
+      - { code: cs, name: Czech }
+      - { code: cy, name: Welsh }
+      - { code: da, name: Danish }
+      - { code: de, name: German }
+      - { code: el, name: Greek }
+      - { code: en, name: English }
+      - { code: es, name: Spanish }
+      - { code: et, name: Estonian }
+      - { code: eu, name: Basque }
+      - { code: fa, name: Persian }
+      - { code: fi, name: Finnish }
+      - { code: fr, name: French }
+      - { code: gl, name: Galician }
+      - { code: gu, name: Gujarati }
+      - { code: he, name: Hebrew }
+      - { code: hi, name: Hindi }
+      - { code: hr, name: Croatian }
+      - { code: hu, name: Hungarian }
+      - { code: id, name: Indonesian }
+      - { code: is, name: Icelandic }
+      - { code: it, name: Italian }
+      - { code: ja, name: Japanese }
+      - { code: kk, name: Kazakh }
+      - { code: kn, name: Kannada }
+      - { code: ko, name: Korean }
+      - { code: lt, name: Lithuanian }
+      - { code: lv, name: Latvian }
+      - { code: mk, name: Macedonian }
+      - { code: ml, name: Malayalam }
+      - { code: mr, name: Marathi }
+      - { code: ms, name: Malay }
+      - { code: nl, name: Dutch }
+      - { code: "no", name: Norwegian }
+      - { code: pa, name: Punjabi }
+      - { code: pl, name: Polish }
+      - { code: pt, name: Portuguese }
+      - { code: ro, name: Romanian }
+      - { code: ru, name: Russian }
+      - { code: sk, name: Slovak }
+      - { code: sl, name: Slovenian }
+      - { code: sq, name: Albanian }
+      - { code: sr, name: Serbian }
+      - { code: su, name: Sundanese }
+      - { code: sv, name: Swedish }
+      - { code: sw, name: Swahili }
+      - { code: ta, name: Tamil }
+      - { code: te, name: Telugu }
+      - { code: th, name: Thai }
+      - { code: tl, name: Tagalog }
+      - { code: tr, name: Turkish }
+      - { code: uk, name: Ukrainian }
+      - { code: ur, name: Urdu }
+      - { code: uz, name: Uzbek }
+      - { code: vi, name: Vietnamese }
+      - { code: zh, name: Chinese }
+    # The plugin's fallback voice is `Maya`, which belongs to v1 and is a hard 400
+    # on this model, so the default has to be named here. `Emma` is a v2 voice,
+    # verified against the live API. Only decides what an agent created over the
+    # API without a voice speaks with; opening the picker overrides it.
+    default_voice: Emma
+    supports_speed: true
+    # Server-enforced, not advisory: 1.5 comes back as
+    # "Field speed must be between 0.7 and 1.3".
+    speed_min: 0.7
+    speed_max: 1.3
+    # Fetched live and scoped to this model (GET /catalog/voices?provider=soniox
+    # &model=tts-rt-v2 → services/catalog/voices/soniox.py). 70 voices, each with
+    # a gender and Soniox's own one-line character description; no sample
+    # endpoint, so the picker shows no preview button.
+    voices: []
+    # $0.0000141/character, derived the same way as the STT entry above. Soniox
+    # bills TTS per token — $4.00/1M input text + $21.50/1M output audio — and
+    # publishes 1 char ≈ 0.3 input text tokens and 15,000 input text tokens ≈ 1
+    # hour of speech, i.e. 50,000 characters per hour. That hour costs
+    # 0.06 + 0.645 = $0.705, and $0.705/50,000 is the rate below. Their own page
+    # rounds the same sum to "about $0.70/hour".
+    pricing: { per_character: 0.0000141 }
+    # Both are the plugin's defaults, stated rather than inherited: `pcm_s16le`
+    # is the only format that stays raw all the way into LiveKit, and 24000 is
+    # the rate the emitter is initialized with, so a change to either has to be
+    # made here where the price and the voices are.
+    extra: { audio_format: pcm_s16le, sample_rate: 24000 }
+  - provider: elevenlabs
+    channel: [voice, video]
+    model: eleven_turbo_v2_5    # low-latency multilingual; `language` is valid for this model
+    label: "Eleven Turbo v2.5"
+    default_language:
+    languages: &eleven_turbo_flash_tts_languages
+      - { code: en, name: English }
+      - { code: ja, name: Japanese }
+      - { code: zh, name: Chinese }
+      - { code: de, name: German }
+      - { code: hi, name: Hindi }
+      - { code: fr, name: French }
+      - { code: ko, name: Korean }
+      - { code: pt, name: Portuguese }
+      - { code: it, name: Italian }
+      - { code: es, name: Spanish }
+      - { code: ru, name: Russian }
+      - { code: id, name: Indonesian }
+      - { code: nl, name: Dutch }
+      - { code: tr, name: Turkish }
+      - { code: fil, name: Filipino }
+      - { code: pl, name: Polish }
+      - { code: sv, name: Swedish }
+      - { code: bg, name: Bulgarian }
+      - { code: ro, name: Romanian }
+      - { code: ar, name: Arabic }
+      - { code: cs, name: Czech }
+      - { code: el, name: Greek }
+      - { code: fi, name: Finnish }
+      - { code: hr, name: Croatian }
+      - { code: ms, name: Malay }
+      - { code: sk, name: Slovak }
+      - { code: da, name: Danish }
+      - { code: ta, name: Tamil }
+      - { code: uk, name: Ukrainian }
+      - { code: hu, name: Hungarian }
+      - { code: "no", name: Norwegian }
+      - { code: vi, name: Vietnamese }
+    default_voice: hpp4J3VqNfWAUOO0d1Us   # plugin default voice; the live gallery overrides it
+    # Whether this model reads the two voice-shaping knobs Talqing captures from
+    # the voice itself — `stability` and `similarity_boost` on `tts` (see
+    # `TTSModelSpec`). Only ElevenLabs sells such a knob; every other provider
+    # here leaves this false, and agent validation refuses a value on them.
+    #
+    # One flag rather than one per knob, on purpose: the values are read off the
+    # picked voice and never typed, so an entry that reads only some of them
+    # (eleven_v3 takes stability and ignores similarity_boost) just ignores the
+    # rest and nobody is shown a control that lies. `style` and
+    # `use_speaker_boost` are deliberately NOT captured — MEASURED 2026-08-19,
+    # both are accepted by /v1 and change nothing on all three models here.
+    supports_voice_settings: true
+    supports_speed: true
+    speed_min: 0.8
+    speed_max: 1.2
+    # voices fetched live from the ElevenLabs API (GET /catalog/voices?provider=elevenlabs)
+    # so the editor shows the tenant's full voice library with audio previews.
+    voices: []
+    # ElevenAPI Flash/Turbo: $0.05 / 1K chars. /v1/models reports
+    # character_cost_multiplier=0.5 against the 1-credit Multilingual/v3 rate.
+    pricing: { per_character: 0.00005 }
+    extra: {}
+  - provider: elevenlabs
+    channel: [voice, video]
+    model: eleven_flash_v2_5    # ultra-low-latency multilingual; 32 languages
+    label: "Eleven Flash v2.5"
+    default_language:
+    languages: *eleven_turbo_flash_tts_languages
+    default_voice: hpp4J3VqNfWAUOO0d1Us
+    supports_voice_settings: true   # see the Turbo entry above for what this covers
+    supports_speed: true
+    speed_min: 0.8
+    speed_max: 1.2
+    voices: []
+    # ElevenAPI Flash/Turbo: $0.05 / 1K chars. /v1/models reports
+    # character_cost_multiplier=0.5 against the 1-credit Multilingual/v3 rate.
+    pricing: { per_character: 0.00005 }
+    extra: {}
+  - provider: elevenlabs
+    channel: [voice, video]
+    model: eleven_v3    # ElevenLabs' v3 multilingual TTS model (70+ languages)
+    label: "Eleven v3"
+    default_language:
+    languages: &eleven_v3_languages
+      - { code: af, name: Afrikaans }
+      - { code: ar, name: Arabic }
+      - { code: bg, name: Bulgarian }
+      - { code: hr, name: Croatian }
+      - { code: cs, name: Czech }
+      - { code: da, name: Danish }
+      - { code: nl, name: Dutch }
+      - { code: en, name: English }
+      - { code: fil, name: Filipino }
+      - { code: fi, name: Finnish }
+      - { code: fr, name: French }
+      - { code: de, name: German }
+      - { code: el, name: Greek }
+      - { code: hi, name: Hindi }
+      - { code: hu, name: Hungarian }
+      - { code: id, name: Indonesian }
+      - { code: it, name: Italian }
+      - { code: ja, name: Japanese }
+      - { code: ko, name: Korean }
+      - { code: ms, name: Malay }
+      - { code: zh, name: Chinese }
+      - { code: "no", name: Norwegian }
+      - { code: pl, name: Polish }
+      - { code: pt, name: Portuguese }
+      - { code: ro, name: Romanian }
+      - { code: ru, name: Russian }
+      - { code: sk, name: Slovak }
+      - { code: es, name: Spanish }
+      - { code: sv, name: Swedish }
+      - { code: ta, name: Tamil }
+      - { code: tr, name: Turkish }
+      - { code: uk, name: Ukrainian }
+      - { code: vi, name: Vietnamese }
+    default_voice: hpp4J3VqNfWAUOO0d1Us
+    supports_voice_settings: true   # see the Turbo entry above for what this covers
+    # No speed control, unlike Turbo/Flash above. MEASURED 2026-08-19, and it
+    # contradicts ElevenLabs' own speed FAQ ("available for all voices and all
+    # models"): the same sentence comes back at 90324 bytes on speed 0.7, 1.0
+    # AND 1.2, while Flash returns 116655 / 82382 / 67336 for the same three.
+    # `speed` is simply not in v3's own request schema (`ElevenV3VoiceSettings`
+    # carries stability and nothing else) — v3 expresses pace through audio tags
+    # instead, which is what the `expressive` block below teaches. Offering the
+    # slider anyway would be a control that does nothing.
+    supports_speed: false
+    voices: []
+    # ElevenAPI Multilingual v2/v3: $0.10 / 1K chars. /v1/models reports
+    # character_cost_multiplier=1.0.
+    pricing: { per_character: 0.00010 }
+    extra: {}
+    # Per model, not per provider, and this entry is why: `eleven_v3` honours
+    # these tags, while `eleven_turbo_v2_5` and `eleven_flash_v2_5` above speak
+    # them out loud — measured 2026-08-15, `[laughs]` on Flash reaches the caller
+    # as the word "Laughs".
+    #
+    # This dialect has no wrapping form at all: a tag colours roughly the next
+    # four or five words and then delivery reverts, which is why the prompt below
+    # is written differently from xAI's rather than being the same prose with the
+    # labels swapped.
+    #
+    # Shared with `eleven_v3_conversational` below, which performs the same tags
+    # identically (both measured 2026-09-22 by synthesizing "[laughs] That is
+    # wonderful news. [whispers] Keep it between us." and reading the audio back
+    # through speech-to-text: both returned the sentence with no tag words in it,
+    # while eleven_flash_v2_5 returned "Laughs. That is wonderful news, whispers.").
+    expressive: &eleven_v3_dialect
+      prompt: |
+        ## Speaking aloud
+
+        Your words are spoken. Shape how they land with these tags, and nothing else:
+
+        [laughs] [sighs] [whispers] [slow] [excited]
+
+        Each colours roughly the next four or five words and then delivery returns to
+        normal, so put one directly in front of the phrase it belongs to. Use one only
+        where a real person's voice would; most replies need none.
+
+        Example: That's all confirmed for Thursday the ninth. [slow] Your reference is
+        A 7 X 9.
+  # ElevenLabs' own recommendation for a conversational agent, and until now this
+  # catalog carried a note saying we could not have it: the 2026-08 entry above
+  # recorded a 401 model_access_denied on our workspace's tier. That is no longer
+  # true — re-checked 2026-09-22, the model synthesizes on our key — so the note
+  # is gone and the entry is here.
+  #
+  # It is v3's delivery at Flash's price: /v1/models reports
+  # character_cost_multiplier 0.5, the same as Turbo and Flash and HALF eleven_v3
+  # above, and ElevenLabs documents ~280ms against v3's studio latency. For a
+  # voice agent that wants audio tags, this is the entry to reach for; eleven_v3
+  # stays for anyone already on it.
+  - provider: elevenlabs
+    channel: [voice, video]
+    model: eleven_v3_conversational
+    label: "Eleven v3 Conversational"
+    default_language:
+    # Identical to eleven_v3's set — both report the same 74 language ids on
+    # /v1/models, of which these are the ones this catalog publishes.
+    languages: *eleven_v3_languages
+    default_voice: hpp4J3VqNfWAUOO0d1Us
+    supports_voice_settings: true   # see the Turbo entry above for what this covers
+    # No speed control, exactly like eleven_v3 and for the same reason. MEASURED
+    # 2026-09-22: the same sentence comes back as 5 seconds of audio at speed
+    # 0.7, 1.2 AND 3.0 — and 3.0 is not even rejected, where eleven_flash_v2_5
+    # refuses it ("expected to be greater or equal to 0.7") and does return
+    # 6s / 3s for 0.7 / 1.2. The field is not read on this model, so offering the
+    # slider would be a control that does nothing.
+    supports_speed: false
+    voices: []
+    # $0.05 / 1K chars: character_cost_multiplier 0.5 against the 1-credit
+    # Multilingual/v3 rate, same as Flash and Turbo.
+    pricing: { per_character: 0.00005 }
+    extra: {}
+    expressive: *eleven_v3_dialect
+  - provider: openai
+    channel: [voice, video]
+    model: gpt-4o-mini-tts
+    label: "GPT-4o mini TTS"
+    default_language:           # multilingual model; no language param at compile
+    default_voice: alloy
+    supports_speed: true
+    speed_min: 0.5
+    speed_max: 2.0
+    # OpenAI exposes no list-voices API — the voice set is a fixed published enum,
+    # declared here so the editor's picker can list them (no preview: OpenAI ships
+    # no sample endpoint). Served via /catalog/voices?provider=openai&model=gpt-4o-mini-tts.
+    voices:
+      - { id: alloy, name: Alloy, gender: female }
+      - { id: ash, name: Ash, gender: male }
+      - { id: ballad, name: Ballad, gender: male }
+      - { id: coral, name: Coral, gender: female }
+      - { id: echo, name: Echo, gender: male }
+      - { id: fable, name: Fable, gender: male }
+      - { id: nova, name: Nova, gender: female }
+      - { id: onyx, name: Onyx, gender: male }
+      - { id: sage, name: Sage, gender: female }
+      - { id: shimmer, name: Shimmer, gender: female }
+      - { id: verse, name: Verse, gender: male }
+      - { id: marin, name: Marin, gender: female }
+      - { id: cedar, name: Cedar, gender: male }
+    # gpt-4o-mini-tts bills text input tokens + audio output tokens.
+    pricing: { input_per_1m: 0.60, output_per_1m: 12.00 }
+    extra: {}
+  - provider: openai
+    channel: [voice, video]
+    model: tts-1
+    label: "TTS-1"
+    default_language:
+    default_voice: alloy
+    supports_speed: true
+    speed_min: 0.5
+    speed_max: 2.0
+    voices:
+      - { id: alloy, name: Alloy, gender: female }
+      - { id: ash, name: Ash, gender: male }
+      - { id: coral, name: Coral, gender: female }
+      - { id: echo, name: Echo, gender: male }
+      - { id: fable, name: Fable, gender: male }
+      - { id: nova, name: Nova, gender: female }
+      - { id: onyx, name: Onyx, gender: male }
+      - { id: sage, name: Sage, gender: female }
+      - { id: shimmer, name: Shimmer, gender: female }
+    pricing: { per_character: 0.000015 }        # $15 / 1M chars
+    extra: {}
+  - provider: openai
+    channel: [voice, video]
+    model: tts-1-hd
+    label: "TTS-1 HD"
+    default_language:
+    default_voice: alloy
+    supports_speed: true
+    speed_min: 0.5
+    speed_max: 2.0
+    voices:
+      - { id: alloy, name: Alloy, gender: female }
+      - { id: ash, name: Ash, gender: male }
+      - { id: coral, name: Coral, gender: female }
+      - { id: echo, name: Echo, gender: male }
+      - { id: fable, name: Fable, gender: male }
+      - { id: nova, name: Nova, gender: female }
+      - { id: onyx, name: Onyx, gender: male }
+      - { id: sage, name: Sage, gender: female }
+      - { id: shimmer, name: Shimmer, gender: female }
+    pricing: { per_character: 0.00003 }         # $30 / 1M chars
+    extra: {}
+  # Deepgram's voice-agent-first text-to-speech, served on a different endpoint
+  # from Aura (`/v2/speak`, not `/v1/speak`) and therefore a different LiveKit
+  # class — `deepgram.TTSv2`, which compiler/factories.py builds for this entry
+  # alone. VERIFIED 2026-09-22: synthesized a sentence through the plugin and
+  # read the audio back through speech-to-text correctly, 1.4s to first byte.
+  #
+  # English only, and that is the trade against Aura-2 below: 36 voices across
+  # American, British, Irish, Australian, Indian, Singaporean and Filipino
+  # accents, and nothing else. An agent taking calls in any other language wants
+  # Aura-2, which is also half the price.
+  #
+  # What the extra 1.5x buys is barge-in the pipeline does not have to
+  # reconstruct: on an interruption the socket reports what the caller actually
+  # heard. Talqing does not read that report yet — LiveKit's TTS interface has
+  # nowhere to put it — so today this is a voice roster and a prosody model,
+  # and the interruption handling is the same as every other TTS here.
+  - provider: deepgram
+    channel: [voice, video]
+    model: flux          # logical/billing id; the actual voice is the Deepgram model string
+    label: "Deepgram Flux TTS"
+    # English only, so there is nothing to detect and nothing to pin: the voice
+    # id carries the `-en` and the agent's language never reaches the plugin.
+    default_language:
+    default_voice: flux-alexis-en
+    # Voices fetched live from Deepgram's v2 models API (GET /v2/models → the
+    # `flux-tts` entries) via /catalog/voices?provider=deepgram. A separate call
+    # from the Aura roster on purpose: /v1/models lists no Flux voice and
+    # /v2/models lists no Aura one, so the two endpoints are two halves of the
+    # same picker (services/catalog/voices/deepgram.py).
+    voices: []
+    pricing: { per_character: 0.000045 }         # $0.045 / 1k chars (Flux TTS PAYG)
+    # Both are the plugin's own defaults, stated rather than inherited so a
+    # change to either is made here beside the price.
+    extra: { encoding: linear16, sample_rate: 24000 }
+  - provider: deepgram
+    channel: [voice, video]
+    model: aura-2          # logical/billing id; the actual voice is the Deepgram model string
+    label: "Deepgram Aura-2"
+    default_language:           # language is encoded in the selected voice/model string
+    default_voice: aura-2-thalia-en   # Aura encodes the voice in the model id (build_tts: voice→model)
+    # Voices fetched live from Deepgram's models API (GET /v1/models → the aura-2
+    # `tts` entries) via /catalog/voices?provider=deepgram — so the picker shows
+    # accents, avatar images, and audio previews and stays current. Each voice id
+    # IS the Deepgram model string passed at synth time; all bill at the same
+    # per-character Aura-2 rate.
+    voices: []
+    pricing: { per_character: 0.00003 }          # $0.030 / 1k chars (Aura-2 PAYG)
+    extra: {}
+  - provider: deepgram
+    channel: [voice, video]
+    model: aura-1          # logical/billing id; the actual voice is the Deepgram model string
+    label: "Deepgram Aura-1"
+    default_language:
+    default_voice: aura-asteria-en
+    voices: []
+    pricing: { per_character: 0.000015 }         # legacy Aura placeholder; verify plan-specific pricing.
+    extra: {}
+
+# ============================================================================
+# Speech-to-speech models. One model replaces the whole stt/llm/tts cascade, so
+# an agent picks EITHER a realtime entry OR the three cascade entries — never
+# both. Voice and video alike: the Anam avatar renders from the audio the agent
+# publishes, and a realtime model publishes audio exactly as a TTS does.
+#
+# Two limitations apply to every entry here and are documented for users in
+# documentation/agents/realtime.mdx:
+#   - No scripted speech. LiveKit's session.say() needs a TTS, so the greeting,
+#     the `say` operation and the handoff line are delivered as "say this word
+#     for word" instructions the model may reword (compiler/speech.py).
+#   - No on_user_turn_completed. The model detects turns server-side, so LiveKit
+#     never runs that hook — agent validation rejects the combination.
+# ============================================================================
+realtime:
+  - provider: openai
+    channel: [voice, video]
+    model: gpt-realtime-2.1
+    label: "GPT Realtime 2.1 (OpenAI)"
+    vision: true
+    default_language:           # empty => the transcription model auto-detects
+    languages: *openai_stt_languages
+    default_voice: marin        # OpenAI recommends marin/cedar for best quality
+    supports_speed: true
+    speed_min: 0.5
+    speed_max: 2.0
+    # OpenAI ships no list-voices API; this is the published realtime enum
+    # (a subset of the TTS roster — fable/nova/onyx are not realtime voices).
+    voices: &openai_realtime_voices
+      - { id: alloy, name: Alloy, gender: female }
+      - { id: ash, name: Ash, gender: male }
+      - { id: ballad, name: Ballad, gender: male }
+      - { id: coral, name: Coral, gender: female }
+      - { id: echo, name: Echo, gender: male }
+      - { id: sage, name: Sage, gender: female }
+      - { id: shimmer, name: Shimmer, gender: female }
+      - { id: verse, name: Verse, gender: male }
+      - { id: marin, name: Marin, gender: female }
+      - { id: cedar, name: Cedar, gender: male }
+    # Standard tier at short context; long context bills at 2x. Audio input is
+    # 8x text input and audio output 2.7x text output — the modality split is
+    # why realtime needs its own pricing block.
+    pricing:
+      text_input_per_1m: 4.00
+      cached_text_input_per_1m: 0.40
+      audio_input_per_1m: 32.00
+      cached_audio_input_per_1m: 0.40
+      text_output_per_1m: 24.00
+      audio_output_per_1m: 64.00
+    # OpenAI emits no user transcript unless a transcription model is named, and
+    # Talqing stores every conversation item — so this is not optional. The
+    # cheapest one OpenAI's realtime session accepts ($0.003/min); OpenAI bills
+    # it separately from the audio tokens above and LiveKit reports no quantity
+    # for it, so that cost is passthrough we cannot meter (documented).
+    extra: { transcription_model: gpt-4o-mini-transcribe }
+  - provider: openai
+    channel: [voice, video]
+    model: gpt-realtime-2.1-mini
+    label: "GPT Realtime 2.1 mini (OpenAI)"
+    vision: true
+    default_language:
+    languages: *openai_stt_languages
+    default_voice: marin
+    supports_speed: true
+    speed_min: 0.5
+    speed_max: 2.0
+    voices: *openai_realtime_voices
+    pricing:
+      text_input_per_1m: 0.60
+      cached_text_input_per_1m: 0.06
+      audio_input_per_1m: 10.00
+      cached_audio_input_per_1m: 0.30
+      text_output_per_1m: 2.40
+      audio_output_per_1m: 20.00
+    extra: { transcription_model: gpt-4o-mini-transcribe }
+  # OpenAI's GPT-Live, which is NOT a realtime model with a new name: it is a
+  # separate service on `/v1/live/sessions` (the model page marks `v1/realtime`
+  # "Not supported"), spoken by its own plugin class, `openai.realtime.
+  # GPTLiveModel`. `api: live` is what tells compiler/factories.py to build that
+  # class instead of the realtime one.
+  #
+  # It is full duplex — it listens and speaks at once — and it is billed by the
+  # SECOND of session, $0.05/min flat, with no audio-token rate at all. On the
+  # 45-second call the estimator models, that is a different shape of bill from
+  # gpt-realtime-2.1 above rather than simply a cheaper one: nothing the caller
+  # says or the model says changes it.
+  #
+  # TWO THINGS TO KNOW BEFORE PUTTING AN AGENT ON IT.
+  #
+  # 1. It cannot be handed off from. The model refuses new instructions once its
+  #    session is open ("gpt-live voice instructions are immutable after session
+  #    start"), and a handoff is exactly that — `AgentSession.update_agent`
+  #    hands the target's prompt to the live session. `supports_instruction_update:
+  #    false` is what that costs, and agent validation refuses to publish an
+  #    agent that has both this model and a handoff destination, rather than
+  #    letting the call raise mid-conversation.
+  #
+  # 2. Its reasoning and its tools run on a SECOND model. GPT-Live delegates
+  #    both to a backend Responses model, billed separately at that model's own
+  #    per-token rates — so the real cost of a call is $0.05/min plus whatever
+  #    `backend_model` below spends. LiveKit reports that spend under the backend
+  #    model's own name, so it prices off that model's `llm:` entry above and
+  #    nothing here has to restate its rates. `gpt-5.6-luna` is OpenAI's own
+  #    default for the slot; it is a catalog
+  #    decision for the same reason `transcription_model` is one on the two
+  #    entries above — which model runs is a pricing decision, and the agent
+  #    editor has no control for it.
+  - provider: openai
+    channel: [voice, video]
+    api: live
+    model: gpt-live-1
+    label: "GPT-Live 1 (OpenAI)"
+    # OpenAI's model page lists image and video under "Unsupported modalities",
+    # and unlike every other entry here this is the vendor's word rather than our
+    # probe. `false` is the safe direction either way: the attach control stays
+    # hidden, which is what an unprobed model should get.
+    vision: false
+    # See above: a handoff would raise on this model mid-call.
+    supports_instruction_update: false
+    # The plugin exposes no language knob and no speed knob; steer the language
+    # from the agent prompt, as on the grok-voice entries below.
+    default_language:
+    default_voice: marin
+    supports_speed: false
+    # GPT-Live's own six, which are NOT the realtime roster above: no alloy, ash,
+    # coral, echo, sage, shimmer or verse, and five names that appear nowhere
+    # else in this file.
+    voices:
+      - { id: aster, name: Aster }
+      - { id: beacon, name: Beacon }
+      - { id: cinder, name: Cinder }
+      - { id: marin, name: Marin }
+      - { id: stone, name: Stone }
+      - { id: vesper, name: Vesper }
+    # Billed per second of session and by nothing else. The zero token rates are
+    # real rather than missing, for the same reason as the grok-voice entries
+    # below: LiveKit reports this model's usage with every token count at 0, and
+    # an unset rate would quarantine the session the moment one arrived.
+    pricing:
+      per_session_minute: 0.05
+      text_input_per_1m: 0.00
+      cached_text_input_per_1m: 0.00
+      audio_input_per_1m: 0.00
+      cached_audio_input_per_1m: 0.00
+      text_output_per_1m: 0.00
+      audio_output_per_1m: 0.00
+    # No `transcription_model`: unlike the realtime entries above, GPT-Live
+    # transcribes both sides itself and needs nothing named.
+    extra: { backend_model: gpt-5.6-luna }
+  # Google's current Live model, and the first one since gemini-2.5 that our
+  # pipeline can actually use — see the note on gemini-3.1-flash-live-preview
+  # below for what broke there. PROBED 2026-09-22 against exactly that failure:
+  # two consecutive `send_client_content` turns both produced audio (11 and 13
+  # chunks), which is the greeting-then-handoff shape 3.1 could not do.
+  #
+  # Also probed: the same 30 prebuilt voices answer (spot-checked Puck, Zephyr,
+  # Sulafat and Charon), a pinned `language_code` is accepted, and the model read
+  # "4731" off an image sent on the live socket.
+  #
+  # `gemini-3.8-live-extended-thinking` is deliberately absent: it refuses a
+  # session that does not name a thinking level ("Thinking level must be
+  # specified for this model", measured) and the LiveKit plugin sends none. It is
+  # the wrong trade for a voice call in any case — thinking is silence.
+  - provider: gemini
+    channel: [voice, video]
+    model: gemini-3.8-live
+    label: "Gemini 3.8 Live (Google)"
+    vision: true
+    # Native-audio Gemini code-switches on its own; a pinned language_code only
+    # helps when the caller's language is known up front.
+    default_language:
+    languages: *broad_stt_languages
+    default_voice: Puck
+    # The Live API has no speed control; prosody comes from the model.
+    supports_speed: false
+    voices: &gemini_live_voices
+      - { id: Zephyr, name: Zephyr, description: Bright }
+      - { id: Puck, name: Puck, description: Upbeat }
+      - { id: Charon, name: Charon, description: Informative }
+      - { id: Kore, name: Kore, description: Firm }
+      - { id: Fenrir, name: Fenrir, description: Excitable }
+      - { id: Leda, name: Leda, description: Youthful }
+      - { id: Orus, name: Orus, description: Firm }
+      - { id: Aoede, name: Aoede, description: Breezy }
+      - { id: Callirrhoe, name: Callirrhoe, description: Easy-going }
+      - { id: Autonoe, name: Autonoe, description: Bright }
+      - { id: Enceladus, name: Enceladus, description: Breathy }
+      - { id: Iapetus, name: Iapetus, description: Clear }
+      - { id: Umbriel, name: Umbriel, description: Easy-going }
+      - { id: Algieba, name: Algieba, description: Smooth }
+      - { id: Despina, name: Despina, description: Smooth }
+      - { id: Erinome, name: Erinome, description: Clear }
+      - { id: Algenib, name: Algenib, description: Gravelly }
+      - { id: Rasalgethi, name: Rasalgethi, description: Informative }
+      - { id: Laomedeia, name: Laomedeia, description: Upbeat }
+      - { id: Achernar, name: Achernar, description: Soft }
+      - { id: Alnilam, name: Alnilam, description: Firm }
+      - { id: Schedar, name: Schedar, description: Even }
+      - { id: Gacrux, name: Gacrux, description: Mature }
+      - { id: Pulcherrima, name: Pulcherrima, description: Forward }
+      - { id: Achird, name: Achird, description: Friendly }
+      - { id: Zubenelgenubi, name: Zubenelgenubi, description: Casual }
+      - { id: Vindemiatrix, name: Vindemiatrix, description: Gentle }
+      - { id: Sadachbia, name: Sadachbia, description: Lively }
+      - { id: Sadaltager, name: Sadaltager, description: Knowledgeable }
+      - { id: Sulafat, name: Sulafat, description: Warm }
+    # Paid tier. Google publishes the audio rates both per-token and per-minute
+    # ($3.00/1M ↔ $0.005/min in, $12.00/1M ↔ $0.018/min out — unchanged from the
+    # 2.5 entry below); the text rates are this model's own and are higher.
+    # There is no cached tier on the Live API, so the cached rates stay unset.
+    pricing:
+      text_input_per_1m: 0.75
+      audio_input_per_1m: 3.00
+      text_output_per_1m: 4.50
+      audio_output_per_1m: 12.00
+    # Gemini transcribes both directions inside the Live session at no extra
+    # charge, so there is no separate transcription model to name.
+    extra: {}
+  # gemini-3.1-flash-live-preview is deliberately absent. It rejects
+  # send_client_content after the first model turn, which breaks generate_reply,
+  # update_instructions and update_chat_ctx — i.e. both the greeting (delivered
+  # via generate_reply on this pipeline) and every handoff. Revisit when Google
+  # lifts the restriction.
+  - provider: gemini
+    channel: [voice, video]
+    model: gemini-2.5-flash-native-audio-preview-12-2025
+    label: "Gemini 2.5 Flash Native Audio (Live)"
+    # Reads an image sent on the live socket. The model rejects the TEXT
+    # modality outright, which is irrelevant here — the runtime uses audio.
+    vision: true
+    # Native-audio Gemini code-switches on its own; a pinned language_code only
+    # helps when the caller's language is known up front.
+    default_language:
+    languages: *broad_stt_languages
+    default_voice: Puck
+    # The Live API has no speed control; prosody comes from the model.
+    supports_speed: false
+    voices: *gemini_live_voices
+    # Paid tier. Gemini publishes the same audio rates per-token and per-minute
+    # ($3.00/1M ↔ $0.005/min in, $12.00/1M ↔ $0.018/min out); the token form is
+    # metered because that is what LiveKit reports. There is no cached tier on
+    # the Live API, so the cached rates stay unset — no realtime cached tokens
+    # are reported for this model, and pricing raises if any ever appear.
+    pricing:
+      text_input_per_1m: 0.50
+      audio_input_per_1m: 3.00
+      text_output_per_1m: 2.00
+      audio_output_per_1m: 12.00
+    # Gemini transcribes both directions inside the Live session at no extra
+    # charge, so unlike OpenAI there is no separate transcription model to name.
+    extra: {}
+  - provider: xai
+    channel: [voice, video]
+    model: grok-voice-think-fast-2.0
+    label: "Grok Voice Think Fast 2.0 (xAI)"
+    # NOT a missing probe. xAI's realtime API accepts an image without any
+    # error, echoes the item back with the image part removed, and then
+    # answers confidently about a photo it never saw — for a red circle
+    # marked 47 it said "blue, circle, 8". A wrong answer with no signal is
+    # worse than an error, and is why this is a flag rather than optimism.
+    # xAI's non-realtime models (grok-4.5, grok-4.3) read images perfectly.
+    vision: false
+    # The plugin exposes no language or speed knob for Grok Voice; steer the
+    # language from the agent prompt instead.
+    default_language:
+    default_voice: ara
+    supports_speed: false
+    # Voices fetched live from xAI (GET /catalog/voices?provider=xai) — the
+    # speech-to-speech roster is the same one the xAI TTS entry uses.
+    voices: []
+    # xAI bills speech-to-speech by the MINUTE of audio, not by token, so the
+    # token rates are a real 0.00 rather than a missing rate — leaving them
+    # unset would quarantine every session the moment xAI reports a token count.
+    # $0.08/min ($4.80/hr), docs.x.ai/developers/pricing, checked 2026-08-02.
+    #
+    # Not metered: xAI also charges $0.004 per client `conversation.item.create`
+    # text event (tool results and audio items excluded). LiveKit does not count
+    # those events, and a handful per call is worth a couple of cents — inventing
+    # a proxy quantity would report a number we cannot stand behind.
+    pricing: &xai_realtime_zero_token_rates
+      per_session_minute: 0.08
+      text_input_per_1m: 0.00
+      cached_text_input_per_1m: 0.00
+      audio_input_per_1m: 0.00
+      cached_audio_input_per_1m: 0.00
+      text_output_per_1m: 0.00
+      audio_output_per_1m: 0.00
+    extra: {}
+  - provider: xai
+    channel: [voice, video]
+    model: grok-voice-think-fast-1.0
+    label: "Grok Voice Think Fast 1.0 (xAI)"
+    # NOT a missing probe. xAI's realtime API accepts an image without any
+    # error, echoes the item back with the image part removed, and then
+    # answers confidently about a photo it never saw — for a red circle
+    # marked 47 it said "blue, circle, 8". A wrong answer with no signal is
+    # worse than an error, and is why this is a flag rather than optimism.
+    # xAI's non-realtime models (grok-4.5, grok-4.3) read images perfectly.
+    vision: false
+    default_language:
+    default_voice: ara
+    supports_speed: false
+    voices: []
+    pricing:
+      <<: *xai_realtime_zero_token_rates
+      per_session_minute: 0.05         # $3.00/hr
+    extra: {}
+
+# Anam.ai avatar rendering layer. Pricing is per provider
+# (not per Cara generation): one catalog SKU anam/anam. Cara versions
+# (cara-3 / cara-4 / …) and render styles are live gallery filters from
+# GET /catalog/avatars (Anam activeVersion / renderStyle) — not billable models.
+# avatar_usage writes the catalog model (anam). Runtime does not pass
+# avatarModel to Anam (server default = the face's activeVersion).
+# Wall-clock seconds (idle included) are priced per minute, separately from
+# whatever produces the agent's audio.
+avatar:
+  - provider: anam
+    channel: [video]
+    model: anam
+    label: "Anam"
+    pricing: { per_minute: 0.16 }
+    extra: {}
+
+# Speech enhancement on the CALLER's inbound audio, applied before the speech-to-
+# text model and the VAD ever see it — so a cleaner signal reaches both, and the
+# recording captures what the agent actually heard. Off unless an agent asks for
+# it. No pricing block on purpose: this is BYOK, so ai-coustics bills the tenant
+# directly and nothing here reaches metering or the $/min estimate. Krisp is not
+# offered.
+#
+# ORDER MATTERS: the editor falls back to the first entry when an agent names a
+# model the catalog no longer has, so the cheapest model leads.
+#
+# Every `description` must be traceable to ai-coustics' own docs — "less accurate"
+# and "reach for it only if S leaves noise behind" were both ours, and both put
+# words in the vendor's mouth.
+#
+# `EnhancerModel` is opaque about the model file behind it. The bundled core
+# resolves VF_S -> quail-vf-2.1-s-16khz, VF_L -> quail-vf-2.1-l-16khz, QUAIL_L ->
+# quail-l-16khz — all current, none deprecated (checked 2026-08-19).
+noise_cancellation:
+  - provider: aicoustics
+    channel: [voice, video]
+    model: quail_vf_s
+    label: "Quail Voice Focus S"
+    description: "Isolates the one person talking to the agent, suppressing other voices, echo and background noise."
+    extra: {}
+  - provider: aicoustics
+    channel: [voice, video]
+    model: quail_vf_l
+    label: "Quail Voice Focus L"
+    description: "The larger Voice Focus model — same job, significantly more CPU, no documented accuracy gain."
+    extra: {}
+  - provider: aicoustics
+    channel: [voice, video]
+    model: quail_l
+    label: "Quail L"
+    description: "Keeps every voice and removes only noise — a speakerphone, a room, a distant speaker."
+    extra: {}
+
+# The CoPilots' model. `reasoning_effort` is high because they edit the
+# tenant's configuration and are worth thinking time, and nobody is waiting on a
+# voice turn.
+#
+# Do NOT give this model a `temperature` in its llm entry above, the way grok-4.3
+# has one: the luna models accept temperature at effort "none" but 400 on it at
+# any thinking effort ("Only the default (1) value is supported", probed
+# 2026-08-07 on gpt-5.6-luna), and this
+# block asks for "high" — so a catalog temperature would fail every CoPilot turn
+# while leaving ordinary agents on the same model working.
+#
+# Back on gpt-5.6-luna since 2026-10-01, after a week on gpt-6-luna: that model
+# left the catalog (see the note beside gpt-6-sol), and the CoPilot runs on a
+# catalog entry like any agent.
+copilot: { provider: openai, model: gpt-5.6-luna, reasoning_effort: high }
+
+# The platform fee. Under BYOK this is the only money Talqing earns from a run —
+# the provider cost beside it is the tenant's own spend on their own key.
+#
+# A call is billed by the minute. A chat is billed per answered message: it has
+# no length worth measuring, since it stays open until somebody ends it.
+platform_fee_per_minute:
+  voice: 0.0035   # ₹0.35/min
+  video: 0.01     # ₹1/min
+platform_fee_per_message:
+  text: 0.0001
+
+# The rate the landing page's ₹ figures are derived from. The platform bills in
+# USD; this exists so the ₹ we advertise and the $ we charge cannot drift apart.
+# NOT a live FX rate, and never what a buyer is charged — Dodo converts at the
+# real rate at checkout, which is why nothing post-login quotes ₹.
+inr_per_usd: 100
+
+# There is deliberately no post-call analysis section here. No default model:
+# analysis runs on the agent's own LLM unless the agent names another, so it
+# never demands a provider key the agent did not already need. And no $/min
+# figure: analysis bills the real tokens of one call made after the call ends,
+# which is not a per-minute rate and so has nothing to contribute to the
+# editor's estimate.
+
+# Usage assumptions for the dashboard's client-side $/min estimator. Provider
+# prices still come from the catalog entries above; these quantities turn
+# token/character-priced services into an approximate per-minute display.
+cost_estimate_usage_per_minute:
+  llm_input_tokens: 800
+  llm_cached_input_tokens: 0
+  llm_output_tokens: 250
+  tts_characters: 900
+  tts_input_tokens: 225
+  tts_output_tokens: 1500
+  # A streaming STT bills the open socket, so it charges all 60 seconds. A batch
+  # STT only ever sees the utterances the StreamAdapter submits, so it bills the
+  # caller's share of the conversation — assume the caller speaks a third of it.
+  stt_streaming_audio_seconds: 60
+  stt_batch_audio_seconds: 20
+  # Speech-to-speech audio-token rates per minute. Gemini is the only vendor
+  # publishing the same audio stream both per-token and per-minute, so its two
+  # forms give the conversion: $3.00/1M ↔ $0.005/min ⇒ ~1667 tokens per minute
+  # of audio in, $12.00/1M ↔ $0.018/min ⇒ ~1500 per minute of audio out. The
+  # model hears the whole minute but speaks under half of it, so input takes the
+  # full 1667 and output about 45% of 1500. Text covers the prompt and tool
+  # traffic; there is no cached tier on any realtime model offered today.
+  realtime_audio_input_tokens: 1667
+  realtime_cached_audio_input_tokens: 0
+  realtime_text_input_tokens: 800
+  realtime_audio_output_tokens: 675
+  realtime_text_output_tokens: 250
+  # Screen share, when the agent watches one: the single newest frame is added
+  # to every user turn and to nothing else. Measured, not assumed — a 1280px
+  # frame at LiveKit's JPEG quality is 1118 input tokens — times the ~2.5 user
+  # turns a spoken minute holds. Entirely uncached: the frame is in the request
+  # tail every turn and never in stored history, which is what keeps a
+  # sixty-minute call costing the same per turn as the first one.
+  screenshare_input_tokens: 2795
+
+# The same, for a text agent: what one answered message costs. A chat has no
+# minutes, so the editor quotes it per message.
+cost_estimate_usage_per_text_message:
+  llm_input_tokens: 800
+  llm_cached_input_tokens: 0
+  llm_output_tokens: 250

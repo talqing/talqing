@@ -1,0 +1,294 @@
+---
+title: "Agent tasks"
+description: "Attach a task to an agent and it becomes a tool: the task takes the conversation, does one job, and hands back a typed result."
+---
+
+An [agent task](/tasks/overview) is normally something you run on its own — inputs in,
+a typed value back. `config.tasks` is the other way to reach one: the agent gets a tool,
+and calling it hands the conversation to the task for as long as the job takes.
+
+The task talks to the caller in the agent's own voice, on the same call. When it calls
+`submit_result`, its typed output comes back as the tool's result and the agent picks up
+where it left off — knowing both what was collected and what was said to collect it.
+
+```json
+{
+  "tasks": [
+    {
+      "name": "collect_shipping_address",
+      "task_id": "0b7d4c92-3e51-4a86-9f2d-71c0a4e58b13",
+      "description": "Handoff to an agent task responsible for taking the caller's shipping address and confirming it back to them, once they've placed an order. Skip this if you already have their address.",
+      "message": "Sure — let me take that down."
+    }
+  ]
+}
+```
+
+Reach for a task when a stretch of the call is a bounded job with an answer: taking an
+address, qualifying a lead, walking someone through a form. Reach for a
+[handoff](/teams/handoffs) when the caller should belong to someone else from then on —
+a handoff does not come back.
+
+## The fields
+
+| Field | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `name` | string, required | — | The function name the model sees. Yours, not the task's — renaming the task never changes the tool name your prompt was written against. Letters, digits and underscores. |
+| `task_id` | uuid or null | `null` | A task in this workspace. It must be **published**. Mutually exclusive with `task`. |
+| `task_version` | integer or null | `null` | Which version this attachment pinned. Null in a draft; set when you publish the agent. |
+| `task` | object or null | `null` | A whole task definition, sent inline. On the agent endpoints it is created and published as a real task; on the call endpoints it runs for that call and is stored nowhere. |
+| `description` | string, required | — | What the model decides on. Non-empty. Start it with "Handoff to an agent task responsible for …", then say when to enter it and when to skip it. |
+| `message` | string or null | `null` | Said while the task loads. |
+
+There is no context setting. A task always starts with the conversation so far, minus
+tool calls — see [what crosses the boundary](#what-crosses-the-boundary).
+
+## What the task inherits
+
+A task declares no channel and no media of its own, so it runs on the session it was
+entered from: the same speech-to-text, the same voice, the same turn handling, the same
+avatar. Nothing is torn down and rebuilt on the way in, and the caller hears one voice
+throughout.
+
+It keeps two things of its own:
+
+- **Its model.** An LLM is stateless per request, so a task can run a cheaper model for a
+  simple collection or a stronger one for a hard extraction at no cost to the pipeline.
+- **Its timezone**, which is what `{{system_vars.now}}` resolves against.
+
+<Note>
+**On a [realtime](/agents/realtime) agent the task's own model is ignored** and it runs the
+call's speech-to-speech model instead. That model is the ears and the mouth as well as the
+brain, and a task declares no speech-to-text and no text-to-speech to pair a text model
+with — so there is nothing coherent to swap in.
+</Note>
+
+Because it inherits everything else, **one task fits every agent**. The same task can be
+entered by a voice agent, by a video agent, by a chat agent, and run headlessly by an
+email batch — no channel to match and nothing to refuse.
+
+## Variables: what the model is asked for
+
+This is the part worth reading twice.
+
+A task's `vars` are the schema of the tool the agent calls it with — **minus every
+variable the call can answer for itself**. Those are filled in automatically and are never
+shown to the model.
+
+"Can answer for itself" is every variable the **calling agent declares**, plus every one
+the session was started with. A variable the agent declares but the caller left blank
+still counts: it resolves to empty for the agent, so it resolves to empty for the task,
+and asking the model to fill that gap is asking it to invent the one thing nobody on the
+call knows.
+
+Take an agent that declares `customer_id` and `name`, on a call started with values for
+both, and a task that declares `customer_id`, `name` and `city`:
+
+```json
+{
+  "name": "collect_shipping_address",
+  "description": "Handoff to an agent task responsible for taking the caller's shipping address and confirming it back to them, once they've placed an order. Skip this if you already have their address.",
+  "parameters": {
+    "type": "object",
+    "required": [],
+    "properties": { "city": { "type": "string", "description": "…" } },
+    "additionalProperties": false
+  }
+}
+```
+
+One property. There is no `customer_id` for the model to invent, which is the whole
+point: an optional property is an invitation to fill it in, and a model filling in a tool
+call will sometimes emit `u_12345`. Removing the property removes the failure.
+
+<Warning>
+This is not hypothetical. On a call carrying `customer_id` and nothing else, a task that
+also declared `name` was shown `name` as an optional argument — and the model filled it
+with the customer id it could see in the prompt. Declaring both on the agent is what stops
+that, whether or not the caller supplies either.
+</Warning>
+
+What resolves inside the task, in order:
+
+1. The task's own declared `default`.
+2. Overridden by the bag the **calling agent** reads as `{{vars.*}}` — its declared
+   defaults with the call's own values merged over them.
+3. Overridden by whatever the model supplied — and only for the properties it was
+   actually shown. An argument for anything else is dropped rather than used.
+
+An empty string counts as supplied, exactly as it would for an agent: blanking a default
+is a decision, not a request for the default.
+
+A `required` task variable is only enforced against what the model was shown. One the
+calling agent declares is that agent's own door rule, already settled when the session
+started — inside the call it resolves to empty like any other variable rather than
+failing the tool.
+
+<Note>
+**Declare a variable only for what the caller or the model must supply.** Anything the
+task can read for itself — `{{userdata.last_order_id}}`, `{{vars.region}}`,
+`{{system_vars.date}}` — it should read in its prompt instead of declaring. Get this
+backwards and a value that was sitting in `userdata` becomes a required argument the model
+has to invent. Publishing the agent warns on exactly that shape.
+</Note>
+
+The cost is that a task cannot be handed a *different* value for a variable the call
+already supplies. That is mostly a naming question: a task that needs both the claimed
+name and the name on file declares two variables, not one.
+
+## What crosses the boundary
+
+**Messages always cross; tool calls never do, in either direction.**
+
+On the way in, the task gets the conversation so far — every message, no tool mechanics,
+and not the calling agent's system prompt. It has its own, and it speaks first: its opening
+turn is generated from that prompt and the conversation, with nothing added by the
+platform. So say in the prompt how it should open — "Start by asking which day suits
+them" — and that it should not greet or introduce itself again.
+
+On the way back, everything the task and the caller said merges into the calling agent's
+context, and the typed result arrives as the tool's return value. So the agent knows both
+what was collected and how the caller said it. It does not re-greet — its opening line
+already happened.
+
+A task that did not know what was just said would ask the caller to repeat it, which is
+the worst thing a voice agent does. That is why there is no policy to choose here, unlike
+a [handoff](/teams/context-policies), which is permanent.
+
+## What a task's tools can reach
+
+A task running on a phone call **is** on that phone call. Its tools get the same runtime
+the calling agent's do:
+
+| Operation inside a task's tool | What happens |
+| --- | --- |
+| `say`, `generate_reply`, `set_variable`, `http`, `code` | Exactly as on the calling agent. `set_variable` writes the call's shared `userdata`. |
+| `frontend_rpc` | Works — the web client is the call's. |
+| `end_call`, `transfer` | **Work, and end the call.** The task's result never comes back, because there is nothing to come back to. |
+| `handoff` | **Refused at publish.** A task returns to the agent that entered it, so handing the conversation to a third agent would strand that return. |
+
+<Warning>
+**While the task holds the floor, the calling agent's own tools are not available.** The
+model in the room is the task's, with the task's tools. If your agent needs to look
+something up mid-task, give the tool to the task.
+</Warning>
+
+## `userdata` is shared
+
+The task shares the call's `userdata` object. Its prompt resolves `{{userdata.*}}` against
+the live bag, and its tools can publish into it — which persists to the contact and
+therefore into the next conversation with the same person. That is the same contract a
+handoff target has, and it is why a task needs no binding table: a task that wants a value
+an earlier tool published reads `{{userdata.last_order_id}}` in its own prompt.
+
+## Aborting
+
+| What happens | How it settles |
+| --- | --- |
+| The caller changes their mind or asks for something else | The task's model calls `finish_without_result(reason)`. The agent's tool call fails with that reason, the agent resumes, and it already has the sub-conversation in context — so nobody repeats themselves. |
+| The task runs too long | `timeout_seconds` on the task. It is interrupted mid-sentence and the agent's tool call fails. This is the **only** bound on how long a task may hold a caller — keep it short on a voice agent. |
+| The call ends | The task settles with an error and the close path takes over. |
+| The agent wants out | It does not get to. It is paused for the duration and has no turn in which to decide anything. |
+
+`finish_without_result` is injected only when a task is entered from a conversation. A
+headless run has no caller to change their mind.
+
+### When the task gives up too easily
+
+Nothing in the prompt tells the model about `finish_without_result` — nothing is added to a
+task's prompt at all. The tool's **description** is the only thing that does, which makes it
+the one thing to change when a task abandons jobs it should have finished. Edit
+`finish_without_result_description` on the task (Inputs and output → Finishing, in the
+editor):
+
+```json
+{ "finish_without_result_description": "Call this only if the caller explicitly says to stop or asks for something else. Being unable to verify an address is not a reason — submit what you have with null for the rest." }
+```
+
+It is required and non-empty. A new task starts with `"Finish without result only if you have failed to achieve the goal of this task and would like to give up rather than continue."` —
+giving up is for a goal the task has failed at, not for the first hurdle. Narrow it further
+for your task: a value it could not work out can be a *result* instead (turn `required` off
+on that field so `null` is accepted), and the caller no longer wanting the job done is
+usually the clearest reason to give up.
+
+<Warning>
+Writing a prompt that argues with it does not work, and this is worth knowing because it is
+the first thing people try. The prompt is only your text — but the description sits in the
+tool schema the model reads at the moment it decides. `DO NOT FINISH WITHOUT RESULT` in the
+prompt loses to a description that says giving up is an option. Change the description.
+</Warning>
+
+<Note>
+A deliberate non-feature: there is no way to remove `finish_without_result` from an entered
+task. Without it a caller who changes their mind is held until `timeout_seconds`, or gets a
+result full of nulls the calling agent reads as a success — neither is the truth about what
+happened. Narrow the description instead.
+</Note>
+
+## Steps, and what bounds them
+
+`max_tool_steps` — three on voice and video, twenty-five on text — is per **reply**, not
+per conversation. Each user turn starts a fresh budget, so a task can go back and forth
+with the caller for as many turns as it takes. What the ceiling constrains is a task that
+chains several tool calls inside a single reply.
+
+The task's own `max_steps` applies to a headless run only. Entered from a call it runs on
+the calling session's budget, exactly as a hand-written LiveKit `AgentTask` does.
+
+**Two task tools called in one assistant message run one after the other**, not
+concurrently.
+
+## In the transcript and on the bill
+
+The call's transcript brackets the sub-conversation with two rows — *Started
+&lt;name&gt;* and *Back to &lt;agent&gt;* — and the tool card carries the arguments that
+went in and the payload that came out. The turns in between are the call's turns.
+
+**There is no separate run record and no separate bill.** The task runs inside the call's
+session, so its tokens, its speech and its transcription are the call's and are priced by
+the call. `task_runs` stays what it is: standalone runs only.
+
+<Warning>
+**A task never touches the recorder.** It inherits the call's recording, so if the call is
+being recorded, everything said inside the task is on the file — and it is in the
+transcript either way. Identity lookups, eligibility checks, address collection and
+booking flows are fine. **Do not build card capture on this.**
+</Warning>
+
+## Text agents: what does not survive
+
+A task that is still open does not survive a pause in the chat. If the person goes quiet
+for a minute or so mid-task, the task, its unfinished result and the agent's pending tool
+call are dropped, and the agent that started the task answers the next message.
+
+Handoffs do not have this limit — a handoff lasts for the rest of the chat. While the
+person keeps replying, a task continues across messages exactly as you would expect.
+
+## Attaching one
+
+<Steps>
+<Step title="Publish the task">
+Only published tasks can be attached. The version live at the moment you publish the agent
+is the one that agent pins.
+</Step>
+<Step title="Attach it under Tasks">
+In the agent editor, between Tools and Handoffs. Give it a tool name, pick the task, and
+write what the model should decide on.
+</Step>
+<Step title="Check the Inputs table">
+Each of the task's variables shows either **from the call** or **from the model**. Anything
+marked *from the model* is an argument the model writes into the tool call — make sure that
+is what you want.
+</Step>
+<Step title="Publish the agent">
+Publishing pins the task version, so republishing the task does not change what the agent
+does until you publish it again.
+</Step>
+</Steps>
+
+Deleting a task an agent still attaches is refused, and the agents are named.
+
+## Nesting
+
+A task cannot attach tasks of its own. One level, deliberately: two levels of borrowed
+floor is a control flow nobody can reason about from a prompt.

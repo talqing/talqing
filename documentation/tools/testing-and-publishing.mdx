@@ -1,0 +1,340 @@
+---
+title: "Testing and publishing"
+description: "Validate a draft, run it for real, publish it as an immutable version, and why republishing does not change live calls."
+---
+
+A tool has the same two states as an agent: a **draft** you edit, and
+**published versions** that calls run. Three endpoints take you from one to the
+other, and it is worth using all three in order.
+
+| Step | Endpoint | What it costs |
+| --- | --- | --- |
+| Validate | `POST /v1/tools/{tool_id}/validate` | Nothing. No sockets are opened. |
+| Test run | `POST /v1/tools/{tool_id}/run` | **Real requests, real secrets, real money.** |
+| Publish | `POST /v1/tools/{tool_id}/publish` | Freezes an immutable version. |
+
+All three need the editor role; a viewer gets a `403`.
+
+## Validate
+
+Validation reads the draft and answers two questions: what would publish refuse,
+and what should you know anyway.
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/tools/2b7d1f08-4c9a-4e6b-8f21-0d5a3c7e9b44/validate \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const result = await talqing.tools.validate({ tool_id });
+```
+
+```python Python
+result = talqing.tools.validate(tool_id)
+```
+</CodeGroup>
+
+```json
+{
+  "errors": [
+    "tool 'check_order' / operations[0] / http: {{args.order_number}} is not a declared tool parameter",
+    "tool 'check_order' / operations[1] / say: reads tooldata.eta, which no operation before it in this tool publishes; publish it first, or read it from userdata if another tool sets it"
+  ],
+  "warnings": [
+    "tool 'check_order' / operations[2] / say: reads userdata.customer_name before this tool publishes it; ensure session userdata contains 'customer_name' before this tool is called"
+  ]
+}
+```
+
+**Errors block a publish. Warnings do not.** The split is not about severity, it
+is about what can be decided from the tool alone:
+
+- Reading `{{tooldata.x}}` that nothing earlier publishes is an **error** —
+  `tooldata` starts empty on every run, so that read can only ever resolve to
+  nothing.
+- Reading `{{userdata.x}}` that this tool does not publish is a **warning** — it
+  has to already be in session userdata, which means the API caller or an earlier
+  tool has to put it there. Only you know whether that happens.
+
+Validation also catches unknown argument and secret references, `publish_fields`
+whose path cannot be reached, handoff targets that are not published, and
+TypeScript that will not compile. What it never does is open a socket, which is
+why the next step exists.
+
+A tool with no operations cannot be validated into shape:
+`add at least one operation before publishing`.
+
+## Test run
+
+`POST /v1/tools/{tool_id}/run` runs the **draft** once, with arguments you
+supply, and reports every step.
+
+<Warning>
+A test run **executes for real**. HTTP operations call your endpoints, with your
+workspace's secrets. A tool that books a slot books a slot; a tool that charges a
+card charges a card. There is no dry-run mode and no sandbox.
+
+Only the operations that need a live conversation are simulated: `say`,
+`generate_reply`, `add_message`, `end_call`, `handoff`, `transfer` and
+`frontend_rpc`. Those report their resolved text or target instead of performing
+it — a test must never ring a stranger's phone.
+</Warning>
+
+Nothing is saved, no webhook fires, and the run is not metered.
+
+### What you send
+
+| Field | Default | What it seeds |
+| --- | --- | --- |
+| `arguments` | `{}` | The tool call's arguments. Checked against the tool's `json_schema` first, with the same validator a real model's call goes through. |
+| `userdata` | `{}` | The session bag the run starts from, so a tool that reads what an earlier tool wrote can be exercised in the state it will actually run in. |
+| `vars` | `{}` | The `{{vars.*}}` values. There is no agent behind a test run, so what you send is the whole bag rather than an override on declared defaults. |
+| `timezone` | `"UTC"` | What `{{system_vars.now}}`, `.date` and `.time` resolve against. On a real call this comes from the agent. |
+
+There is no call behind a test run, so the phone-call system variables —
+`human_phone_number`, `agent_phone_number`, `direction` — resolve empty.
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/tools/2b7d1f08-4c9a-4e6b-8f21-0d5a3c7e9b44/run \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "arguments": { "order_id": "4417029" },
+    "userdata": { "customer_name": "Priya" },
+    "vars": { "api_domain": "acme.example.com" },
+    "timezone": "Asia/Kolkata"
+  }'
+```
+
+```typescript TypeScript
+const run = await talqing.tools.run({
+  tool_id,
+  runToolRequest: {
+    arguments: { order_id: "4417029" },
+    userdata: { customer_name: "Priya" },
+    vars: { api_domain: "acme.example.com" },
+    timezone: "Asia/Kolkata",
+  },
+});
+```
+
+```python Python
+run = talqing.tools.run(
+    tool_id,
+    arguments={"order_id": "4417029"},
+    userdata={"customer_name": "Priya"},
+    vars={"api_domain": "acme.example.com"},
+    timezone="Asia/Kolkata",
+)
+```
+</CodeGroup>
+
+### What comes back
+
+| Field | What it is |
+| --- | --- |
+| `ok` | Whether the run finished without an unhandled failure. |
+| `duration_ms` | Wall clock for the whole run. |
+| `error`, `error_type` | The failure and whose problem it is. See below. |
+| `llm_response` | **The literal string the agent's model would have been handed.** `null` when the model is told nothing at all — a silent tool, a tree that ended the call, or a failed run. |
+| `responses` | The ordered operation outputs that made up that string. |
+| `tooldata` | The tool-local store as it stood when the run ended, even if the run failed halfway. |
+| `userdata` | The session bag after the run, including everything the tree wrote. |
+| `steps` | One entry per operation. See the trace below. |
+| `ended_call`, `handed_off` | Whether the tree reached an `end_call` or a `handoff`. |
+
+`llm_response` is the field worth reading first. It applies the real rule,
+including the [silence derived from the tree](/tools/speech-operations#silence-is-derived),
+so it tells you what the model would actually see rather than what the `silent`
+box says.
+
+The whole run is capped at **60 seconds**. A tree of ten HTTP operations at the
+default 20-second timeout would otherwise hold an API worker for two hundred.
+
+### Error types
+
+When a run fails, `error_type` names whose problem it is.
+
+| `error_type` | Dashboard label | What happened | Whose problem |
+| --- | --- | --- | --- |
+| `tool_config` | Tool configuration | The operation's own config was unusable — a bad URL, or a `publish_fields` path that is not in the response | Yours, in the tree |
+| `tool_auth` | Missing secret | The tree references a `{{secrets.NAME}}` the workspace does not have | Yours, in [secrets](/platform/secrets) |
+| `endpoint_error` | Your endpoint | Your server answered and the answer was unusable — a non-2xx status, or a body that is not JSON | Your API |
+| `endpoint_unreachable` | Endpoint unreachable | Your server could not be reached at all: DNS, connection refused, a network error | Your API or its network |
+| `timeout` | Timed out | An operation, or the whole run, ran out of time | Usually your API; sometimes a timeout set too low |
+| `code_error` | Code error | The TypeScript in a `code` operation threw | Yours, in the script |
+| `platform` | Talqing | Ours — the code-execution service could not be reached | Ours. Retry, then tell us |
+| `unknown` | Unknown | Nothing above matched | Read `error` and the trace |
+
+The classification is structural, not string matching: an HTTP step that
+recorded no request had a bad config, one with a request and no response never
+reached you, and one with a response means you answered.
+
+### Reading the trace
+
+Each entry in `steps` is one operation:
+
+```json
+{
+  "path": "2.else.1",
+  "kind": "http",
+  "status": "ok",
+  "duration_ms": 412,
+  "detail": { "request": { "…": "…" }, "response": { "status": 200, "body": { "…": "…" } } },
+  "published": [{ "store": "tooldata", "key": "status", "value": "shipped" }],
+  "error": null
+}
+```
+
+`path` locates the operation in the tree: the node's index, joined to its parent
+by `.then.` or `.else.`. So `2.else.1` is the second child of the else-branch of
+the third operation.
+
+`status` is `ok`, `failed` or `simulated`. `detail` is kind-specific — an `http`
+step carries the resolved request and the response, a `code` step carries its
+console output and returned value, an `if` step carries both resolved sides, the
+comparison and the branch it took, and a simulated step carries its resolved
+config. Secret values are redacted throughout.
+
+`published` is what that operation wrote into `tooldata` or `userdata`, which is
+usually the fastest way to find a path that was one level too deep.
+
+### In the dashboard
+
+The tool editor's test panel has three bands — **Arguments** (a field per
+declared parameter), **User Data** (the session bag to start from) and
+**Variables** (`{{vars.*}}`) — and a **Run tool** button. The clock runs on your
+browser's timezone, and the panel says which one it used.
+
+The result appears beneath, and the **flowchart beside it colours itself from the
+run**:
+
+| Mark | Meaning |
+| --- | --- |
+| Green dot | The operation ran and succeeded |
+| Red dot, red border | The operation failed |
+| Grey dot | Simulated — it needs a live conversation |
+| Dimmed card | Not reached: an untaken branch, or a step after the one that aborted |
+
+An `if` shows which branch the run took, so the coloured path through the chart
+is literally the path the run took through the tree.
+
+## Publishing
+
+`POST /v1/tools/{tool_id}/publish` validates the draft, freezes it as the next
+version number, and points the tool's `published_version` at it. Versions start
+at 1, are never reused, and are never rewritten.
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/tools/2b7d1f08-4c9a-4e6b-8f21-0d5a3c7e9b44/publish \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "changelog": "Handle the not-found case" }'
+```
+
+```typescript TypeScript
+const published = await talqing.tools.publish({
+  tool_id,
+  publishToolRequest: { changelog: "Handle the not-found case" },
+});
+```
+
+```python Python
+published = talqing.tools.publish(tool_id, changelog="Handle the not-found case")
+```
+</CodeGroup>
+
+```json
+{
+  "tool_id": "2b7d1f08-4c9a-4e6b-8f21-0d5a3c7e9b44",
+  "version": 4,
+  "published_at": "2026-08-30T11:02:19.418Z",
+  "warnings": []
+}
+```
+
+If validation fails, nothing is published and you get a `400` listing every
+error. Warnings come back on the successful response instead — they are things
+to know, not things to fix first.
+
+What is frozen is the whole definition: the name, description, `json_schema`,
+the three behaviour flags and the operation tree, plus two derived things. Any
+`code` operation's TypeScript is compiled at publish and the build output is
+frozen with it, and `silent` is stored as *your flag or the silence derived from
+the tree* — so a tool whose every operation is silent is published silent
+whatever the box said. Turn a non-silent operation on later and your own choice
+comes back; the derived value never writes itself into the draft.
+
+## Versions and rollback
+
+`GET /v1/tools/{tool_id}` lists the versions with their changelogs and publish
+times. `GET /v1/tools/{tool_id}/versions/{version}` returns one version's frozen
+definition in full — the same field shape as the draft, so you can diff a version
+against the draft or against another version without reshaping either.
+
+`POST /v1/tools/{tool_id}/versions/{version}/rollback` puts an earlier version
+back into production.
+
+<Warning>
+A rollback **replaces the current draft** with that version. Unpublished edits
+are lost. It creates no new version — the old number simply becomes live again.
+</Warning>
+
+The draft you get back is intent only: rolling back strips the compiled build
+output from any `code` operation, exactly as it strips pinned versions when an
+agent version is restored. Publishing is what adds the derived parts.
+
+## The pin rule, from the tool's side
+
+This is the one thing that surprises everyone once.
+
+<Steps>
+  <Step title="An unpublished tool cannot be attached">
+    Attaching a tool with no published version to an agent is refused:
+    `tool 'check_order' has no published version - publish it before attaching`.
+  </Step>
+  <Step title="Publishing an agent pins its tools">
+    The agent version records, for each attached tool and lifecycle hook, the
+    tool version that was live **at that moment**.
+  </Step>
+  <Step title="Republishing the tool changes nothing live">
+    Live calls keep running the pinned version. The agent has to be published
+    again for a new tool version to reach a caller.
+  </Step>
+</Steps>
+
+So the loop for fixing a tool a live agent uses is: edit, validate, run, publish
+the tool, **then publish the agent**. Skipping the last step is the most common
+reason a fix appears not to have worked.
+
+The rule is worth the surprise: without it, publishing a tool would silently
+change every agent that attaches it, including agents you were not editing and
+did not test.
+
+<Note>
+**Agent tasks never pin.** A task resolves each attached tool to its current
+published version on every run, so republishing a tool changes every task that
+uses it immediately, with nothing to republish. Defensible for a batch job and
+indefensible for a live call, which is exactly why the two differ. See
+[tools and MCPs](/tasks/tools-and-mcps).
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Agent versions" href="/agents/versions">
+    The other half of the pin rule, and version history in the dashboard.
+  </Card>
+  <Card title="ToolCoPilot" href="/tools/copilot">
+    Building and fixing a tree by describing it.
+  </Card>
+  <Card title="Templating and data" href="/tools/templating-and-data">
+    Why a `tooldata` read is an error and a `userdata` read is a warning.
+  </Card>
+  <Card title="Patterns" href="/tools/patterns">
+    Complete trees worth starting from.
+  </Card>
+</CardGroup>

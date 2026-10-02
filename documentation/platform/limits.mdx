@@ -1,0 +1,226 @@
+---
+title: "Limits"
+description: "Every enforced limit on the platform in one place — sizes, counts, timeouts and caps — plus the two that do not exist."
+---
+
+Every number on this page is enforced in code. Where a limit has both a default and a ceiling, both are given: the default is what you get if you say nothing, the ceiling is the highest value the platform will accept.
+
+## Agents
+
+| Limit | Value |
+| --- | --- |
+| Agent `name` | At least 1 character. **No maximum** |
+| `prompt`, `greeting` | **No length limit** |
+| Tools, MCP servers, handoff targets per agent | **No count limit** |
+| [FAQs](/agents/faqs) attached to one agent or task | 10 |
+| Members in an [agent team](/teams/agent-teams-on-a-call) | 10 |
+| Handoffs executed during one call | 25. Past that the agent cannot pass the caller on again |
+| [Analysis](/observability/call-analysis) fields | 25 |
+| Analysis field name | Lowercase, `^[a-z][a-z0-9_]{0,39}$` — 40 characters |
+| `handoffs[].recent_turns` | 1–10 |
+| `conversation.summary_limit` | At least 1. No maximum |
+| TTS `speed` | 0.5–2.0, default 1.0 |
+| ElevenLabs `stability`, `similarity_boost` | 0.0–1.0 |
+| Noise cancellation `enhancement_level` | 0.0–1.0, default 0.8 |
+| `min_silence_duration` | At least 0.25 s, default 0.5 s |
+
+There is no size limit on an agent config, or on a whole definition sent inline on a call request. A [call batch](/telephony/batch-calling) stores its plan on every call it places, so keep a batch's inline definitions small — attach an FAQ there by `faq_id`.
+
+## FAQs
+
+| Limit | Value |
+| --- | --- |
+| FAQ `name` | 1–80 characters, unique in the workspace (case-insensitive) |
+| `question` | 1–300 characters |
+| `answer` | 1–2,000 characters |
+| Entries per FAQ | 500 |
+| Entries per `POST /v1/faqs/{faq_id}/entries` | 1–500, all or nothing |
+| The same question twice in one FAQ | Refused (case-insensitive, surrounding spaces ignored) |
+| FAQs attached to one agent or task | 10 |
+
+See [FAQs](/agents/faqs).
+
+Builtin web-search tools carry their own option caps: xAI allows 5 domains and 20 X handles; OpenAI allows 100 allowed domains. See [reasoning and builtin tools](/agents/reasoning-and-builtin-tools).
+
+## Tools
+
+| Limit | Default | Maximum |
+| --- | --- | --- |
+| [`http`](/tools/http) operation `timeout` | 20 s | 120 s |
+| `http` response body read | — | 1 MB |
+| [`code`](/tools/code) operation `timeout` | 10 s | 30 s |
+| [`frontend_rpc`](/tools/frontend-rpc) `timeout` | 5 s | 60 s |
+| [`transfer`](/tools/transfer) `ringing_timeout` | 30 s | 5–120 s |
+| A [test run's](/tools/testing-and-publishing) whole wall-clock budget | — | 60 s |
+
+### Inside the code sandbox
+
+A [`code`](/tools/code) operation runs on an isolated service, not in the call worker.
+
+| Limit | Value |
+| --- | --- |
+| Memory | 128 MB |
+| Execution time | 5 s default, 30 s ceiling |
+| `console.log` output kept | 100 lines, each truncated at 2,000 characters |
+| Request payload into the sandbox | 2 MB |
+| A `fetch` from inside the sandbox | 1 MB response, 10 s timeout, **no redirects followed** |
+
+## Agent tasks
+
+| Limit | Default | Maximum |
+| --- | --- | --- |
+| `max_steps` | 25 | 50 |
+| `timeout_seconds` | 300 | 600 |
+| `output` fields | — | 25 (at least 1) |
+| `vars` (declared inputs) | — | 25 |
+| Trace steps stored and returned | — | 200 |
+| Any one trace field | — | 4,000 characters, then cut |
+| Output and input field names | — | Lowercase, 40 characters |
+
+See [task errors and limits](/tasks/errors-and-limits).
+
+## Calls
+
+These are platform limits. **None of them is configurable per workspace**; the call duration can only be lowered, per agent.
+
+| Limit | Value |
+| --- | --- |
+| Maximum call duration | **3 hours**, then the call is ended — on phone, web and media-stream calls alike. An agent can set a lower limit with [`max_duration_seconds`](/agents/silence-and-call-length) |
+| Ring timeout | 60 s — how long a callee's phone rings on an outbound call |
+| Media timeout | 120 s of dead audio before the leg is dropped |
+| Chat inactivity timeout | None. A chat stays open until the agent's `end_call` or `POST /v1/chats/{id}/end` |
+| Chat message wait | 120 s, then `POST /v1/chats/{id}/messages` returns `status: "running"`. A `stream: true` request has no cap |
+| Chat token lifetime | 1 hour |
+| Warm-transfer briefing | 90 s |
+| Client `userdata` RPC payload | 16 KB |
+| Post-call analysis | Skipped on a call with fewer than 2 user turns |
+
+The one ring window you *can* set is a [`transfer`](/tools/transfer) operation's `ringing_timeout`, 5–120 s.
+
+## Batches
+
+| Limit | Value |
+| --- | --- |
+| Recipients per request, [call batch](/telephony/batch-calling) | 10,000 — on create and on add-recipients alike |
+| Rows per [email batch](/email/creating-a-batch) | 5,000 |
+| Email sends per request | 50, by named recipient id. There is no send-everything endpoint |
+| `max_concurrency`, call batch | 1–10, **default 1** |
+| `draft_concurrency`, email batch | 1–10, **default 5** |
+| `max_attempts` | 1–5, default 1 |
+| `retry_after_minutes` | 5–1440, default 30 |
+| `send_gap_seconds` (email) | 1–3600, default 1 |
+| `send_daily_cap` (email) | a fixed limit, a ramp, or null; **default fixed 200** — per batch, per local day |
+| `send_daily_cap` (WhatsApp) | the same; **default fixed 250** |
+| `dial_gap_seconds` (call batch) | 0–3600, default 0 |
+| `dial_daily_cap` (call batch) | a fixed limit, a ramp, or null; **default null** — calls placed per local day, retries included |
+| Fixed daily limit | `limit` ≥ 1 |
+| Ramp | `start` ≥ 1, `end` > `start`, `step` ≥ 1, `interval_days` 1–30 sending days |
+| Batch `name` | 1–200 characters |
+| Email `from_name` | 200 characters |
+| `start_at` scheduling horizon | 90 days ahead |
+| Call ids per [analysis backfill](/observability/call-analysis) | 100 |
+
+## Images
+
+| Limit | Value |
+| --- | --- |
+| Images per message | 4 |
+| Size of one image | 10 MB decoded — **refused**, not resized |
+| Formats | JPEG, PNG, WebP. Decided from the decoded bytes, so a renamed GIF is still refused |
+| Images per conversation, lifetime | 100 |
+| Stored resolution | Downscaled to 1,568 px on the longest edge |
+| A presigned link to an image | Valid 1 hour |
+
+See [vision and images](/agents/vision-and-images).
+
+## Chats
+
+| Limit | Value |
+| --- | --- |
+| Message body | 100,000 characters |
+| `contact_key` you supply when starting a chat | 1–256 characters |
+| Outbound Telegram message | 4,096 characters, the provider's own limit |
+
+## Observability
+
+| Limit | Value |
+| --- | --- |
+| Date range on the [observability](/observability/overview) endpoint | **7 days** — a wider range is `400 date range cannot exceed 7 days` |
+| Series in a breakdown before the rest fold into "Other" | 8 |
+
+Call and conversation lists are not limited to 7 days; that ceiling is on the aggregated charts.
+
+## Webhooks
+
+| Limit | Value |
+| --- | --- |
+| Delivery timeout | 5 s |
+| Retries | **None.** One attempt, one delivery row, no dead-letter queue |
+| Delivery log page | 50 by default, 200 maximum |
+
+Because there is no retry, your endpoint has to be up when the event fires or the event is gone. See [webhooks](/observability/webhooks).
+
+## Secrets and provider keys
+
+| Limit | Value |
+| --- | --- |
+| Secret name | `^[A-Za-z_][A-Za-z0-9_]*$`. No length limit |
+| Secret value | 1–16,384 characters |
+| Provider key value | 1–16,384 characters |
+| Secrets per workspace | **No limit** |
+
+## Retention
+
+| Limit | Value |
+| --- | --- |
+| `retention_days` | 1–3,650, or `null` for forever (the default) |
+
+## Other names and identifiers
+
+| Limit | Value |
+| --- | --- |
+| Workspace name | 1–100 characters |
+| Personal access token name | 1–100 characters |
+| Carrier account display name | 1–120 characters |
+| MCP tool name | 200 characters |
+| `allowed_tools` on an integration | At least 1 entry when set — an empty list is refused. `null` means all |
+| Dashboard session cookie | 30 days |
+
+## Pagination
+
+Every list endpoint takes `limit` and `offset` and returns `{ items, has_more, limit, offset }`. **There is no single platform-wide page size** — the ceiling is per endpoint:
+
+| Ceiling | Endpoints |
+| --- | --- |
+| 200, default 200 | Agents, tools, tasks, secrets, calls, webhooks, credit ledger, telephony accounts, numbers, integrations, triggers, tokens, members |
+| 200, default 100 | Conversations, workspaces |
+| 200, default 50 | Task runs, email batches, call batches, webhook deliveries |
+| **500**, default 200 | Conversation items |
+| 100, default 100 | Catalog voices |
+
+`offset` has no ceiling. There is no cursor and no total count — `has_more` is computed by fetching one extra row. See [pagination](/api-reference/pagination).
+
+## Two limits that do not exist
+
+Both of these come up in evaluation, so here they are stated plainly rather than left for you to discover.
+
+### There is no general API rate limit
+
+Nothing throttles inbound requests to the API. There is no per-token, per-workspace or per-IP quota, no `429` from the platform, and no `Retry-After` header to read. A `429` you see came from one of *your* providers being relayed, not from us.
+
+That is the current state, not a promise about the future. Build a client that behaves reasonably rather than one that relies on being stopped.
+
+### There are no concurrency, spend or duration caps you can configure
+
+- **No concurrency cap.** Nothing limits how many calls a workspace runs at once. The only concurrency controls in the product are `max_concurrency` on a call batch and `draft_concurrency` on an email batch (1–10), each of which governs that one batch and nothing else. Two batches at 10 dial 20 at a time. Email **sending** has no concurrency at all — it is serial, paced by `send_gap_seconds`.
+- **No spend cap.** There is no budget, no maximum monthly charge and no hard stop. The `low_balance_threshold` on your [credit balance](/get-started/pricing-and-credits) is a warning at $2 and blocks nothing — the only thing that stops new calls is the balance actually reaching zero.
+- **No configurable call-duration cap.** The 3-hour maximum above is platform-wide and cannot be lowered for a workspace, an agent or a call. If you need a call to end sooner, do it in the agent: an [`end_call`](/tools/end-call) operation the model can reach, or a prompt that closes the conversation.
+
+<CardGroup cols={2}>
+<Card title="Errors" href="/api-reference/errors">
+  What comes back when you cross one of these.
+</Card>
+<Card title="Pricing and credits" href="/get-started/pricing-and-credits">
+  The balance is what stops a runaway bill. There is no other brake.
+</Card>
+</CardGroup>

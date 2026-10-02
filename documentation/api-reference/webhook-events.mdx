@@ -1,0 +1,416 @@
+---
+title: "Webhook events"
+description: "The envelope, the signature scheme, and the payload of every event Talqing pushes to your endpoint."
+---
+
+This is the payload reference. Creating a subscription, reading the delivery
+log, rotating a secret and test-firing all live on
+[webhooks](/observability/webhooks) — come here for what actually arrives.
+
+Every event is a `POST` of `application/json` to your URL, with the same
+envelope whatever the type.
+
+## The envelope
+
+```json
+{
+  "id": "b3f1c2d94a7e4f0a8c6d5e2b1a9f3c7d",
+  "type": "session.completed",
+  "created_at": "2026-08-30T15:49:30.792290+00:00",
+  "tenant_id": "7c1e4a2b-90d3-4f18-8b62-0e5a3c9d7f41",
+  "agent_id": "9c2f1a44-3d0b-4a6e-8f21-5b7c0e93a4d1",
+  "data": {}
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string | This delivery's id — 32 hex characters, no dashes, unlike the UUIDs everywhere else in the API. The same value is in `X-Talqing-Delivery` and in the delivery log. |
+| `type` | string | The event type, from the table below. |
+| `created_at` | string | ISO 8601 with a `+00:00` offset rather than the `Z` the API's own timestamps use. |
+| `tenant_id` | string | Your workspace. |
+| `agent_id` | string / null | The agent the event is about, when there is one. Null for `agent.deleted`, for every email-batch event, and for anything that ran an agent definition sent in the request rather than a stored one. |
+| `data` | object | The type's own payload. |
+
+Subscriptions are workspace-wide: every active webhook receives events for every
+agent, and a subscription with an empty event list receives every type. Filter on
+`type` and on the envelope's `agent_id` in your handler.
+
+`GET /v1/webhooks/event-types` answers `{"all": [...], "live": [...]}` — `all`
+is every string a subscription will accept, `live` the subset it reports as
+emitted today.
+
+<Note>
+That endpoint currently lists `session.queued` and `session.in_progress` under
+`all` but not under `live`, which disagrees with what a subscriber actually
+receives: both are emitted, on phone calls. `live` gates only that listing, not
+delivery, so a webhook with an empty event list — the default, meaning all —
+gets them. They are documented below. If you see an event our own endpoint says
+does not exist, this is why.
+</Note>
+
+## Verifying a delivery
+
+Three headers ride on every request, alongside
+`Content-Type: application/json` and `User-Agent: talqing-webhooks/1`.
+
+| Header | Value |
+| --- | --- |
+| `X-Talqing-Event` | The event type, so you can route before parsing. |
+| `X-Talqing-Delivery` | The event id. The same event fanned out to two of your webhooks carries the same id on both. |
+| `X-Talqing-Signature` | `sha256=` followed by the lowercase hex HMAC-SHA256 of the **exact request body bytes**, keyed with that webhook's signing secret. |
+
+The secret is generated at create time as `whsec_` followed by 32 random bytes,
+and shown in full exactly once — at create, and again when you rotate it. Reads
+return only `secret_hint`, the last four characters (`whsec_…ab12`). Supply your
+own at create if you would rather.
+
+<Warning>
+Sign the raw bytes, before any JSON parsing. Re-serializing a parsed body will
+not reproduce them, and every signature will fail. In Express that means
+`express.raw({ type: "application/json" })` on this route, not `express.json()`.
+</Warning>
+
+<CodeGroup>
+```javascript Node
+import crypto from "node:crypto";
+import express from "express";
+
+const app = express();
+
+function verify(rawBody, header, secret) {
+  const expected =
+    "sha256=" + crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+  const sent = Buffer.from(header ?? "", "utf8");
+  const mine = Buffer.from(expected, "utf8");
+  // Lengths must match before timingSafeEqual, which throws otherwise.
+  return sent.length === mine.length && crypto.timingSafeEqual(sent, mine);
+}
+
+app.post(
+  "/talqing/webhook",
+  express.raw({ type: "application/json" }),
+  (req, res) => {
+    if (!verify(req.body, req.get("X-Talqing-Signature"), process.env.TALQING_WEBHOOK_SECRET)) {
+      return res.status(401).end();
+    }
+    const event = JSON.parse(req.body.toString("utf8"));
+    // Answer now, work later — you have five seconds and there is no retry.
+    res.status(204).end();
+    void handle(event);
+  },
+);
+```
+
+```python Python
+import hashlib
+import hmac
+import json
+import os
+
+from fastapi import BackgroundTasks, FastAPI, Header, Request, Response
+
+app = FastAPI()
+SECRET = os.environ["TALQING_WEBHOOK_SECRET"]
+
+
+def verify(raw: bytes, header: str | None) -> bool:
+    expected = "sha256=" + hmac.new(SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, header or "")
+
+
+@app.post("/talqing/webhook")
+async def receive(
+    request: Request,
+    background: BackgroundTasks,
+    x_talqing_signature: str | None = Header(default=None),
+) -> Response:
+    raw = await request.body()
+    if not verify(raw, x_talqing_signature):
+        return Response(status_code=401)
+    event = json.loads(raw)
+    # Answer now, work later — you have five seconds and there is no retry.
+    background.add_task(handle, event)
+    return Response(status_code=204)
+```
+</CodeGroup>
+
+Compare in constant time — `crypto.timingSafeEqual` and `hmac.compare_digest`
+above. A plain `===` on a signature is a timing oracle.
+
+## Delivery is one attempt
+
+<Warning>
+**There is no retry and no dead-letter queue.** One `POST` per event per
+matching webhook, with a **5-second timeout**. Anything that is not a `2xx`, and
+every timeout, DNS failure and connection error, is recorded as `failed` in the
+delivery log and never sent again.
+</Warning>
+
+What that means for your handler:
+
+- **Answer inside five seconds.** Verify, enqueue, return. Do the real work
+  after you have responded. A handler that calls your CRM inline will
+  intermittently blow the budget and lose events silently.
+- **Any `2xx` is success.** A `3xx` is not: redirects are deliberately not
+  followed, so a redirect counts as a failure.
+- **Reconcile from the API, not from a replay.** There is nothing to replay.
+  `GET /v1/calls` takes `start` and `end`, so a nightly sweep over the window
+  you were down closes the gap; `GET /v1/webhooks/{webhook_id}/deliveries` tells
+  you which events you missed and when.
+- **Your URL must be public.** A private, internal or cloud-metadata address is
+  refused when you save the webhook, and blocked again at delivery time.
+
+Events for one call are dispatched in the order they happen: `session.queued`
+when an outbound dial is accepted, `session.started` (and, on a phone call,
+`session.in_progress`) when the call connects, then `recording.ready` once the
+audio is in storage, then `session.completed` after analysis and billing have
+run. They arrive over separate HTTP requests, so treat the order as the common
+case rather than a guarantee.
+
+## Every event type
+
+| Type | Fires when | `data` |
+| --- | --- | --- |
+| `agent.created` | An agent is created | `agent_id`, `name` |
+| `agent.updated` | An agent's draft config is written, and on a version rollback | `agent_id`, `name` — or `agent_id`, `version` when it came from a rollback |
+| `agent.published` | An agent is published, and on a version rollback | `agent_id`, `version` |
+| `agent.deleted` | An agent is deleted | `agent_id`, `name`. The envelope's `agent_id` is null |
+| `session.queued` | `POST /v1/calls/outbound` accepted a dial, before the callee has answered. **Outbound phone calls placed one at a time only** — a batch does not send it | See below |
+| `session.started` | A call connects, or a chat receives its first message | See below |
+| `session.in_progress` | The same moment as `session.started`, on **phone calls only** | Identical to `session.started` |
+| `session.completed` | Every run this platform reports ends with exactly one of these, after finalize, recording, analysis and billing. For a chat, that is when it ends | The full report below |
+| `recording.ready` | A call's audio has reached storage | See below |
+| `batch.started` | An outbound call batch begins dialling | The same body `GET /v1/calls/batches/{batch_id}` returns |
+| `batch.completed` | Every recipient in a call batch reached a terminal state | The same body |
+| `batch.failed` | A call batch was stopped by the circuit breaker after ten consecutive setup failures — `failure_reason` says which | The same body |
+| `email_batch.started` | Drafting claimed its first row | The same body `GET /v1/email/batches/{batch_id}` returns |
+| `email_batch.drafted` | Drafting finished and the batch is waiting for a human to review and send | The same body |
+| `email_batch.paused` | Drafting paused itself after ten failures in a row — every row is where it was, and `resume` carries on | The same body |
+| `email_batch.failed` | Drafting stopped and trying again cannot help — `failure_reason` says why | The same body |
+| `email_batch.send.started` | A send's first email went out | The same body `GET /v1/email/batches/{batch_id}/sends/{send_id}` returns |
+| `email_batch.send.completed` | Every row a send covers has gone or failed — for a send of every row, once drafting has ended too | The same body |
+| `email_batch.send.paused` | A send paused itself after ten provider failures in a row — its rows are still queued, and `resume` continues | The same body |
+| `email_batch.send.failed` | A send stopped on an account-level refusal; its unsent rows are drafts again | The same body |
+| `whatsapp_batch.started` | A WhatsApp batch's first message is going out | The same body `GET /v1/whatsapp/batches/{batch_id}` returns |
+| `whatsapp_batch.completed` | Every row has been sent or has failed | The same body |
+| `whatsapp_batch.paused` | The batch paused itself — a credential, template, wallet or messaging-limit problem, or sends or deliveries failing in a row; `failure_reason` says which, and `resume` carries on | The same body |
+| `whatsapp_batch.failed` | The batch stopped for good — its sender was deleted, or its creator may no longer send; `failure_reason` says why | The same body |
+| `tool.invoked` | The model called one of your custom tools, before its arguments are validated | `tool`, `session_id`, `conversation_id`, `arguments` |
+| `tool.failed` | A tool raised — including a call whose arguments did not match the tool's schema, and a long-running tool that failed after the agent already acknowledged it | `tool`, `session_id`, `conversation_id`, `error` |
+| `webhook.test` | You press test-fire | `message`, `webhook_id` |
+
+`batch.completed` fires only for a batch that ran to the end. A cancelled or
+failed one has already said what happened, and a second event claiming
+completion would contradict the first.
+
+## `session.queued`
+
+Sent when `POST /v1/calls/outbound` has written the call row and handed the dial
+to the carrier — before the agent has accepted it and before the callee has
+answered. It is the earliest notice that a `session_id` exists.
+
+**One-at-a-time outbound phone calls only.** A batch places its calls through a
+different path and sends no `session.queued`; nothing fires for a web call or a
+chat either.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `session_id` | string | The call, already readable on `GET /v1/calls/{session_id}` with `status: "queued"`. |
+| `conversation_id` | string | |
+| `agent_id` | string / null | Null when the call runs an agent defined in the request rather than a stored one — there is no row to name, and inventing one would send you to an agent you cannot fetch. The envelope's `agent_id` is null with it. |
+| `type` | string | Always `SIP_OUTBOUND`. |
+| `channel` | string | Always `voice`. Outbound dialling is refused to any other channel. |
+| `phone_number_id` | string | The number dialling out. |
+| `from_e164` | string | |
+| `to_e164` | string | Normalized against the dialling number's own country. |
+
+## `session.started`
+
+Sent when a session begins — a web call, an inbound or outbound phone call, or a
+[chat](/channels/text-conversations). A chat sends it **once, when its first
+message arrives**, not when `POST /v1/chats` creates it.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `session_id` | string | This run. |
+| `conversation_id` | string | The thread it belongs to. |
+| `agent_id` | string / null | Null when the request carried an agent definition instead of naming one. |
+| `version` | integer / null | The published version answering, null for a draft or an inline definition. |
+| `channel` | string | `voice`, `video` or `text`. |
+| `type` | string | `WEB`, `SIP_INBOUND`, `SIP_OUTBOUND`, `WHATSAPP_INBOUND`, `STREAM` or `TEXT`. |
+| `phone_number_id` | string / null | Voice and video only. |
+| `integration_id` | string / null | The WhatsApp number a WhatsApp call arrived on. Voice and video only. |
+| `from_e164` | string / null | Voice and video only. |
+| `to_e164` | string / null | Voice and video only. |
+
+The three telephony fields are absent from the text worker's payload entirely,
+rather than present and null.
+
+## `session.in_progress`
+
+Sent on **phone and WhatsApp calls only**, from the same code and at the
+same instant as `session.started`, carrying a byte-identical payload. It exists
+because a telephony integration expects the vocabulary; it carries no
+information `session.started` does not, and there is no window between them in
+which a call is one and not the other.
+
+Subscribe to one or the other. If your subscription lists no events — the
+default, meaning all — you will receive both for every phone call, and treating
+them as two stages will double-count.
+
+## `recording.ready`
+
+Sent once the call's audio has been written to object storage — before
+`session.completed`, so a player can light up without waiting on the analysis
+LLM. It does not fire for a call with no stored audio.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `session_id` | string | |
+| `conversation_id` | string | |
+| `agent_id` | string / null | |
+| `duration_s` | number | Length of the audio. |
+| `bytes` | integer | File size. |
+| `url` | string / null | A signed link to the file, ready to use. Null if signing failed, in which case every other fact here still holds. |
+| `url_expires_at` | string | One hour out. |
+| `expires_at` | string / null | When retention will delete this call's content. Null while the workspace keeps everything, which is the default. |
+
+<Warning>
+`url` is a credential with an hour's life, and this payload lands in your logs.
+Take a copy of the file or drop the field before you store the event. When you
+need another link, `GET /v1/calls/{session_id}/recording` mints a fresh one.
+</Warning>
+
+## `session.completed` in full
+
+The end-of-session report: transcript, analysis, cost and recording state in one
+payload, dispatched once everything it describes is true. It is the event to
+subscribe to for a CRM, and the only one carrying the outcome. It closes the
+pair with `session.started`, and it fires for a chat as well as a call.
+
+**A chat sends it once, when the chat ends** — the agent's `end_call`,
+`POST /v1/chats/{id}/end`, or being replaced by a newer chat — and carries the
+chat's `analysis`. A chat has no inactivity timeout, so one nobody ends never
+sends it. A chat that ended without ever receiving a message sends neither this
+nor `session.started`.
+
+All three producers — the voice worker, the text worker, and the billing sweep
+that picks up a session whose worker died — build it by reading the database
+back, so it cannot disagree with what `GET /v1/calls/{session_id}` shows a
+minute later.
+
+### Identity
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `session_id` | string | This run. |
+| `conversation_id` | string / null | The thread. It changes per call once an agent is set to start clean, so do not correlate a customer on it. |
+| `contact_key` | string / null | Your own stable id for the person. **This is what correlates a customer's calls.** Null for a refused or off-thread session. |
+| `agent_id` | string / null | The agent that answered. |
+| `agent_name` | string / null | |
+| `agent_version` | integer / `"draft"` / null | `"draft"` when the call ran the unpublished draft; null when it ran a definition sent in the request. |
+| `agent_overridden` | boolean | Whether the call carried a per-call override. A draft run is `agent_version: "draft"`, not an override. |
+| `agent_inline` | boolean | Whether the definition existed at all before the request that started the call. |
+| `batch_id` | string / null | Which outbound call batch placed this call. Null for every other kind. |
+| `integration_id` | string / null | The WhatsApp number a WhatsApp call arrived on. Null for every other kind. |
+
+### The call itself
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `channel` | string | `voice`, `video` or `text`. |
+| `type` | string | `WEB`, `SIP_INBOUND`, `SIP_OUTBOUND`, `WHATSAPP_INBOUND`, `STREAM` or `TEXT`. |
+| `status` | string | The terminal status. |
+| `close_reason` | string | Exactly how it ended. The vocabulary is on [close reasons](/observability/close-reasons). |
+| `started_at`, `ended_at` | string / null | ISO 8601. |
+| `duration_s` | integer / null | **Our part of the call.** A caller transferred to a person may have stayed with them for another quarter of an hour; this does not count it. |
+| `from_e164`, `to_e164` | string / null | Telephony only. |
+
+### What the agent knew, and what a reader inferred
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `userdata` | object | What the agent knew — written by its tools, during the call. Always an object, empty when nothing was written. |
+| `analysis.status` | string | `none`, `pending`, `completed`, `failed` or `skipped`. |
+| `analysis.skip_reason` | string / null | Set only with `skipped`: `too_short`, `call_failed` or `produces_nothing`. |
+| `analysis.summary` | string / null | |
+| `analysis.outcome` | string / null | `success`, `failure` or `unknown`. Three-valued on purpose — an evaluator that cannot say "I don't know" invents a verdict for a wrong number. |
+| `analysis.outcome_rationale` | string / null | |
+| `analysis.fields` | object | Your configured extractions, keyed by field name. |
+
+`analysis` is deliberately never merged into `userdata`. One is what a tool
+confirmed; the other is what a model guessed afterwards, and a merge would let
+the guess overwrite the fact with nothing downstream able to tell them apart.
+See [call analysis](/observability/call-analysis).
+
+### The transcript
+
+`transcript` is an array, oldest first. Each row:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string | The item's id. |
+| `item_id` | string / null | The runtime's own item id, when there is one. |
+| `type` | string | `message`, `function_call`, `function_call_output`, `agent_handoff` or `agent_config_update`. |
+| `metrics` | object / null | Turn timings for a message item. |
+| `attachments` | array | Image **metadata only, with no link.** A signed URL in a stored payload is a credential with an hour's life; call the API when you want the bytes. |
+| `data` | object | The extras for this row's type — `role` and `text` for a message, `name` and `arguments` for a tool call, `output` and `is_error` for its result. |
+
+### Money
+
+`cost` is the stored pricing snapshot, or **null** when the session was not
+priced — a call whose usage the catalog could not price, or one that has not
+been billed. When present:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `provider_cost` | number | What your own provider keys were charged. **Reported, never collected.** |
+| `platform_fee` | number | What Talqing debited from this region's credit balance. |
+| `total_charge` | number | |
+| `duration_s` | integer / null | The billed duration. |
+| `platform_fee_per_minute` | number / null | The rate a call was priced at. Null on a chat. |
+| `platform_fee_per_message` | number / null | The rate a chat was priced at. Null on a call. |
+| `answered_messages` | integer / null | How many messages a chat was charged for. Null on a call. |
+| `llm`, `stt`, `tts`, `realtime`, `avatar` | array | Priced lines, one per provider and model, each with `provider`, `model`, `cost`, its own quantity fields and the `rates` it was priced at. An LLM line also carries `purpose` (`conversation` or `analysis`) and `priority`. |
+
+See [costs](/observability/costs) for how to read a breakdown.
+
+### Recording and transfer
+
+`recording` and `screen_recording` have the same four fields, and neither
+carries a link — this payload is rebuilt by the reconcile sweep hours after the
+call, where a URL that dies in an hour would be a broken promise.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `state` | string | `available` is the only playable one. The others are `none`, `pending`, `expired`, `failed`, `not_shared`, `consent_withdrawn` and `deleted`. On `screen_recording`, `none` means screen recording was off and `not_shared` means it was on and nobody ever shared. |
+| `started_at` | string / null | |
+| `duration_s` | number / null | |
+| `bytes` | integer / null | |
+| `expires_at` | string / null | When retention will delete this call's content. Read from the job that will do it, never recomputed — changing the policy does not move a purge that is already scheduled. |
+
+`transfer` is null on every call that never attempted one. There is no separate
+transfer event: a transfer ends our session, so this fires immediately
+afterwards and carries everything such an event would have.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `mode` | string | Cold or warm. |
+| `transport` | string | |
+| `destination` | string | |
+| `outcome` | string | |
+| `at` | string | |
+| `detail` | string / null | |
+| `on_failure` | string / null | `continue` or `end_call`. |
+| `sip_status` | object / null | The carrier's own response. |
+
+## Testing your endpoint
+
+The test-fire button sends `webhook.test` with
+`{"message": "talqing test event", "webhook_id": "…"}`. It ignores the
+subscription filter — it is a probe of your endpoint, not a type anyone
+subscribes to — and refuses a disabled webhook with
+`400 webhook is disabled; enable it before testing`. The result comes back
+inline as `{"webhook_id", "status", "status_code", "error"}`, so you see what
+your server answered without going to the delivery log.

@@ -1,0 +1,484 @@
+---
+title: "Webhooks"
+description: "Signed HTTP callbacks for every lifecycle event: the types, the envelope, the signature scheme, and the delivery log."
+---
+
+A webhook is a URL Talqing POSTs a signed JSON event to when something happens
+in your workspace — a call ended, an agent was published, a tool failed, a batch
+stopped. It is how a CRM learns about a call without polling.
+
+Two things about them decide most of your integration:
+
+- **Webhooks are workspace-wide, not per-agent.** One subscription receives
+  events for every agent you have. Filter on the payload's `agent_id` yourself.
+- **Webhooks are regional.** A subscription belongs to the region whose API
+  created it and never fires for a call in another. If you run agents in both
+  regions, create one in each. See [regions](/get-started/regions).
+
+## Creating one
+
+<ParamField body="url" type="string" required>
+  Where to POST. Must be `http://` or `https://`, and must resolve to a public
+  address — see [what a URL must be](#what-a-url-must-be).
+</ParamField>
+
+<ParamField body="subscribed_events" type="string[]" default="[]">
+  Which types to receive. **An empty list means every event type.** Naming an
+  unknown type is a `400`.
+</ParamField>
+
+<ParamField body="secret" type="string">
+  Your own signing secret. Omit it and one is generated as `whsec_` followed by
+  43 URL-safe characters.
+</ParamField>
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/webhooks \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://hooks.example.com/talqing",
+    "subscribed_events": ["session.completed", "recording.ready"]
+  }'
+```
+
+```typescript TypeScript
+const hook = await talqing.webhooks.create({
+  createWebhookRequest: {
+    url: "https://hooks.example.com/talqing",
+    subscribed_events: ["session.completed", "recording.ready"],
+  },
+});
+
+// The only time the plaintext secret is ever returned. Store it now.
+console.log(hook.secret);
+```
+
+```python Python
+hook = talqing.webhooks.create(
+    url="https://hooks.example.com/talqing",
+    subscribed_events=["session.completed", "recording.ready"],
+)
+
+# The only time the plaintext secret is ever returned. Store it now.
+print(hook["secret"])
+```
+</CodeGroup>
+
+<Warning>
+**The signing secret is shown exactly once**, in the response to create and to
+rotate. Every later read returns only `secret_hint`, a masked tail. If you lose
+it, rotate — there is no way to read it back.
+</Warning>
+
+A webhook row also carries `status` (`active` or `disabled`), `last_status`
+(`delivered` or `failed`) and `last_delivered_at`, so a list says at a glance
+which endpoint has stopped answering. `PATCH /v1/webhooks/{webhook_id}` changes
+the URL, the subscriptions or the status; a disabled webhook receives nothing.
+`DELETE` removes it permanently.
+
+`GET /v1/webhooks/event-types` returns two lists: `all`, every type a
+subscription will accept, and `live`, the types it reports as emitted today.
+
+<Warning>
+`live` is currently missing two types that your endpoint will nonetheless
+receive: `session.queued` and `session.in_progress`. Both are dispatched on
+phone calls, and neither list gates delivery — only this listing. If you
+subscribed to everything, expect them. They are in the table below.
+</Warning>
+
+## Every event type
+
+| Type | Fires when | `data` |
+| --- | --- | --- |
+| `agent.created` | An agent is created. | `agent_id`, `name` |
+| `agent.updated` | An agent's draft config is replaced. | `agent_id`, `name` |
+| `agent.published` | A draft is published as a new version. | `agent_id`, `version` |
+| `agent.deleted` | An agent is deleted. The envelope's `agent_id` is `null` — the row is gone. | `agent_id`, `name` |
+| `session.queued` | An outbound call has been placed with the carrier and is about to ring. **Outbound phone calls only.** | `session_id`, `conversation_id`, `agent_id` (null for an agent defined in the request), `type`, `channel`, `phone_number_id`, `to_e164` |
+| `session.started` | The worker has a session row and the run is beginning. | `session_id`, `conversation_id`, `agent_id`, `version`, `channel`, `type`, `phone_number_id`, `from_e164`, `to_e164` |
+| `session.in_progress` | The same moment as `session.started`, on **phone calls only**. It carries the identical payload, so it tells you nothing `session.started` does not — subscribe to one or the other, not both. | Same as `session.started` |
+| `session.completed` | Everything the payload describes is true: the call is finalized, the recording settled, the analysis done and the money computed. | The full report — see below. |
+| `recording.ready` | Call audio actually reached storage. | `session_id`, `conversation_id`, `agent_id`, `duration_s`, `bytes`, `url`, `url_expires_at`, `expires_at` |
+| `batch.started` | The dispatcher began dialling an outbound call batch. | The whole batch object, as `GET /v1/calls/batches/{batch_id}` returns it |
+| `batch.completed` | Every recipient reached a terminal state. Only a batch that ran to the end; a cancelled or failed one already said what happened. | The whole batch object |
+| `batch.failed` | The circuit breaker stopped a batch after ten consecutive setup failures — an unpublished agent, an expired carrier credential, a trunk refusing everything. `failure_reason` says which. | The whole batch object |
+| `email_batch.started` | The first drafting pass claimed a row. | The whole email batch object |
+| `email_batch.drafted` | Drafting finished — "your drafts are ready to review". | The whole email batch object |
+| `email_batch.failed` | Drafting stopped and will not resume on its own. | The whole email batch object |
+| `tool.invoked` | The model called one of your tools. | `tool`, `session_id`, `conversation_id`, `arguments` |
+| `tool.failed` | A tool raised — including a call whose arguments did not match the tool's schema, and a long-running tool that failed after the model was already told it had started. | `tool`, `session_id`, `conversation_id`, `error` |
+
+Two notes on the agent events. Publishing fires `agent.published` only; rolling
+a version back fires **both** `agent.updated` and `agent.published`, because two
+things moved — the draft is now that version's config, and what live calls run
+has changed. The email batch events are all about **drafting**: there is
+deliberately no event for a send completing, because a send is fifty rows in a
+few seconds.
+
+## The envelope
+
+Every delivery has the same outer shape.
+
+```json
+{
+  "id": "7b2f0d3c9a1e4d5fb8c60a2e19f4d377",
+  "type": "session.completed",
+  "created_at": "2026-08-30T09:14:02.518431+00:00",
+  "tenant_id": "3c9d1a08-52f4-4f0b-9b6e-2a4c8d1e7f30",
+  "agent_id": "8f2b41c7-6d90-4a3e-b512-0c7a9e34d118",
+  "data": {}
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `id` | A new id for every event, and the value of the `X-Talqing-Delivery` header. Use it to deduplicate. |
+| `type` | The event type. |
+| `created_at` | When the envelope was built, ISO 8601 UTC. |
+| `tenant_id` | Your workspace. |
+| `agent_id` | The agent this event is about. **May be null** — on `agent.deleted`, on a batch with no agent, and on the email batch events. |
+| `data` | The event's own body. |
+
+One envelope is built per event and sent to every matching webhook, so several
+endpoints receiving the same event see the same `id`.
+
+## `session.completed` in full
+
+This is the one to subscribe to for a CRM. It carries the outcome, and it is the
+only event that does. It fires for a chat as well as a call, once, when the chat ends — every run
+this platform bills or reports ends with exactly one of these.
+
+The one exception is a run whose process died before it could finish. It is
+never priced and never announced, so no `session.completed` arrives at all. (A
+call an outbound batch placed is additionally failed `stale` four hours in, so
+the campaign is not wedged by it.) That is another reason to reconcile from
+`GET /v1/calls` rather than to trust that every ending arrives.
+
+It is built identically whether the worker finishes it live or a reconcile
+rebuilds it later, because it is assembled by reading the database rather than
+from whatever a process happened to hold in memory. It cannot disagree with what
+`GET /v1/calls/{session_id}` shows you a minute later.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `session_id` | string | The run. Pass it to `GET /v1/calls/{session_id}`. |
+| `conversation_id` | string \| null | This call's thread. New on every call for an agent that starts clean. |
+| `contact_key` | string \| null | Your stable id for the person, the same across every call from them. This is what you correlate on, not `conversation_id`. |
+| `agent_id` | string \| null | The agent that answered. Null when the call ran a definition sent in the request. |
+| `agent_name` | string \| null | Its name, frozen on the session. |
+| `agent_version` | integer \| null | The published version that ran. Null for an inline or overridden definition, which genuinely has none. |
+| `agent_overridden` | boolean | The call ran something other than the agent's published version. |
+| `agent_inline` | boolean | The definition did not exist before the request that started the call. |
+| `channel` | string | `voice`, `video` or `text`. |
+| `type` | string | `WEB`, `SIP_INBOUND`, `SIP_OUTBOUND`, `WHATSAPP_INBOUND`, `STREAM` or `TEXT`. |
+| `status` | string | `completed`, `failed` or `canceled`. |
+| `close_reason` | string \| null | Exactly how it ended. See [close reasons](/observability/close-reasons). |
+| `started_at`, `ended_at` | string \| null | ISO 8601. |
+| `duration_s` | integer \| null | Wall-clock seconds. |
+| `from_e164`, `to_e164` | string \| null | The SIP legs. Both null on a web or text session. |
+| `batch_id` | string \| null | Which outbound batch placed this call. Null for every other kind. |
+| `integration_id` | string \| null | The WhatsApp number a WhatsApp call arrived on. Null for every other kind. |
+| `cost` | object \| null | The frozen pricing breakdown — the three totals, the per-model lines and the rates. **Null unless billing computed it.** See [costs](/observability/costs). |
+| `userdata` | object | What the agent **knew**: what its tools wrote during the call. |
+| `transcript` | array | Every item: messages, `function_call`, `function_call_output`, handoffs. The same shape [calls](/observability/calls) documents. |
+| `analysis` | object | What a reader **inferred** afterwards: `status`, `skip_reason`, `summary`, `outcome`, `outcome_rationale` and `fields`. Kept beside `userdata`, never merged into it. See [call analysis](/observability/call-analysis). |
+| `transfer` | object \| null | Null on every call that never attempted one. When set, it *is* the ending. |
+| `recording` | object | `state`, `started_at`, `duration_s`, `bytes`, `expires_at`. **No URL** — see below. |
+| `screen_recording` | object | The same five fields for the screen video. `none` means it was off; `not_shared` means it was on and nobody shared. |
+
+<Note>
+**There is no `call.transferred` event.** A transfer ends our session, so
+`session.completed` fires immediately afterwards and carries every fact such an
+event would have, in `transfer`: `mode`, `transport`, `destination`, `outcome`,
+`detail`, `sip_status`, `on_failure` and `at`. Two events describing one fact
+would be two things to keep in step.
+
+`transfer` is also what explains `duration_s` to a consumer. Both the duration
+and the recording measure **our** part of the call; the caller may have stayed
+with the person for another fifteen minutes.
+</Note>
+
+### Why `recording.ready` is a separate event
+
+It is not a subset of `session.completed`.
+
+| | `recording.ready` | `session.completed.recording` |
+| --- | --- | --- |
+| Fires | Only when audio actually reached storage, which many calls skip | On every session, whatever the recording did |
+| When | As soon as the upload lands, without waiting on analysis | After finalize, recording, analysis and billing are all done |
+| Carries a URL | **Yes** — a signed link and its `url_expires_at`, so you can take your own copy with no round trip | **No, deliberately** |
+
+`session.completed` carries no link because it can be rebuilt hours after the
+call, and a URL that dies in an hour would be a broken promise. Ask
+`GET /v1/calls/{session_id}/recording` for a fresh one instead. See
+[recordings](/observability/recordings).
+
+## Verifying a delivery
+
+Every request carries three headers:
+
+| Header | Value |
+| --- | --- |
+| `X-Talqing-Signature` | `sha256=` followed by the lower-case hex HMAC-SHA256 of the request body, keyed with your webhook's secret |
+| `X-Talqing-Event` | The event type |
+| `X-Talqing-Delivery` | The envelope's `id` |
+
+The request also carries `Content-Type: application/json` and
+`User-Agent: talqing-webhooks/1`.
+
+<Warning>
+**The signed bytes are the raw request body, exactly as sent.** Verify before
+you parse. Re-serializing the JSON and hashing that will not match — key order,
+spacing and number formatting all change the bytes.
+</Warning>
+
+<CodeGroup>
+```javascript Node
+import crypto from "node:crypto";
+import express from "express";
+
+const app = express();
+
+function verify(rawBody, header, secret) {
+  const expected =
+    "sha256=" + crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+  const a = Buffer.from(header ?? "", "utf8");
+  const b = Buffer.from(expected, "utf8");
+  // timingSafeEqual throws on a length mismatch, so check length first.
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// `express.raw` keeps req.body as the exact bytes we signed.
+app.post(
+  "/talqing",
+  express.raw({ type: "application/json" }),
+  (req, res) => {
+    if (!verify(req.body, req.get("X-Talqing-Signature"), process.env.TALQING_WEBHOOK_SECRET)) {
+      return res.sendStatus(401);
+    }
+
+    const event = JSON.parse(req.body.toString("utf8"));
+    res.sendStatus(200);          // answer first
+    void handle(event);           // then do the work
+  },
+);
+
+async function handle(event) {
+  if (event.type !== "session.completed") return;
+  console.log(event.data.session_id, event.data.analysis.outcome);
+}
+
+app.listen(3000);
+```
+
+```python Python
+import hashlib
+import hmac
+import os
+
+from flask import Flask, request
+
+app = Flask(__name__)
+SECRET = os.environ["TALQING_WEBHOOK_SECRET"]
+
+
+def verify(raw_body: bytes, header: str | None, secret: str) -> bool:
+    expected = "sha256=" + hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, header or "")
+
+
+@app.post("/talqing")
+def talqing_webhook():
+    # request.get_data() is the exact bytes we signed. Do not use request.json here.
+    if not verify(request.get_data(), request.headers.get("X-Talqing-Signature"), SECRET):
+        return "", 401
+
+    event = request.get_json()
+    enqueue(event)  # answer first, do the work afterwards
+    return "", 200
+```
+</CodeGroup>
+
+## Delivery is best-effort
+
+<Warning>
+**There is no retry and no dead-letter queue.** A POST that fails — a timeout, a
+connection error, any non-2xx — is logged and **never re-sent**. The delivery
+timeout is **5 seconds**.
+
+Three consequences you have to design around:
+
+1. **Answer immediately and do the work afterwards.** Acknowledge with a `200`
+   as soon as the signature checks out, then process from a queue of your own.
+   A handler that writes to your database before replying will eventually take
+   longer than five seconds and lose the event.
+2. **Reconcile from the API, not from delivery.** Treat webhooks as a latency
+   optimization over `GET /v1/calls`, never as the record. A periodic sweep over
+   calls in a window is what makes a missed delivery a non-event.
+3. **Deduplicate on `X-Talqing-Delivery`.** Your endpoint answering slowly and
+   the event arriving anyway is a normal outcome.
+</Warning>
+
+A slow endpoint also costs the run that triggered it. For the events a call
+worker sends as it shuts down, the whole fan-out is bounded at seven seconds and
+abandoned after that, so the process is never held open by an endpoint that
+stopped answering.
+
+## The delivery log
+
+`GET /v1/webhooks/{webhook_id}/deliveries` lists attempts newest first, in the
+standard page shape. It is where to look when a webhook seems silent.
+
+| Field | Meaning |
+| --- | --- |
+| `event_type` | Which event was being delivered. |
+| `event_id` | The envelope `id`, so you can match it against your own logs. |
+| `status` | `delivered` (your endpoint answered 2xx) or `failed`. |
+| `status_code` | The HTTP status your endpoint returned. Null when the request never got that far. |
+| `error` | Why it never got there — a timeout, a DNS failure, or `blocked destination: …` when the URL resolved somewhere it is not allowed to reach. Null on a delivery that got a response. |
+| `duration_ms` | How long the attempt took. A value near 5000 on a failure is your endpoint hitting the timeout. |
+| `created_at` | When it was attempted. |
+
+`limit` is 1–200, default `50`.
+
+<CodeGroup>
+```bash cURL
+curl -G https://api.in.talqing.com/v1/webhooks/2e6a1f04-9c3b-4d17-8e52-b1d0a7c94f68/deliveries \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "limit=20"
+```
+
+```typescript TypeScript
+const page = await talqing.webhooks.deliveries({
+  webhook_id: "2e6a1f04-9c3b-4d17-8e52-b1d0a7c94f68",
+  limit: 20,
+});
+
+for (const attempt of page.items) {
+  console.log(attempt.created_at, attempt.event_type, attempt.status, attempt.status_code);
+}
+```
+
+```python Python
+page = talqing.webhooks.deliveries(
+    "2e6a1f04-9c3b-4d17-8e52-b1d0a7c94f68", limit=20
+)
+
+for attempt in page["items"]:
+    print(attempt["created_at"], attempt["event_type"], attempt["status"], attempt["error"])
+```
+</CodeGroup>
+
+## Testing an endpoint
+
+`POST /v1/webhooks/{webhook_id}/test` sends one `webhook.test` event and returns
+what your endpoint said, so you can check delivery and signature verification end
+to end before a real call depends on it.
+
+```json
+{ "message": "talqing test event", "webhook_id": "2e6a1f04-9c3b-4d17-8e52-b1d0a7c94f68" }
+```
+
+Two things make it different from a production event:
+
+- **It bypasses the subscription filter.** `webhook.test` is a probe of the
+  endpoint, not a type anyone subscribes to, so it arrives whatever
+  `subscribed_events` says.
+- **A disabled webhook is refused** with a `400`: `webhook is disabled; enable it
+  before testing`. A disabled endpoint must not receive traffic.
+
+The response is `{ "webhook_id": …, "status": …, "status_code": …, "error": … }`,
+and the attempt is written to the delivery log like any other.
+
+<CodeGroup>
+```bash cURL
+curl -X POST \
+  https://api.in.talqing.com/v1/webhooks/2e6a1f04-9c3b-4d17-8e52-b1d0a7c94f68/test \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const result = await talqing.webhooks.test({
+  webhook_id: "2e6a1f04-9c3b-4d17-8e52-b1d0a7c94f68",
+});
+
+console.log(result.status, result.status_code, result.error);
+```
+
+```python Python
+result = talqing.webhooks.test("2e6a1f04-9c3b-4d17-8e52-b1d0a7c94f68")
+print(result["status"], result["status_code"], result["error"])
+```
+</CodeGroup>
+
+## Rotating the secret
+
+`POST /v1/webhooks/{webhook_id}/rotate-secret` issues a new secret and returns
+it in plaintext once.
+
+<Warning>
+**Rotation is immediate and there is no overlap window.** The old secret stops
+signing anything the moment the call returns, so every event delivered from that
+instant is signed with the new one. Plan the cutover: have your receiver ready to
+accept both, rotate, then drop the old one — or accept a window in which your
+verification fails.
+</Warning>
+
+<CodeGroup>
+```bash cURL
+curl -X POST \
+  https://api.in.talqing.com/v1/webhooks/2e6a1f04-9c3b-4d17-8e52-b1d0a7c94f68/rotate-secret \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const rotated = await talqing.webhooks.rotateSecret({
+  webhook_id: "2e6a1f04-9c3b-4d17-8e52-b1d0a7c94f68",
+});
+
+console.log(rotated.secret); // shown once
+```
+
+```python Python
+rotated = talqing.webhooks.rotate_secret("2e6a1f04-9c3b-4d17-8e52-b1d0a7c94f68")
+print(rotated["secret"])  # shown once
+```
+</CodeGroup>
+
+## What a URL must be
+
+The URL is checked when you configure it and again at every delivery.
+
+- The scheme must be `http` or `https`. Anything else is a `400`:
+  `url must be http(s)`.
+- The host must resolve, and every address it resolves to must be public. A
+  private, loopback, link-local, reserved, multicast or carrier-grade-NAT
+  address is refused with a `400` reading
+  `url not allowed: destination ... is not allowed (private/internal)`.
+  Cloud metadata endpoints are covered by the same rule.
+- **Redirects are not followed.** The connection is pinned to the address that
+  passed the check, so a second DNS answer cannot point the request somewhere
+  else after it was vetted. Point the webhook at its final URL.
+
+A destination that passes at configure time and fails at delivery — because DNS
+now answers with a private address — is logged in the delivery log as
+`blocked destination: …`.
+
+## In the dashboard
+
+**Webhooks** lists one row per subscription with its status, URL, subscribed
+types and the masked secret hint, and names the region it belongs to. Creating
+one shows the plaintext secret in a panel above the list — the only time it is
+shown. Each row has **Test**, **Enable**/**Disable**, **Log** (the delivery
+history inline) and **Delete**.
+
+<CardGroup cols={2}>
+  <Card title="Calls" href="/observability/calls">
+    The same facts `session.completed` carries, on demand and always current.
+  </Card>
+  <Card title="Call analysis" href="/observability/call-analysis">
+    What fills the `analysis` block of the payload.
+  </Card>
+</CardGroup>

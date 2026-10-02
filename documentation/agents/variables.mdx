@@ -1,0 +1,371 @@
+---
+title: "Variables"
+description: "The template roots an agent can read, the vars it declares, and the system variables Talqing fills in."
+---
+
+An agent's prompt and greeting are templates. `{{userdata.name}}`, `{{vars.api_domain}}`
+and `{{system_vars.date}}` are substituted when the agent starts, so one stored
+definition addresses the person it actually reached.
+
+A token whose root is not one of ours is **an error when the agent is saved**, not
+text. Talqing does not forward `{{customer.number}}` to the model and hope.
+
+## The six roots
+
+| Root | What it holds | Prompt and greeting | Tool operation |
+| --- | --- | --- | --- |
+| `{{userdata.*}}` | Session state about the person. Any tool can write it. | Yes | Yes |
+| `{{vars.*}}` | Values the request that started the session supplied. Read-only. | Yes | Yes |
+| `{{system_vars.*}}` | This call's numbers and direction, plus the agent's clock. Read-only. | Yes | Yes |
+| `{{args.*}}` | The arguments the model sent to this tool call. | **Refused** | Yes |
+| `{{tooldata.*}}` | Values an earlier operation in the same tool run published. | **Refused** | Yes |
+| `{{secrets.NAME}}` | A workspace secret. | **Refused** | Yes |
+
+The three refusals are errors at save, with the reason in the message: tool
+arguments do not exist outside a tool call, `tooldata` exists only while the tool
+that wrote it is running, and a workspace secret is a credential for a tool to
+send rather than text for the model to read. Everything about the tool side of
+templating — `tooldata` versus `userdata`, `publish_fields`, `set_variable` — is on
+[templating and data](/tools/templating-and-data).
+
+One extra token exists and belongs to recording: `{{consent.notice}}`, legal in a
+greeting and nowhere else. See [recording](/telephony/recording).
+
+### Tokens that are not ours
+
+Talqing matches anything shaped like a token, not only the roots it knows, so
+these are all refused when you save:
+
+| You wrote | What happens |
+| --- | --- |
+| `{{name}}` | Refused. A bare token pasted from another platform has no root. |
+| `{{customer.number}}` | Refused. `customer` is not a template root. |
+| `{{userdate.name}}` | Refused. A typo is a typo, not a variable. |
+| `{{sipdata.human_phone_number}}` | Refused, and the error names the rename: write `{{system_vars.human_phone_number}}`. |
+| `{{userdata}}` | Refused. That is the whole bag; add a dot and the name of the field you want. |
+
+The error reads, for example:
+
+```text
+the system prompt reads {{customer.number}}, which is not a variable - it would be
+sent exactly as written, braces and all. A system prompt can read {{userdata.…}},
+{{system_vars.…}} and {{vars.…}}
+```
+
+The same check runs over a handoff destination's `description`, `summary_prompt`
+and `message`, because all three are substituted before the model or the caller
+sees them.
+
+<Warning>
+There is no escape syntax. Prose containing `{{anything}}` cannot be saved on an
+agent. The one exemption is a `code` operation's TypeScript source, where braces
+are the author's and nothing substitutes them.
+</Warning>
+
+## vars
+
+`config.vars` is what this agent declares it reads as `{{vars.name}}`. A
+declaration is not a value — it is the contract, and the values arrive per session.
+
+<ParamField path="name" type="string" required>
+  Matches `[A-Za-z_][A-Za-z0-9_]*`, and unique within the agent. A name declared
+  twice is refused: each name gets one description and one default, and the later
+  entry would silently win.
+</ParamField>
+
+<ParamField path="description" type="string" default="">
+  For your teammates and the CoPilot. Never substituted anywhere.
+</ParamField>
+
+<ParamField path="default" type="string | null" default="null">
+  What `{{vars.name}}` resolves to when the session supplied no value. `null`
+  means "empty unless supplied".
+</ParamField>
+
+<ParamField path="required" type="boolean" default="false">
+  Refuse the session rather than resolve this to nothing. A `default` satisfies it
+  outright.
+</ParamField>
+
+Values arrive on the request that starts the session — `POST /v1/calls/token`,
+`POST /v1/calls/outbound`, `POST /v1/calls/batches` and `POST /v1/chats` —
+and override the declared defaults. `vars` values are strings only; an integer is
+refused, because substitution is textual and a reference number like `"007"` is
+not the integer 7.
+
+There is **one bag per session**, and it reaches every agent the session runs: the
+entry agent, every team member, and a handoff target that was never in the plan.
+Each of them merges that bag over *its own* declared defaults, so a handoff target
+falls back to its defaults rather than inheriting the source agent's. Nothing
+inside the session can write `vars` — no tool, no hook, no model.
+
+<CodeGroup>
+```bash cURL
+curl -X PATCH https://api.in.talqing.com/v1/agents/6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "prompt": "You answer for {{vars.brand_name}}. Book appointments through their booking system at {{vars.api_domain}}. Speak in short sentences.",
+      "greeting": "Thanks for calling {{vars.brand_name}}. How can I help?",
+      "vars": [
+        {"name": "brand_name", "description": "The reseller brand this call is for.", "default": "Acme Dental", "required": false},
+        {"name": "api_domain", "description": "Base URL of the reseller booking API.", "default": "https://booking.acme.example", "required": true}
+      ]
+    }
+  }'
+```
+
+```typescript TypeScript
+await talqing.agents.update({
+  agent_id: "6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+  updateAgentRequest: {
+    config: {
+      prompt:
+        "You answer for {{vars.brand_name}}. Book appointments through their booking system at {{vars.api_domain}}. Speak in short sentences.",
+      greeting: "Thanks for calling {{vars.brand_name}}. How can I help?",
+      vars: [
+        {
+          name: "brand_name",
+          description: "The reseller brand this call is for.",
+          default: "Acme Dental",
+          required: false,
+        },
+        {
+          name: "api_domain",
+          description: "Base URL of the reseller booking API.",
+          default: "https://booking.acme.example",
+          required: true,
+        },
+      ],
+    },
+  },
+});
+```
+
+```python Python
+talqing.agents.update(
+    "6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+    config={
+        "prompt": (
+            "You answer for {{vars.brand_name}}. Book appointments through their "
+            "booking system at {{vars.api_domain}}. Speak in short sentences."
+        ),
+        "greeting": "Thanks for calling {{vars.brand_name}}. How can I help?",
+        "vars": [
+            {
+                "name": "brand_name",
+                "description": "The reseller brand this call is for.",
+                "default": "Acme Dental",
+                "required": False,
+            },
+            {
+                "name": "api_domain",
+                "description": "Base URL of the reseller booking API.",
+                "default": "https://booking.acme.example",
+                "required": True,
+            },
+        ],
+    },
+)
+```
+</CodeGroup>
+
+`vars` is a list, so it is sent whole: include every variable you mean to keep. See
+[updating an agent](/agents/overview#updating-an-agent).
+
+Supplying values for one call:
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/calls/token \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+    "contact_key": "user-42",
+    "vars": {
+      "brand_name": "Northside Dental",
+      "api_domain": "https://booking.northside.example"
+    }
+  }'
+```
+
+```typescript TypeScript
+const { server_url, participant_token, session_id } = await talqing.calls.token({
+  tokenRequest: {
+    agent_id: "6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+    contact_key: "user-42",
+    vars: {
+      brand_name: "Northside Dental",
+      api_domain: "https://booking.northside.example",
+    },
+  },
+});
+```
+
+```python Python
+call = talqing.calls.token(
+    agent_id="6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+    contact_key="user-42",
+    vars={
+        "brand_name": "Northside Dental",
+        "api_domain": "https://booking.northside.example",
+    },
+)
+```
+</CodeGroup>
+
+### Four things to get right
+
+**Values are visible to the model.** Anything in `vars` is substituted into the
+prompt the model reads, so it can be repeated back or read aloud. A credential
+belongs in a [workspace secret](/platform/secrets), read as `{{secrets.NAME}}` from
+a tool, where the model never sees it.
+
+**`required: true` refuses the session.** A variable that is required, has no
+`default`, and gets no value refuses the call token, the dial, the batch and the
+text conversation — before anything is compiled and before any provider is called:
+
+```text
+this session needs values it was not given
+'api_domain' is required and has no default
+```
+
+An **empty string counts as a value**: `{"api_domain": ""}` is a caller deliberately
+blanking a default, and it wins over the default like any other string. A `default`
+satisfies `required` outright. Nothing is enforced once a session is connected — a
+handoff target that needs a value nobody supplied reads it as empty rather than
+ending the call mid-conversation.
+
+**An inbound call or message has no request of ours**, so only the declared defaults
+resolve. That makes the rule above a hard constraint for inbound voice: a voice
+agent that requires a variable with no default cannot answer a phone number at all.
+All three doors into "this agent answers this number" refuse it — assigning the
+number, publishing that config while the agent is already assigned to one, and
+rolling back to a version that predates the default:
+
+```text
+'api_domain' is required and has no default, and this agent answers inbound calls
+on +912248900123 - which carry no request to supply it. Give the variable a
+default, make it optional, or unassign the number
+```
+
+Anything an inbound session needs has to have a default.
+
+**`agent_override.vars` and the top-level `vars` are different things.**
+`agent_override.vars` changes what an agent *declares* for one call — the
+declarations and their defaults. The top-level `vars` on the same request supplies
+the *values*. Both can appear on one request and they do not conflict: the override
+decides what is declared, the top-level bag what it is worth. Because the required
+check runs on the merged config, an override that adds a default satisfies it.
+See [per-call configuration](/agents/per-call-configuration).
+
+### Reading a variable nobody declared
+
+`{{vars.x}}` where `x` is not in `config.vars` is a **warning**, not an error:
+
+```text
+the system prompt reads {{vars.region}}, which this agent does not declare - it
+will be empty unless the request that starts the session supplies it. This agent
+declares: api_domain, brand_name.
+```
+
+The key space is open on purpose. A request may carry a value no stored agent
+declared, which is what lets an agent or a tool defined inline in that same request
+read one. Contrast `system_vars`, whose key space is closed — Talqing fills it, so
+a name outside the catalog can only be a typo.
+
+## system_vars
+
+Six keys, filled in by Talqing. Any other name is refused when you save.
+`GET /v1/catalog` returns the list as `system_vars`.
+
+| Key | Format | Empty when |
+| --- | --- | --- |
+| `{{system_vars.human_phone_number}}` | `+919876543210` | Not a phone call |
+| `{{system_vars.agent_phone_number}}` | `+912248900123` | Not a phone call |
+| `{{system_vars.direction}}` | `inbound` or `outbound` | Not a phone call |
+| `{{system_vars.now}}` | `2026-08-19T19:26:59+05:30` | No `timezone` set |
+| `{{system_vars.date}}` | `Wednesday, 19 August 2026` | No `timezone` set |
+| `{{system_vars.time}}` | `7:26 PM` | No `timezone` set |
+
+`human_phone_number` is the other party either way — the caller on an inbound call,
+the person you dialled on an outbound one — so a prompt never has to work out which
+end it is on. One agent can greet a caller and someone it called differently by
+branching on `{{system_vars.direction}}`.
+
+The three call keys are **empty on web calls and on text conversations**. Only a
+`voice` agent is ever dispatched onto a phone call, so writing one into a `text` or
+`video` agent earns a warning saying it will always be empty. Do not make one the
+only source of a fact the agent needs.
+
+The three clock keys work on every channel and are rendered against the agent's
+`timezone` (an IANA name such as `Asia/Kolkata`). Using one with no timezone set is
+a **save error**:
+
+```text
+the system prompt reads {{system_vars.date}}, but this agent has no timezone - set
+one so the agent knows what "now" means (for example 'Asia/Kolkata')
+```
+
+`{{system_vars.now}}` is the machine format — send it to an API, never read it
+aloud. Writing it into a greeting earns a warning, because a text-to-speech voice
+cannot say an ISO timestamp; use `{{system_vars.time}}` or `{{system_vars.date}}` in
+a spoken line.
+
+### When the clock is read
+
+| Where | What it resolves to |
+| --- | --- |
+| Prompt, greeting | The moment the agent started — frozen for the rest of the session |
+| Tool operation | The moment that operation ran |
+
+The prompt is resolved once, when the agent is built: on a call that is the moment
+before it answers, on a handoff the moment the target takes over, on text when the
+chat starts and again whenever it picks back up after a pause. Re-resolving it per turn would rewrite the prompt
+prefix and throw away the provider's prompt cache for the rest of the call. So an
+agent that has been talking for forty minutes still reads its own
+`{{system_vars.time}}` as the time it picked up.
+
+A tool resolves per run, so `{{system_vars.now}}` inside a tool is the time that
+tool ran — which is what you want in a `created_at` you send to a CRM.
+
+<Tip>
+If the agent has to reason about "today", opening hours or an appointment time,
+set `timezone` and let a tool read the clock. Do not paste a date into the prompt.
+</Tip>
+
+## Which one do I use?
+
+| | `userdata` | `vars` | `system_vars` | `secrets` |
+| --- | --- | --- | --- | --- |
+| About | The person | This session | The call and the clock | Your credentials |
+| Set by | The request, and any tool mid-session | The request that starts the session | Talqing | An admin, in the workspace |
+| Written mid-session | Yes, by any tool | Never | Never | Never |
+| Readable in a prompt | Yes | Yes | Yes | **No** |
+| Readable in a tool | Yes | Yes | Yes | Yes |
+| Seen by the model | Yes | Yes | Yes | **No** |
+| Kept after the call | Merged onto the contact record | Discarded | Not stored as such | Stored in the workspace |
+| Typical use | Name, tier, account id, what the agent learned | API host, brand, reseller code | Caller's number, today's date | API keys, bearer tokens |
+
+Use `userdata` for facts about the *person* and `vars` for configuration of the
+*session*. If a value would be wrong to replay into that person's next
+conversation, it is a `var`.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Userdata" href="/agents/userdata">
+    Session state about the person, and how tools write it.
+  </Card>
+  <Card title="Templating and data" href="/tools/templating-and-data">
+    The tool side: `args`, `tooldata`, `publish_fields`, `set_variable`.
+  </Card>
+  <Card title="Secrets" href="/platform/secrets">
+    Where credentials go, and how `{{secrets.NAME}}` resolves.
+  </Card>
+  <Card title="Per-call configuration" href="/agents/per-call-configuration">
+    `agent_override`, inline agents, and what a single call can change.
+  </Card>
+</CardGroup>

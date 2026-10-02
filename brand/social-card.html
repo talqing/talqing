@@ -1,0 +1,244 @@
+<!doctype html>
+<!--
+  The social card: what WhatsApp, X, LinkedIn and Slack show for a talqing.com
+  link. Open this file in Chrome at a 1200×630 viewport, device pixel ratio 2,
+  and screenshot it to regenerate frontend/app/opengraph-image.png.
+
+  It is the landing hero restated for a thumbnail — same faces, same paper, same
+  agent cluster (frontend/app/agent-cluster.tsx, redrawn here as static HTML).
+  If the hero's headline or the cluster changes, change this to match.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Talqing social card</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400&display=block"
+      rel="stylesheet"
+    />
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+      }
+
+      html,
+      body {
+        width: 1200px;
+        height: 630px;
+        overflow: hidden;
+      }
+
+      body {
+        position: relative;
+        background: #fff;
+        color: #0a0a0a;
+        font-family: "Figtree", system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+      }
+
+      .logo {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+        font-size: 42px;
+        font-weight: 600;
+        letter-spacing: -0.025em;
+      }
+
+      .logo img {
+        width: 56px;
+        height: 56px;
+      }
+
+      h1 {
+        font-family: "Newsreader", Georgia, serif;
+        font-optical-sizing: auto;
+        font-weight: 400;
+        letter-spacing: -0.018em;
+      }
+
+      /* ---- the agent cluster, drawn at 760×362 and scaled ---- */
+      .cluster {
+        position: absolute;
+        width: 760px;
+        height: 362px;
+        transform-origin: top left;
+      }
+
+      .card {
+        position: absolute;
+        border-radius: 14px;
+        border: 1px solid #e9e9e9;
+        background: #fff;
+      }
+
+      .side {
+        top: 84px;
+        width: 240px;
+        height: 278px;
+        padding: 24px;
+        box-shadow: 0 18px 40px -22px rgba(17, 17, 17, 0.28);
+      }
+
+      .video {
+        z-index: 2;
+        left: 232px;
+        top: 0;
+        width: 296px;
+        height: 362px;
+        padding: 20px;
+        box-shadow: 0 26px 56px -26px rgba(17, 17, 17, 0.32);
+      }
+
+      .card-title {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        font-size: 15px;
+        font-weight: 500;
+        line-height: 18px;
+        color: #1a1a1a;
+      }
+
+      .live {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #5b7d58;
+        box-shadow: 0 0 0 4px rgba(91, 125, 88, 0.18);
+      }
+
+      .bars {
+        display: flex;
+        align-items: center;
+      }
+
+      .bars span {
+        border-radius: 999px;
+      }
+
+      .frame {
+        position: relative;
+        width: 256px;
+        height: 189px;
+        overflow: hidden;
+        border-radius: 8px;
+        background: #e6e9e4;
+      }
+
+      .frame img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      .scrim {
+        position: absolute;
+        inset: auto 0 0 0;
+        display: flex;
+        height: 52px;
+        align-items: flex-end;
+        justify-content: center;
+        padding-bottom: 11px;
+        background: linear-gradient(to top, rgba(16, 16, 17, 0.5), rgba(16, 16, 17, 0));
+      }
+
+      /* ---- layout: a centred stack, the cluster rising off the bottom edge.
+         Only the top of the cluster is on the card, so only the top is drawn:
+         the call controls, the voice strip and the composer are left out
+         rather than sliced through by the edge. ---- */
+      body {
+        background: linear-gradient(to bottom, #fff 0%, #fff 44%, #f4f3ef 100%);
+      }
+
+      .logo {
+        position: absolute;
+        inset: 44px 0 auto 0;
+        justify-content: center;
+      }
+
+      h1 {
+        position: absolute;
+        inset: 142px 0 auto 0;
+        text-align: center;
+        font-size: 58px;
+        line-height: 1.12;
+      }
+
+      .cluster {
+        left: 182px;
+        top: 316px;
+        transform: scale(1.1);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="logo"><img src="talqing-icon.png" alt="" />Talqing</div>
+
+    <h1>Build &amp; deploy voice, video &amp; text agents<br />in minutes, not days</h1>
+
+    <div class="cluster">
+      <div class="card side" style="left: 0">
+        <div class="card-title">Voice Agent <span class="live"></span></div>
+        <div class="bars" data-bars="glyph" style="margin-top: 26px"></div>
+        <p style="margin-top: 18px; font-size: 19px; line-height: 30px; color: #111">
+          Hello. How can I help you today?
+        </p>
+      </div>
+
+      <div class="card video">
+        <div class="card-title" style="justify-content: center; gap: 10px; padding: 6px 0 18px">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M16.5 10.4 20.6 8.2a.75.75 0 0 1 1.1.66v6.28a.75.75 0 0 1-1.1.66l-4.1-2.2" />
+            <rect x="2.4" y="6" width="14.1" height="12" rx="2.6" />
+          </svg>
+          Video Agent <span class="live"></span>
+        </div>
+        <div class="frame">
+          <img src="../frontend/public/anam-avatar-cara.webp" alt="" />
+          <div class="scrim"><div class="bars" data-bars="frame"></div></div>
+        </div>
+      </div>
+
+      <div class="card side" style="left: 520px">
+        <div class="card-title">Text Agent <span class="live"></span></div>
+        <svg width="33" height="32" viewBox="0 0 32 31" fill="none" stroke="#2c2c2c" stroke-width="2" style="display: block; margin-top: 26px">
+          <path d="M16 2.6c7.3 0 13.4 4.5 13.4 10.2S23.3 23 16 23c-1.3 0-2.6-.15-3.8-.42l-1.75 2a1 1 0 0 1-1.75-.66V21.4C5.1 19.6 2.6 16.6 2.6 12.8 2.6 7.1 8.7 2.6 16 2.6Z" stroke-linejoin="round" />
+          <circle cx="10.8" cy="12.7" r="1.35" fill="#2c2c2c" stroke="none" />
+          <circle cx="16" cy="12.7" r="1.35" fill="#2c2c2c" stroke="none" />
+          <circle cx="21.2" cy="12.7" r="1.35" fill="#2c2c2c" stroke="none" />
+        </svg>
+        <p style="margin-top: 22px; font-size: 19px; line-height: 30px; color: #111">
+          Of course — let me pull that order up.
+        </p>
+      </div>
+    </div>
+
+    <script>
+      // The same bar heights as agent-cluster.tsx: [values, strip height, bar width, gap, colour].
+      const strips = {
+        glyph: [[0.34, 0.6, 0.86, 1, 0.8, 0.55, 0.3], 36, 3, 3, "#4f6b4d"],
+        frame: [
+          [0.04, 0.04, 0.12, 0.04, 0.3, 0.04, 0.16, 0.55, 0.24, 0.95, 1, 0.64, 0.85, 0.28, 0.5, 0.12, 0.3, 0.05, 0.04],
+          24, 2, 2.6, "rgba(255,255,255,0.92)",
+        ],
+      };
+      for (const el of document.querySelectorAll("[data-bars]")) {
+        const [values, height, width, gap, color] = strips[el.dataset.bars];
+        el.style.height = `${height}px`;
+        el.style.gap = `${gap}px`;
+        for (const value of values) {
+          const bar = document.createElement("span");
+          bar.style.width = `${width}px`;
+          bar.style.height = `${Math.max(width, Math.round(value * height))}px`;
+          bar.style.background = color;
+          el.append(bar);
+        }
+      }
+    </script>
+  </body>
+</html>

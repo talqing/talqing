@@ -1,0 +1,262 @@
+---
+title: "The code operation"
+description: "Run TypeScript in a sandbox to reshape a response, compute a value or make a decision the tree cannot express."
+---
+
+`code` runs a TypeScript function on an isolated service, away from the call.
+Reach for it when an API response needs reshaping before anything else can use
+it, when a value has to be computed, or when a decision is more than one
+comparison.
+
+```json
+{
+  "kind": "code",
+  "config": {
+    "source_ts": "export default async function handler(input) { return { total: input.args.a + input.args.b }; }",
+    "timeout": 5
+  },
+  "publish_fields": [{ "path": "total", "store": "tooldata" }]
+}
+```
+
+## The contract
+
+`source_ts` must **`export default async function handler(input)`** and return
+an object. The object is what `publish_fields` reads out of, exactly as an
+`http` operation's JSON response is. A return value that is not an object or an
+array is wrapped, so a bare `return 42` publishes at the path `result`.
+
+`input` is the whole interface — the same six roots the rest of the tree
+templates, as plain properties:
+
+```ts
+type Input = {
+  args: Record<string, any>;       // what the model sent
+  tooldata: Record<string, any>;   // published earlier in this tool run
+  userdata: Record<string, any>;   // the session's state
+  system_vars: Record<string, string>;
+  vars: Record<string, string>;
+  secrets: Record<string, string>;
+};
+```
+
+`system_vars` and `vars` are read-only here as everywhere else, and writing to
+`input.userdata` changes nothing — the way to write is to return the value and
+publish it.
+
+<Warning>
+**A code operation has no template syntax.** Write `input.system_vars.now`,
+never `{{system_vars.now}}`. Braces in the TypeScript are neither substituted
+nor flagged, so a `{{args.id}}` inside a string literal ships to your API as
+literal braces on every call.
+
+This is also the one place braces survive on purpose: a script that needs to
+build a mustache template for something downstream can.
+</Warning>
+
+Secrets are the one root with a rule attached: reach them by a **literal name** —
+`input.secrets.STRIPE_KEY` or `input.secrets["STRIPE_KEY"]`. The names a script
+needs are found by scanning its source, and only those are sent to the sandbox,
+so a name assembled at runtime resolves to `undefined`.
+
+## Config
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `source_ts` | string | required | Must export the handler. Cannot be blank |
+| `timeout` | number, seconds | `10` | Maximum `30`. Seconds, never milliseconds |
+| `compiled_js` | string | — | Server-written build output. Do not send it |
+
+The TypeScript is compiled **at publish**, not on the call, so a live call never
+waits for a build. Compiling is also how the operation is validated: a script
+that does not compile is a publish error naming the line. Types are stripped,
+not checked — annotations are for you, not for us, and a wrong one is not an
+error.
+
+## The sandbox
+
+Every run gets a fresh V8 isolate, created for that run and thrown away
+afterwards. Nothing persists between two runs, or between two `code` operations
+in the same tree — pass values through `tooldata`.
+
+**What is there:** the standard JavaScript built-ins — `JSON`, `Math`, `Date`,
+`Promise`, `Map`, `Set`, `RegExp`, `Intl` with full timezone data — plus two
+globals the platform adds, `console` and `fetch`.
+
+**What is not:** `require`, `import`, and every Node API. There is no `process`,
+no `Buffer`, no `URL` or `URLSearchParams`, no `TextEncoder`, no `crypto`, no
+`structuredClone`, no `atob`, and **no timers** — `setTimeout` does not exist.
+Build query strings by hand, and note that request signing (an HMAC over the
+body, say) cannot be done here.
+
+### `fetch`
+
+The sandbox's `fetch` is a small shim, not the browser API:
+
+```ts
+const res = await fetch(url, { method, headers, body });
+// res.status  number
+// res.ok      status is 2xx
+// res.headers plain object
+// await res.text()   string
+// await res.json()   parsed
+```
+
+A non-string `body` is JSON-stringified for you. There is no `Response` object,
+no streaming, and redirects are never followed.
+
+It is guarded the same way an [`http` operation](/tools/http#network-rules) is,
+and it throws on refusal:
+
+- `fetch failed: URL must be http(s)` — any other scheme, including `file:`
+- `fetch failed: destination 169.254.169.254 is not allowed (private/internal)` —
+  private, loopback, link-local, CGNAT, unique-local, multicast and reserved
+  addresses, checked at connection time so a rebinding DNS answer cannot slip
+  through
+
+Prefer an `http` operation when the call is the point: it is visible in the
+tree, its request and response show up in a test run, and it publishes without
+you writing any plumbing. Use `fetch` when a script genuinely needs a second
+round trip to finish its job.
+
+### Limits
+
+| Limit | Value |
+| --- | --- |
+| Wall-clock time | The operation's `timeout`, default 10 s, hard maximum 30 s |
+| Memory | 128 MB per run |
+| `console` lines kept | 100, each truncated to 2000 characters |
+| `fetch` response body | 1 MB |
+| `fetch` timeout | 10 s |
+| Script plus its input | 2 MB total |
+
+Going over time or memory fails the operation — `execution exceeded 10000ms` —
+and `on_error` decides what happens next.
+
+### Where `console` output goes
+
+`console.log`, `.info`, `.warn` and `.error` are captured per run.
+
+**On a test run they are the whole point**: each `code` operation in the trace shows
+its captured lines beside its return value, which is how you debug a script
+against a real response. If the script throws, the last ten lines are appended
+to the error the trace shows.
+
+**On a live call they are not shown to you.** They go to the platform's own
+logs, and the call detail page does not carry them. Debug in a test run.
+
+## Worked examples
+
+### Reshaping an API response
+
+An earlier `http` published the raw `slots` array. This turns it into something
+a `say` can use.
+
+```ts
+export default async function handler(input) {
+  const slots = input.tooldata.slots ?? [];
+  const morning = slots.filter((s) => Number(String(s.start).slice(0, 2)) < 12);
+
+  return {
+    count: morning.length,
+    spoken: morning.slice(0, 3).map((s) => s.label).join(", "),
+    first_id: morning.length ? morning[0].id : null,
+  };
+}
+```
+
+```json
+{
+  "kind": "code",
+  "config": { "source_ts": "…", "timeout": 5 },
+  "silent": true,
+  "publish_fields": [
+    { "path": "count", "store": "tooldata" },
+    { "path": "spoken", "store": "tooldata" }
+  ]
+}
+```
+
+### Business hours
+
+`{{system_vars.time}}` is `"7:26 PM"` — a string for a human, useless to
+compare. This is where the hours logic belongs:
+
+```ts
+export default async function handler(input) {
+  const now = new Date(input.system_vars.now);
+
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: input.vars.timezone,
+    weekday: "short",
+    hour: "numeric",
+    hour12: false,
+  }).formatToParts(now);
+
+  const weekday = parts.find((p) => p.type === "weekday").value;
+  const hour = Number(parts.find((p) => p.type === "hour").value);
+  const open = weekday !== "Sat" && weekday !== "Sun" && hour >= 9 && hour < 18;
+
+  console.log(`weekday=${weekday} hour=${hour} open=${open}`);
+  return { open, weekday, hour };
+}
+```
+
+<Note>
+The sandbox's own clock runs in UTC, so `getHours()` and `toLocaleString()`
+without a `timeZone` give you UTC, not the agent's zone. Always name the zone —
+either from `input.vars` as above, or as a literal `"Asia/Kolkata"`.
+`input.system_vars.now` already carries the agent's offset, so `new Date(...)`
+parses the right instant.
+</Note>
+
+Publish `open` into `tooldata` and branch on it:
+
+```json
+{
+  "kind": "if",
+  "config": { "left": "{{tooldata.open}}", "op": "eq", "right": true }
+}
+```
+
+Note the JSON boolean on the right rather than the string `"true"` — see
+[conditionals](/tools/conditionals#how-values-are-compared).
+
+### Combining two earlier operations
+
+Two `http` operations published a balance and a credit note. Neither knows about
+the other; this does the arithmetic.
+
+```ts
+export default async function handler(input) {
+  const balance = Number(input.tooldata.balance_due ?? 0);
+  const credit = Number(input.tooldata.credit_note ?? 0);
+  const due = Math.max(balance - credit, 0);
+
+  return {
+    amount_due: due.toFixed(2),
+    currency: input.vars.currency ?? "INR",
+    settled: due === 0,
+  };
+}
+```
+
+Publish `amount_due` and `settled` into `tooldata`, then read
+`{{tooldata.amount_due}}` in the `say` and branch on `{{tooldata.settled}}`.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Conditionals" href="/tools/conditionals">
+    Branching on what a script computed.
+  </Card>
+  <Card title="The HTTP operation" href="/tools/http">
+    The other half of most tools.
+  </Card>
+  <Card title="Templating and data" href="/tools/templating-and-data">
+    Publishing a return value, and choosing a store.
+  </Card>
+  <Card title="Testing and publishing" href="/tools/testing-and-publishing">
+    Where a script's `console` output is readable.
+  </Card>
+</CardGroup>

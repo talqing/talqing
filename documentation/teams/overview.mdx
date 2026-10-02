@@ -1,0 +1,99 @@
+---
+title: "Agent teams"
+description: "When to split one agent into several, and the three ways a conversation moves between them."
+---
+
+A **handoff** moves a live conversation from one agent to another: the caller
+stays on the same call, and a different prompt, model, voice and tool set takes
+over mid-sentence. It is not a [transfer](/tools/transfer) — a transfer hands
+the caller to a **human being** on a phone line, and a handoff hands them to
+**another agent on this platform**. Readers mix the two up constantly; the rest
+of this section is only ever about agent → agent.
+
+There are three ways to build one, and they differ in **who decides**.
+
+| Mechanism | Who decides | Where you configure it | Reach for it when |
+| --- | --- | --- | --- |
+| [`handoffs` on an agent](/teams/handoffs) | The **model** | `config.handoffs`, one entry per destination | The caller says what they need and an agent has to route them. This is the default. |
+| [The `handoff` operation](/teams/conditional-handoffs) | The **tree** | One operation inside a tool's operation tree | The decision follows from a lookup or an `if`, not from what the caller said. |
+| [`agent_team` on a request](/teams/agent-teams-on-a-call) | You, per call | `agent_team.members` on the request that starts the session | The cast is generated for this one call and would never be reused. |
+
+## The default: `handoffs` on the agent
+
+Each entry in `config.handoffs` becomes **one tool the model can call**, named
+`handoff_to_<name>`, and the model routes on that entry's `description`. Write
+the description as what belongs at that desk — "invoices, refunds, payment
+questions" — not as an instruction to the model.
+
+```json
+{
+  "handoffs": [
+    {
+      "name": "Billing",
+      "agent_id": "b41c7a29-6f2b-4c7a-9c1e-1d2a8f0b41c7",
+      "description": "invoices, refunds, payment questions and card details",
+      "context": "summary",
+      "message": "Let me put you through to billing."
+    }
+  ]
+}
+```
+
+<Warning>
+**Do not create a one-node tool per edge.** Three agents routing to each other
+is three agents with `handoffs` on them — not three agents plus six published
+tools. A tool per edge gives you six things to publish, six versions to keep in
+step, and a routing graph that is visible nowhere. The `handoff` operation is
+for the case the model should not decide.
+</Warning>
+
+## When to split one agent into several
+
+Split when the desks genuinely differ:
+
+- **A shorter prompt per agent.** One prompt covering billing, returns and
+  technical support is three policies the model holds at once and picks from
+  badly. Three prompts each hold one.
+- **Different models or voices per desk.** A cheap fast model on the front desk
+  and an expensive one on the desk that reasons about a refund. A different
+  language, a different [voice](/agents/voices).
+- **Tools scoped to the desk that needs them.** The refund tool is on the
+  billing agent and nowhere else, so the front desk cannot call it by mistake.
+
+Do not split when a single agent with clear instructions would do. Every hop
+costs a round trip while the target compiles, and the target then pays for
+whatever [context](/teams/context-policies) you carried across on every turn it
+takes. One agent has neither cost. Two agents whose prompts differ by a
+paragraph are one agent with a better prompt.
+
+## What crosses, and what does not
+
+A handoff is a change of agent inside one session, so:
+
+- **`userdata` crosses.** It is session state every agent on the call shares —
+  see [userdata](/agents/userdata).
+- **`vars` values cross.** One bag per session reaches every agent, each merged
+  over its own declared defaults — see [variables](/agents/variables).
+- **The conversation crosses as far as the edge's `context` policy says**, and
+  that is the decision worth the most care: [context
+  policies](/teams/context-policies).
+- **The transcript and the call record are one call throughout.** The whole
+  thing reads back as one conversation with the handover marked in it, and every
+  item says which agent produced it.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Handoffs" href="/teams/handoffs">
+    Every field on a handoff entry, and the rules validation enforces.
+  </Card>
+  <Card title="Context policies" href="/teams/context-policies">
+    What the next agent starts from, and what each choice costs.
+  </Card>
+  <Card title="Teams on a call" href="/teams/agent-teams-on-a-call">
+    A cast assembled for one request, where `members[0]` answers.
+  </Card>
+  <Card title="Patterns" href="/teams/patterns">
+    Front desk to specialists, handing back, and routing on a lookup.
+  </Card>
+</CardGroup>

@@ -1,0 +1,338 @@
+---
+title: "Web call features"
+description: "What a web call can do that a phone call cannot: images, screen share, live userdata, frontend actions and the avatar track."
+---
+
+A phone call is audio and nothing else. A web call has a page around it, and that
+page can hand the agent things a phone never could — a photo, a screen, the state
+of the form the caller is filling in — and take instructions back from it.
+
+Everything here assumes the setup on [web calls](/channels/web-calls): a session
+started with `useTalqingSession` from `@talqing/react` and wrapped in
+`TalqingSessionProvider`. The dashboard's own test call is built out of exactly
+these pieces, so what you see there is what these hooks give you.
+
+## Images
+
+The caller attaches a photo mid-call and the agent looks at it. The bytes go
+straight from the file input to the agent over the call's own data channel —
+there is no upload endpoint and nothing to correlate by hand.
+
+```tsx
+import { useTalqingConnection, useTalqingImages } from "@talqing/react";
+
+function AttachPhoto() {
+  const { room } = useTalqingConnection();
+  const { send, sent } = useTalqingImages(room);
+
+  return (
+    <>
+      <input
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        onChange={async (event) => {
+          const file = event.target.files?.[0];
+          if (!file) return;
+          try {
+            await send(file);
+          } catch (error: unknown) {
+            // Wrong type, over 10 MB, undecodable, or the agent is not on the
+            // call yet. The message is written for a person — show it as-is.
+            alert(error instanceof Error ? error.message : "That image could not be sent");
+          }
+        }}
+      />
+      <ul>
+        {sent.map((image) => (
+          <li key={image.streamId}>
+            <img src={image.previewUrl} alt={image.name} width={120} />
+            {image.status === "sending" && "Sending…"}
+            {image.status === "sent" && "Delivered — the agent sees it on your next turn"}
+            {(image.status === "failed" || image.status === "unknown") && image.error}
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+```
+
+**The agent deliberately does not speak when a photo lands.** The caller is
+mid-conversation and about to say what the photo is for; answering unprompted
+would talk over them. The image goes into the model's view and the agent replies
+on the caller's next turn. That means silence is the expected response, so it
+cannot double as "it arrived" — render the per-image status, or the caller has no
+way to tell a delivered photo from a lost one.
+
+`send(file)` resolves once the bytes are on their way and pushes an entry onto
+`sent`; the outcome lands on that entry afterwards.
+
+| `status` | Meaning |
+| --- | --- |
+| `sending` | The bytes are on the wire. |
+| `sent` | The agent has the image and it is in context. |
+| `failed` | The agent refused it; `error` says why. |
+| `unknown` | No acknowledgement within 30 seconds. The agent may never have received it. |
+
+`unknown` is the state people forget: the agent can go away mid-upload, and then
+no answer is ever coming. Four states, not two.
+
+### Limits
+
+| | |
+| --- | --- |
+| Formats | JPEG, PNG or WebP |
+| Size | 10 MB or smaller, on the decoded bytes |
+| Downscale before sending | Longest edge 1568px — the size the server stores anyway |
+| Re-encoding | PNG stays PNG; everything else is sent as JPEG, including a HEIC the operating system decoded for the file input |
+| Per conversation | 100 images over its whole life |
+
+The SDK exports the three steps separately if you want to run them yourself:
+`talqingImageRejection(file)` returns the sentence to show or `null`,
+`talqingDownscaleImage(file)` returns the resized `Blob`, and
+`talqingImageDataUrl(file)` does both and returns the `data:` URL a text message
+carries.
+
+<Note>
+Whether an agent can read an image at all is **decided by its model, not by a
+setting** — the catalog's `vision` flag. Send one to an agent whose model cannot
+see and the image comes back `failed` with `this agent's model cannot read
+images`. See [vision and images](/agents/vision-and-images).
+</Note>
+
+## Screen share
+
+The agent watches the caller's screen while they share it, and is handed the newest
+frame at the end of each of their turns.
+
+```tsx
+import { useTalqingScreenShare } from "@talqing/react";
+
+function ShareScreenButton() {
+  const { enabled, pending, start, stop } = useTalqingScreenShare();
+  return (
+    <button disabled={pending} onClick={() => void (enabled ? stop() : start())}>
+      {enabled ? "Stop sharing" : "Share screen"}
+    </button>
+  );
+}
+```
+
+<Warning>
+**`start()` must be called from a user click.** The browser's picker requires a
+transient user activation, so nothing on our side can open it for the person. An
+agent can *ask* for a screen; it can never take one. Write the prompt so it asks,
+and keep the button visible for the whole call rather than revealing it mid-sentence.
+</Warning>
+
+The capture and publish options are fixed — `TALQING_SCREEN_SHARE_CAPTURE` and
+`TALQING_SCREEN_SHARE_PUBLISH`, both exported so you can read them. One frame a
+second, h264, 1920×1080, `contentHint: "text"`. All four are deliberate:
+
+- **`contentHint: "text"`** tells the encoder to keep spatial detail. Lose it and
+  the agent starts misreading identifiers on screen.
+- **`videoCodec: "h264"`** is what keeps that hint. `livekit-client` forces
+  `contentHint = "motion"` on a screen share published as vp9 or av1, together with
+  `scalabilityMode: "L1T3"` — so **publishing on an SVC codec costs you
+  legibility**, and it is the first thing to check if the agent starts getting
+  characters wrong.
+- **`screenShareEncoding.maxFramerate: 1`** is the cap that actually binds.
+  `resolution.frameRate` reaches `getDisplayMedia` as a bare number, which WebRTC
+  reads as `ideal` — a wish, not a limit. The default publish ceiling is 15 fps,
+  and every delivered frame is copied into the agent's process before it can be
+  dropped. One frame a second is ample: the agent is handed the newest frame at the
+  end of each turn, and turns are seconds apart.
+- **`resolution` is set explicitly** rather than inherited, because the default
+  1080p is also only an `ideal`.
+
+The agent side is `vision_input.screenshare` on the config, and it has its own
+rules — cascade pipeline only, a model that reads images, and a prompt paragraph
+that is added for you. See [vision and images](/agents/vision-and-images).
+
+## Userdata from the page
+
+`userdata` is the session's own state: what the agent knows about the person,
+readable as `{{userdata.field}}` from its prompt and its tools. The page can read
+and write it while the call is running.
+
+```tsx
+import { useEffect } from "react";
+import { useTalqingUserdata } from "@talqing/react";
+
+function CartWatcher({ cartTotal }: { cartTotal: number }) {
+  const userdata = useTalqingUserdata();
+
+  useEffect(() => {
+    // Fire and forget: the agent reads it on its next turn.
+    void userdata.set({ cart_total: cartTotal });
+  }, [cartTotal, userdata]);
+
+  return null;
+}
+```
+
+`set(patch, responseTimeout?)` resolves to `{ ok, error? }` — `ok: false` with
+`agent participant is not connected` when the agent has not joined yet.
+`get(keys?, responseTimeout?)` returns the session's userdata as an object, or
+only the keys you name, and **throws** when the agent is not connected.
+
+Both are RPCs to the worker running the call, with a **3-second response timeout by
+default**. That is a real round trip over the call's data channel while the agent
+is talking, so write to it when something changes rather than on every keystroke,
+and never block a render on `get`.
+
+Two constraints come from the agent side: keys beginning with `_talqing` are
+reserved — a `set` containing one is refused and a `get` never returns one — and
+one RPC payload is capped at 16 KB.
+
+Outside a provider, the same two calls take the room directly:
+`setTalqingUserdata(room, patch, responseTimeout = 3)` and
+`getTalqingUserdata(room, keys?, responseTimeout = 3)`.
+
+Whatever the call ends with is merged onto the contact's record, so it is there
+again on their next call. See [userdata](/agents/userdata).
+
+## Frontend actions
+
+A tool's `frontend_rpc` operation calls **into your page** — to open a checkout,
+highlight a row, or read something only the page knows. The agent sends one
+envelope method, `talqing.frontend_rpc`, and the SDK dispatches on
+`envelope.method`.
+
+```tsx
+import { useMemo } from "react";
+import { TalqingRpcError, useTalqingRpcHandlers } from "@talqing/react";
+
+function AgentActions({ onNavigate }: { onNavigate: (href: string) => void }) {
+  const handlers = useMemo(
+    () => ({
+      open_page: async ({ payload }: { payload: string }) => {
+        const { href } = JSON.parse(payload) as { href: string };
+        onNavigate(href);
+        return JSON.stringify({ ok: true });
+      },
+      read_form: async () => {
+        const input = document.querySelector<HTMLInputElement>("#email");
+        return JSON.stringify({ email: input ? input.value : null });
+      },
+      cancel_order: async () => {
+        // Anything you throw becomes an RPC error the tool can branch on.
+        throw new TalqingRpcError(1403, "the customer declined");
+      },
+    }),
+    [onNavigate],
+  );
+
+  useTalqingRpcHandlers(handlers);
+  return null;
+}
+```
+
+The envelope on the wire is `{ "method": "open_page", "payload": { … } }`. Your
+handler receives `{ payload, responseTimeout?, callerIdentity? }` where `payload`
+is the **JSON string of `envelope.payload`** — `"{}"` when the operation sent none
+— and returns a string. That string is what the tool gets back: valid JSON is
+parsed, and anything else is wrapped as `{ "result": "<your string>" }`.
+
+- Register a `"*"` handler to catch every method. It receives the **whole
+  envelope** as its payload string, `method` included.
+- An unrecognised method with no `"*"` handler throws back as RPC error code
+  **1404**, `No frontend RPC handler registered for <method>`. Any other throw
+  becomes code **1500** with the error's message; throw a `TalqingRpcError` to
+  choose the code yourself.
+- The agent waits **5 seconds** for your answer unless the operation sets its own
+  timeout. A handler that awaits a person is a handler that times out.
+- Pass `false` as the second argument to unregister — `useTalqingRpcHandlers(handlers, isReady)`.
+
+If all you want is to render what the agent asked for, `useTalqingFrontendRpcs()`
+registers the wildcard for you and keeps the latest payload per method:
+
+```tsx
+const { actions, clear } = useTalqingFrontendRpcs();
+// actions["show_offer"] === { payload: { … }, at: 1735689600000 }
+```
+
+The operation side — declaring the method, its payload and what the model does
+with the answer — is on [frontend RPC](/tools/frontend-rpc).
+
+## The avatar's video
+
+A `video` agent joins wearing an [Anam avatar](/agents/video-avatars), published by
+a second participant on the agent's behalf. `useTalqingAvatarTrack` finds it
+without you touching participants, falling back to the agent's own camera or
+screen-share track if there is no avatar worker.
+
+```tsx
+import { useTalqingAvatarTrack, VideoTrack } from "@talqing/react";
+
+function AvatarStage() {
+  const track = useTalqingAvatarTrack();
+  if (!track) return <p>Avatar joining…</p>;
+  return <VideoTrack trackRef={track} className="avatar" />;
+}
+```
+
+`VideoTrack` is LiveKit's own, re-exported here so one import covers the call.
+Talqing does not pin the avatar's frame size — each avatar model publishes at its
+own — so size the container by aspect ratio and crop rather than assuming a
+resolution.
+
+The avatar's voice is the room's audio like any other, already played by
+`TalqingSessionProvider`. Adding an audio element for the avatar plays the call
+twice.
+
+## The agent's state and the transcript
+
+```tsx
+import { useAgent, useSessionMessages, useTalqingConnection } from "@talqing/react";
+```
+
+<ResponseField name="useTalqingConnection()" type="{ isConnected, connectionState, room, start, end }">
+  The call itself. `room` is what `useTalqingImages` takes, and the way down to
+  raw `livekit-client`; `end()` hangs up.
+</ResponseField>
+
+<ResponseField name="useAgent()" type="UseAgentReturn">
+  Where the agent is — LiveKit's own hook, re-exported. `state` is one of
+  `disconnected`, `connecting`, `pre-connect-buffering`, `initializing`, `idle`,
+  `listening`, `thinking`, `speaking` or `failed`, and the return is a
+  discriminated union over it: `isConnected`, `canListen`, `isFinished` and
+  `isPending` are derived for you, and `failureReasons` is there on the `failed`
+  branch.
+</ResponseField>
+
+<ResponseField name="useSessionMessages()" type="{ messages, send, isSending }">
+  The live transcript, and a way to type into the call — LiveKit's own hook,
+  re-exported. `send(text)` puts a text message on a voice call, useful for a
+  spelling, an order number, or an accessible path into an audio agent.
+</ResponseField>
+
+Each message carries `id`, `timestamp`, `message` and, where there is one, `from`.
+`from?.isLocal` distinguishes the caller from the agent, and `type` says which
+stream it came from — `userTranscript`, `agentTranscript` or `chatMessage`.
+
+The room's state is not the agent's state. `isConnected` goes true partway through
+the join, while the agent is still `connecting`, `pre-connect-buffering` or
+`initializing` — a UI keyed off `isConnected` alone tells the caller to speak to
+somebody who is not listening yet. Wait for `listening`.
+
+`messages` belongs to the live session. Once the call has ended, the stored
+transcript — with every tool call, its output, the cost and the per-stage latency —
+is on `GET /v1/calls/{session_id}`. See [calls](/observability/calls).
+
+For a noisy problem, `setLogLevel("debug")` from `livekit-client` turns up the
+underlying client's logging.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="React SDK reference" href="/sdks/react">
+    Every export with its full signature.
+  </Card>
+  <Card title="Frontend RPC" href="/tools/frontend-rpc">
+    Building the tool operation that calls these handlers.
+  </Card>
+  <Card title="Vision and images" href="/agents/vision-and-images">
+    Which models can see, and the `vision_input.screenshare` rules.
+  </Card>
+</CardGroup>

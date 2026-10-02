@@ -1,0 +1,117 @@
+---
+title: "Model fallbacks"
+description: "A second provider on stt, llm or tts, every rule it has to satisfy, and what a failover costs."
+---
+
+Each of the three cascade slots takes an optional `fallback` — a second provider and model the agent switches to mid-call when the primary starts failing. It is off by default, and it is not free to set up: the fallback needs its own provider key before the agent will publish, and a call that fails over is billed to both providers for the parts each one served.
+
+Leave it unset unless redundancy is the point. Most agents do not need one.
+
+## What a failover actually is
+
+Both models are built when the session starts, side by side. Traffic goes to the primary; the fallback takes over only once the primary returns errors, and it keeps the call rather than recovering it — the turn that triggered the switch is the turn that was already going wrong.
+
+Two consequences worth knowing before you add one:
+
+- **A missing fallback key breaks the whole session, not only the failover.** Because both models are built up front, an agent whose fallback provider has no key fails at the start of every call, including calls the primary would have served perfectly. This is why publish demands the key.
+- **There is no failover for a realtime model.** A speech-to-speech model is not a language model, a transcriber or a voice, so there is nothing to wrap. `avatar`, `noise_cancellation` and the post-call analysis model have no fallback either.
+
+## Setting one
+
+A fallback is a provider and model, plus whatever settings belong to that stage — a text-to-speech fallback carries its own voice and speed, a language model fallback its own thinking effort, priority lane and provider tools. Nothing is inherited from the primary.
+
+<CodeGroup>
+```bash cURL
+AGENT_ID=0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30
+
+curl -s -X PATCH "https://api.in.talqing.com/v1/agents/$AGENT_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "llm": { "fallback": { "provider": "gemini", "model": "gemini-3.5-flash-lite" } },
+      "stt": { "fallback": { "provider": "soniox", "model": "stt-rt-v5" } }
+    }
+  }'
+```
+
+```typescript TypeScript
+const agent_id = "0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30";
+
+await talqing.agents.update({
+  agent_id,
+  updateAgentRequest: {
+    config: {
+      llm: { fallback: { provider: "gemini", model: "gemini-3.5-flash-lite" } },
+      stt: { fallback: { provider: "soniox", model: "stt-rt-v5" } },
+    },
+  },
+});
+```
+
+```python Python
+agent_id = "0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30"
+
+talqing.agents.update(
+    agent_id,
+    config={
+        "llm": {"fallback": {"provider": "gemini", "model": "gemini-3.5-flash-lite"}},
+        "stt": {"fallback": {"provider": "soniox", "model": "stt-rt-v5"}},
+    },
+)
+```
+</CodeGroup>
+
+Remove one by setting `fallback` to `null`. In the dashboard, each stage of the Models card has an **Add a fallback** button that opens the same provider and model pair below the primary, with a **Remove** link.
+
+## The rules
+
+Everything here is checked on every write except the provider key, which is checked when you publish. Errors block the write; warnings come back on `POST /v1/agents/{agent_id}/validate` and do not.
+
+| Rule | Applies to | Why |
+| --- | --- | --- |
+| Must be a different provider and model from the primary | all three | A fallback to the same model fails the same way. |
+| Cannot have a fallback of its own | all three | Not a field — the depth is capped at one. A chain is more configuration than resilience, and every hop is another key to keep alive. |
+| Must be a catalog entry that supports the agent's channel | all three | Same check the primary gets. |
+| Must speak the agent's `language`, and cannot be a `language_required` model when the agent is on Auto | `stt`, `tts` | The agent has one language, and both models have to serve it. |
+| Its provider needs a key in this workspace | all three | Refused at publish, naming the provider. |
+| Must match the primary's `streaming` flag — streaming backs streaming, batch backs batch | `stt` | One voice detector serves both models for the whole call, and only a batch model depends on it for end-of-turn. A mixed pair would change turn-taking after a failover. |
+| Must match the primary's `expressive` setting | `tts` | The tag dialect is taught once, from the primary, and the agent keeps writing tags after a failover. A voice that does not speak them reads them out to the caller. |
+| Its `speed` must sit in its own model's range, and `stability` / `similarity_boost` only on a model that reads them | `tts` | Its settings are checked against its own catalog entry, not the primary's. |
+| Its `reasoning_effort` must be one its own model offers | `llm` | The accepted values differ per model — `minimal` is the floor at xAI and Gemini and a hard refusal on every gpt-5.6. |
+| Its `priority` only on a model that sells a lane | `llm` | `gpt-5.4-nano` sells none. |
+| Its `builtin_tools` must be types its own model declares | `llm` | The same tool name is a different object at each vendor. |
+| Must read images if the agent watches a screen share | `llm` | A failover would leave the agent blind to the screen mid-call. |
+| Warning if the primary reads images and the fallback does not | `llm` | The agent reads images until the day it fails over, and then quietly stops. |
+
+<Note>
+A fallback that offers **fewer** provider tools than the primary — or none — is allowed on purpose. Losing web search for the rest of a call is a much better outcome than losing the call.
+</Note>
+
+## What a failover costs
+
+**Provider spend is split by what each model actually served.** Usage is metered per model, so a call that failed over halfway produces a line for the primary covering the first half and a line for the fallback covering the second. Both land on your own provider accounts, at each provider's own rate. The priority lane is recorded per model too, from what that model was asked for — a fallback does not inherit the primary's lane.
+
+**The platform fee does not change.** It is per minute of the call, whichever models ran it.
+
+**The dashboard's per-minute estimate prices the primary only.** It has no way to know how much of a call a failover would serve, so treat the estimate as the no-failover case.
+
+## When to set one
+
+Set a fallback when the agent is answering a phone number you cannot let go dark, and you already hold a key for a second provider. A pair that shares a language and a register is what makes the switch inaudible.
+
+Do not set one to hedge on quality. A fallback is chosen at the moment a provider is erroring, which is not the moment to be switching to a model whose voice or reasoning is noticeably different — and it costs a second key, a second set of settings, and a publish that now fails if either provider is unconfigured.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Models" href="/agents/models">
+    Every model with its channels, languages, flags and price.
+  </Card>
+  <Card title="Validation" href="/agents/validation">
+    Errors against warnings, and the common refusals.
+  </Card>
+  <Card title="Costs" href="/observability/costs">
+    Reading provider spend and the platform fee for a call.
+  </Card>
+</CardGroup>

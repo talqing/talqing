@@ -1,0 +1,269 @@
+---
+title: "The HTTP operation"
+description: "Call a REST API from inside a tool: every config field, authentication, what counts as failure, and the network rules."
+---
+
+`http` calls a JSON REST API and hands the parsed response to the rest of the
+tree. It is the operation most tools are built around.
+
+```json
+{
+  "kind": "http",
+  "config": {
+    "method": "GET",
+    "url": "https://api.example.com/orders/{{args.order_id}}",
+    "headers": { "Authorization": "Bearer {{secrets.SHOP_API_KEY}}" },
+    "timeout": 10
+  },
+  "publish_fields": [{ "path": "status", "store": "tooldata" }]
+}
+```
+
+## Config
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `method` | `GET` \| `POST` \| `PUT` \| `PATCH` \| `DELETE` | required | A fixed choice. Not templated |
+| `url` | string | required | Templated. Must be `http` or `https` with a host |
+| `headers` | object of strings | `{}` | Templated, names and values both sent as written |
+| `query` | object of strings | `{}` | Templated |
+| `body` | any | `null` | Templated, including inside nested objects and arrays |
+| `timeout` | number, seconds | `20` | Maximum `120`. Seconds, never milliseconds |
+
+And on the operation itself: `silent`, `publish_fields`, `background_execution`
+and `on_error` — see [the operation tree](/tools/operation-tree).
+
+### The body
+
+A JSON object or array is sent as a JSON body. A string is sent as the raw body,
+in which case set your own `Content-Type`. `null` sends no body at all.
+
+Templates resolve everywhere inside it, and a value that is exactly one token
+keeps its type:
+
+```json
+{
+  "kind": "http",
+  "config": {
+    "method": "POST",
+    "url": "https://api.example.com/v2/bookings",
+    "headers": { "Authorization": "Bearer {{secrets.CLINIC_API_KEY}}" },
+    "body": {
+      "slot_id": "{{userdata.held_slot_id}}",
+      "party_size": "{{args.party_size}}",
+      "caller": {
+        "name": "{{userdata.name}}",
+        "phone": "{{system_vars.human_phone_number}}"
+      },
+      "source": "voice-agent",
+      "requested_at": "{{system_vars.now}}"
+    }
+  }
+}
+```
+
+`party_size` arrives as the number the model sent, not as `"4"`, because that
+string is exactly one token. A value that is exactly one token and resolves to
+nothing is sent as `null`.
+
+### Headers and query
+
+A header or query value that is exactly one token and resolves to nothing — an
+optional argument the model left out, a `userdata` key nothing wrote — is left
+out of the request rather than sent empty. `"query": { "status": "{{args.status}}" }`
+sends no `status` filter at all when the model gives none. A token inside longer
+text resolves to an empty string instead: `id={{userdata.customer_id}}` sends `id=`.
+
+Every template root works in a header. Two values an HTTP header cannot carry
+are refused rather than allowed to fail deep inside the client:
+
+- Non-ASCII, e.g. a caller's name that resolved to `José` —
+  `the 'X-Customer-Name' header resolved to a value an HTTP header cannot carry (non-ASCII)`.
+- A line break or a null byte — the same message, ending `(a line break)`.
+
+## Authentication
+
+Put credentials in [workspace secrets](/platform/secrets) and read them as
+`{{secrets.NAME}}`. The model never sees a secret: only the secrets a tree
+actually references are loaded, and a test run redacts them out of the trace.
+
+<Warning>
+An `Authorization` header built out of `{{args.…}}` is a credential the **model**
+chose. Publish warns on any of `Authorization`, `X-Api-Key`, `Api-Key` and
+`Cookie` whose value reads a tool argument. It is a warning rather than an error
+— a short-lived token an earlier operation published into args is a real, if
+rare, pattern — but if that is not what you are doing, it is a hole.
+</Warning>
+
+A secret this tool references cannot be deleted — the delete is refused and
+names the tool. See [secrets](/platform/secrets#deleting-one).
+
+## What counts as failure
+
+The operation expects JSON.
+
+| Outcome | Result |
+| --- | --- |
+| Status `400` or above | Fails: `HTTP request failed with status 500` |
+| A body that is not JSON | Fails: `HTTP operation returned a non-JSON response` |
+| A body over 1 MB | Fails: `HTTP response exceeds 1048576 bytes` |
+| An empty body | Succeeds, and the result is `{}` |
+| A `3xx` | **Not** a failure, and **not** followed — you get whatever body the redirect carried, which is usually nothing |
+
+Because redirects are not followed, point the URL at the endpoint itself. A URL
+that 301s to its canonical form will not fail loudly; it will hand the rest of
+the tree an empty object, and then any `publish_fields` on it will fail with
+`publish field path '…' was not found in operation output`.
+
+**There are no retries.** One request, one outcome. If a flaky endpoint should
+not take the call down with it, set `on_error: "continue"` and write the
+fallback path yourself.
+
+## Network rules
+
+Requests go out over `http` or `https` only — any other scheme is refused with
+`HTTP operation URL must be http(s) with a host`.
+
+The host is resolved before the request goes out, and **every address it
+resolves to must be public**. These are refused with
+`destination <ip> is not allowed (private/internal)`:
+
+- Private ranges — `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
+- Loopback — `127.0.0.0/8`, `::1`
+- Link-local, which includes the cloud metadata address — `169.254.0.0/16`
+  (so `169.254.169.254`), `fe80::/10`
+- Carrier-grade NAT — `100.64.0.0/10`
+- Unique local IPv6 — `fc00::/7`
+- Multicast, reserved and unspecified addresses
+
+A host that does not resolve fails with `could not resolve host 'api.example.com'`.
+The connection is then pinned to the vetted address, with the original hostname
+kept for the `Host` header and for TLS, so a second DNS answer cannot redirect
+the request somewhere else.
+
+The practical consequence: **an endpoint on your private network is not
+reachable from a tool.** Put it behind a public hostname with its own
+authentication, and keep the credential in a workspace secret.
+
+## Worked examples
+
+### A lookup that publishes two fields
+
+```json
+{
+  "kind": "http",
+  "config": {
+    "method": "GET",
+    "url": "https://api.example.com/v1/customers/lookup",
+    "query": { "phone": "{{system_vars.human_phone_number}}" },
+    "headers": { "Authorization": "Bearer {{secrets.CRM_API_KEY}}" },
+    "timeout": 8
+  },
+  "silent": true,
+  "publish_fields": [
+    { "path": "customer.first_name", "key": "name", "store": "userdata" },
+    { "path": "customer.plan.tier", "key": "tier", "store": "userdata" }
+  ]
+}
+```
+
+Both go to `userdata`, because the agent's prompt and every later tool on the
+call should be able to use them. `silent` keeps the raw CRM envelope away from
+the model — what the agent needs is the two values, not the JSON.
+
+This one is a natural [`on_enter` hook](/agents/lifecycle-hooks): it runs before
+the greeting, and the greeting can then say the caller's name.
+
+### A booking
+
+```json
+[
+  {
+    "kind": "say",
+    "config": { "text": "Let me get that booked for you." }
+  },
+  {
+    "kind": "http",
+    "config": {
+      "method": "POST",
+      "url": "https://api.example.com/v2/bookings",
+      "headers": {
+        "Authorization": "Bearer {{secrets.CLINIC_API_KEY}}",
+        "Idempotency-Key": "{{userdata.held_slot_id}}"
+      },
+      "body": {
+        "slot_id": "{{userdata.held_slot_id}}",
+        "reason": "{{args.reason}}",
+        "phone": "{{system_vars.human_phone_number}}"
+      },
+      "timeout": 15
+    },
+    "silent": true,
+    "publish_fields": [
+      { "path": "booking.reference", "key": "booking_reference", "store": "userdata" }
+    ]
+  },
+  {
+    "kind": "say",
+    "config": { "text": "You are booked in. Your reference is {{userdata.booking_reference}}." }
+  }
+]
+```
+
+The `say` before the request covers the latency — the tree keeps running while
+the line plays, so the caller hears something during the fifteen seconds the
+POST is allowed to take. The reference goes to `userdata` so the agent can
+repeat it later in the call.
+
+### One that fails and carries on
+
+Logging a lead should never cost the caller their answer:
+
+```json
+[
+  {
+    "kind": "http",
+    "config": {
+      "method": "POST",
+      "url": "https://api.example.com/v1/leads",
+      "headers": { "Authorization": "Bearer {{secrets.CRM_API_KEY}}" },
+      "body": {
+        "phone": "{{system_vars.human_phone_number}}",
+        "interest": "{{args.interest}}",
+        "captured_at": "{{system_vars.now}}"
+      },
+      "timeout": 5
+    },
+    "on_error": "continue",
+    "silent": true
+  },
+  {
+    "kind": "generate_reply",
+    "config": { "instructions": "Confirm you have their details and ask when suits them for a callback." }
+  }
+]
+```
+
+Two notes. The failing operation publishes nothing, so do not read
+`{{tooldata.…}}` from it afterwards — the read would resolve to empty, and
+validation cannot warn you, because it checks what an operation declares rather
+than whether it ran. And if nothing downstream needs the response at all, the
+better tool is `background_execution: true`, which fires the request and does
+not wait — no result, and therefore no `publish_fields`.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="The code operation" href="/tools/code">
+    When the response needs reshaping before anything can use it.
+  </Card>
+  <Card title="Templating and data" href="/tools/templating-and-data">
+    `publish_fields`, the two stores, and the six roots.
+  </Card>
+  <Card title="Testing and publishing" href="/tools/testing-and-publishing">
+    Run the draft against the real endpoint and read the request we sent.
+  </Card>
+  <Card title="Secrets" href="/platform/secrets">
+    Creating the credential this operation reads.
+  </Card>
+</CardGroup>

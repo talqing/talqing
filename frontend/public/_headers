@@ -1,0 +1,11 @@
+# Cloudflare Pages. This build is served on talqing.com and on hosts that must
+# never be indexed in its place: the project's pages.dev aliases and the dev
+# dashboard.
+https://:project.pages.dev/*
+  X-Robots-Tag: noindex
+
+https://:version.:project.pages.dev/*
+  X-Robots-Tag: noindex
+
+https://app.dev.talqing.com/*
+  X-Robots-Tag: noindex

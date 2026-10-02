@@ -1,0 +1,95 @@
+---
+title: "Migrating from Vapi"
+description: "A concept-by-concept mapping for a team moving a working voice agent onto Talqing, and an honest list of what we do not have."
+---
+
+If you have a Vapi assistant in production and you are working out what a move would cost, this page is the map. It is a translation of concepts, not a pitch: where the same idea has a different name, where the shape genuinely differs, and where we have nothing at all.
+
+**Most of your work carries over unchanged.** Your prompt is a prompt — the craft of writing for speech is the same craft, and it pastes across. Your provider accounts stay yours: Talqing is strictly bring-your-own-key, so your OpenAI, Deepgram, Cartesia or ElevenLabs account, its spend, its rate limits and its data agreements are unaffected by the move, and we never hold a provider credential of our own. Your phone numbers stay yours too, because you bring numbers you already own at a carrier rather than buying them here. And your tool endpoints stay where they are — an HTTP API that answers JSON is exactly what a Talqing tool calls.
+
+## The concept mapping
+
+| On Vapi | Here | What is different |
+| --- | --- | --- |
+| Assistant | **Agent** | One `config` object plus what you attach: tools, MCP servers, FAQs, handoff destinations. See [agents overview](/agents/overview). |
+| Squad | **Agent with `handoffs`** | Each entry becomes one tool the model can call, and it routes on that entry's `description`. Three agents routing to each other is three agents with `handoffs` on them, not three agents plus six tools. See [agent teams](/teams/overview). |
+| Workflow | **Agent task**, or `handoffs` | Two different things live under that one word. Work with an input and an answer — research a company, classify a message, pull a field out of a document — is an [agent task](/tasks/overview): named inputs, a typed output, no conversation. A conversation that routes between specialists is `handoffs`. |
+| Tool / function | **Tool with an operation tree** | The bigger difference on this page. A tool is not one webhook call: it is an ordered tree of operations that can call an API, transform the result in a TypeScript sandbox, speak a line, branch on a value, hand off to another agent, transfer to a person or end the call — **with no server of yours in the loop**. A lookup-then-answer tool that used to need an endpoint is often two operations and no code. See [the operation tree](/tools/operation-tree). |
+| Server URL / server messages | **Webhooks**, and the `http` operation | Two halves. Events you react to *after the fact* are [webhooks](/observability/webhooks) — sixteen types, workspace-wide, HMAC-signed. Calls the agent makes *during* the conversation are `http` operations inside a tool. There is no single server URL that receives everything. |
+| Transient assistant | **Inline `agent` on the request** | Pass a whole agent definition on the call instead of an id, and it runs for that call and is stored nowhere. `agent_override` is the middle ground: change one field of a published agent for one call. See [per-call configuration](/agents/per-call-configuration). |
+| Variable values / dynamic variables | **`userdata` and `vars`** | Two roots, deliberately. `userdata` is facts about the *person*: readable as `{{userdata.name}}`, writable by any tool, merged onto their contact record and replayed into their next conversation. `vars` is configuration of the *session*: declared on the agent, supplied by the request that starts it, read-only for the whole call. See [variables](/agents/variables). |
+| Analysis plan / structured data | **Post-call analysis** | A summary, a three-valued `outcome` (`success`, `failure`, `unknown`) judged against a prompt you write, and up to 25 typed fields extracted from the transcript. Runs on the agent's own model, so it needs no second provider key, and adds roughly 5% to the cost of a call. On text it runs when the chat ends. See [call analysis](/observability/call-analysis). |
+
+## What is different, and worth knowing before you plan
+
+**Draft and published are real, and publishing pins tool versions.** Every write lands on the draft; live traffic runs the last published version, which is an immutable snapshot. Publishing an agent pins each attached tool to the tool version that is live *at that moment* — so republishing a tool does not change any live behaviour until the agent is published again. That is a feature when you are editing a tool six agents share, and a surprise the first time you expect an edit to take effect. See [versions](/agents/versions).
+
+**An update merges, but a list is sent whole.** `PATCH /v1/agents/{agent_id}` takes only the fields you change: objects such as `llm` merge key by key, and an explicit `null` clears a field. A list — `tools`, `handoffs`, `mcps` — replaces the stored one, so adding an entry means sending the full list. An unknown field is refused rather than ignored, so a field carried over from a Vapi assistant fails loudly. See [updating an agent](/agents/overview#updating-an-agent).
+
+**A phone number needs a published `voice` agent, and one specific thing must hold.** The agent must be `voice` — a video agent cannot answer a number — and it must not declare a `required` variable with no `default`. An inbound call carries no request of ours to supply one, so assigning the number, publishing that config under a number already assigned, and rolling back to it are all refused. Anything an inbound agent needs must have a default.
+
+**Bring-your-own-key is strict, and the platform fee is our only charge.** Model, speech and avatar spend goes to your own provider accounts on your own keys; we add a per-minute platform fee on voice and video, and **$0.0001 per answered message on text**. There is no bundled model price and no resold minute anywhere in the product. See [pricing and credits](/get-started/pricing-and-credits).
+
+**Regions are real and resources belong to one.** An agent, a tool, a task, a call, a phone number and the credit balance belong to the base URL they were created against — `https://api.in.talqing.com` or `https://api.us.talqing.com`. Your token is not regional and reaches both. Migrating into the wrong region means recreating, not moving. See [regions](/get-started/regions).
+
+## What we do not have
+
+Read this list before you plan anything, because finding one of these out later is worse than reading it now. None of the following exists on Talqing today, in any form, under any name:
+
+- **Answering-machine detection is the agent's model, not a separate classifier.** [`voicemail_detection`](/agents/voicemail) gives the agent a tool it calls when it hears a machine, then leaves a fixed message (or none) and hangs up. There is no beep-detection wait and no separate provider to pick.
+- **Document ingestion.** No document upload, no site crawl and no retrieval over files. Curated answers are covered: an [FAQ](/agents/faqs) is a list of question-and-answer pairs you write, which the agent quotes when one is asked. Anything larger or changing goes behind a [tool](/tools/overview) that looks it up.
+- **SMS.** No text messaging of any kind on a phone number. Outbound email exists; SMS does not.
+- **Live call monitoring or barge-in.** You cannot listen to a call in progress or join one. You read a call after it ends.
+- **Staged environments.** There is draft and there is published — no separate test and production projects, and no promote step between them.
+- **Automated agent testing.** No test suites, no scripted callers, no scored runs. Testing is a real call or a real chat.
+- **An audit log.** There is no record of who changed what and when.
+- **Configurable concurrency or spend caps.** No account-level cap on concurrent calls and no budget ceiling. A call has `max_duration_seconds` and a batch has `max_concurrency`; nothing else does.
+- **An embeddable chat widget.** Web chat is an SDK integration you build. See [website chat](/guides/website-chat).
+
+## A migration checklist
+
+<Steps>
+
+<Step title="Add your provider keys">
+On the **BYOK** page, add a key for every provider your model stack names — speech-to-text, LLM, text-to-speech, and any fallback. Each key is verified with the provider when it is saved, and an agent whose provider has no key will not publish. See [provider keys](/get-started/provider-keys).
+</Step>
+
+<Step title="Recreate the agent">
+Paste the prompt across, then pick models from `GET /v1/catalog`, which is the only source of valid provider and model pairs and also states what each supports — channels, languages, speed range, default voice. Set `language` once on the agent; there is no language field on the individual models. See [models](/agents/models).
+</Step>
+
+<Step title="Rebuild each tool as an operation tree">
+Take each function one at a time and ask what still needs a server. A tool that fetched a record and let the model narrate it is an `http` operation and nothing else. One that fetched, reshaped and branched is `http` → `code` → `if`, with no endpoint of yours in the middle. Keep the argument schema close to what you have — every property needs a `description`, because that is the only instruction the model gets about what to put there. Then validate and publish each tool: an unpublished tool cannot be attached. See [tools](/tools/overview).
+</Step>
+
+<Step title="Validate and publish">
+`POST /v1/agents/{agent_id}/validate` reports errors and warnings against the same rules publishing enforces. Fix the errors, read the warnings, then publish. Publishing is what pins your tool versions. See [validation](/agents/validation).
+</Step>
+
+<Step title="Connect your carrier and import your number">
+Create a carrier account for Plivo, Twilio, Vobiz or Exotel, provision it, then import the numbers that account already owns. Numbers are bought in the carrier's console, never here. Some carrier work happens in that console and no API can confirm it — an account's `setup_steps` names anything outstanding. See [carrier accounts](/telephony/carrier-accounts) and [phone numbers](/telephony/phone-numbers).
+</Step>
+
+<Step title="Assign the agent and make one real call">
+Assign the published voice agent to the number and check `readiness` reads `live` rather than `needs_agent` or `needs_carrier_setup`. Then call it. There is no dry-run mode and no sandbox: a test call is a real, billable call. Read the whole record afterwards — `GET /v1/calls/{session_id}` gives the transcript with every tool call and its output, plus a per-stage latency breakdown, which is where you find out why something was slow. See [the call record](/observability/calls).
+</Step>
+
+<Step title="Move traffic">
+Point the number at the new agent when the transcripts read the way the old ones did. Keeping the old assistant running in parallel costs nothing here, since a number that is not pointed at an agent takes no calls.
+</Step>
+
+</Steps>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Core concepts" href="/get-started/core-concepts">
+    Agent, tool, task, conversation, call, session — the vocabulary, once.
+  </Card>
+  <Card title="The operation tree" href="/tools/operation-tree">
+    The part of the model that is most unlike what you have today.
+  </Card>
+  <Card title="Inbound support line" href="/guides/inbound-support-line">
+    The same pieces built end to end, from nothing to a number taking calls.
+  </Card>
+</CardGroup>

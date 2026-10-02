@@ -1,0 +1,446 @@
+---
+title: "Reviewing and sending"
+description: "Read every draft, edit what you want, and create a send you can schedule, pace, pause and cancel."
+---
+
+Drafting produces drafts and stops. Nothing has been emailed, and nothing will be until a person reads the rows and creates a **send** over the ones they picked.
+
+A send is a row of its own: it has a start time, business hours, a pace, a daily ceiling and a lifecycle. You can schedule it for Monday, pace it at one email a minute, pause it when you see something wrong and cancel it to get every unsent draft back.
+
+## Reading the rows
+
+`GET /v1/email/batches/{batch_id}/recipients` returns the batch's rows in the order they were uploaded, 50 at a time.
+
+<CodeGroup>
+```bash cURL
+curl -sS "https://api.in.talqing.com/v1/email/batches/7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57/recipients?status=draft&limit=50" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const page = await talqing.email.batches.recipients.list({
+  batch_id: "7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57",
+  status: "draft",
+  limit: 50,
+});
+
+for (const row of page.items) {
+  console.log(row.row_number, row.columns.email, row.not_ready_reason ?? "ready");
+}
+```
+
+```python Python
+page = talqing.email.batches.recipients.list(
+    "7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57", status="draft", limit=50
+)
+
+for row in page["items"]:
+    print(row["row_number"], row["columns"]["email"], row["not_ready_reason"] or "ready")
+```
+</CodeGroup>
+
+Each row carries the merged column space and the three layers that made it, separately.
+
+| Field | What it holds |
+| --- | --- |
+| `columns` | The merged space: `input`, then `output`, then `overrides`. This is what `field_map` resolves against and what the review table renders. |
+| `input` | The row exactly as you uploaded it, keyed by CSV header, values kept as strings. |
+| `output` | What the task produced for this row, or `null` if it has not drafted yet. |
+| `overrides` | What a person edited. Merged last, so it wins. |
+| `status` | Where the row is. The table at the bottom of this page lists every value. |
+| `not_ready_reason` | Why this row cannot be sent yet, or `null` when it can. Computed on every read, never stored, and `null` on every `draft` — see below. |
+| `skip_reason` | `operator` if a person skipped it, `duplicate_recipient` if the send found another row in this batch with the same address, `unfillable` if it can never be sent — see below. |
+| `last_error` | Why the last attempt failed — see [monitoring](/email/monitoring). |
+| `task_run_id` | The run that drafted this row, for reading its trace. |
+| `task_version` | Which published version of the task wrote it. This is what `redraft` with `selection: "stale_version"` matches on. |
+| `send_run_id` | The send that took this row to go out. Written when a send claims it, so `null` on a row still waiting. |
+| `to_email`, `sent_from`, `sent_at`, `send_attempts` | Written when the row is claimed for sending, and only then. |
+
+### `not_ready_reason`
+
+**A `draft` is by definition sendable**, so on a `draft` this is always `null`. A row the task drafted without an address — the enrichment found nobody — lands in `draft_failed` instead of `draft`, with the same sentence in `last_error`, and is out of `counts.draft`, out of every send and out of every count the dashboard puts in front of you. Nothing sendable is ever hidden and nothing unsendable is ever counted.
+
+So this field is what tells you why a `draft_failed` row cannot go, and it is what a `PATCH` that fixes a cell reads to decide whether the row becomes a `draft` again. It has exactly two forms:
+
+```text
+subject is empty (subject_line)
+'ravi at example.org' is not an email address
+```
+
+The first names the mapped field and, in brackets, the column the mapping points at — so you can tell "the task returned nothing" from "the mapping names the wrong column". The second is what a `to` that resolved to something that is not an address looks like.
+
+The check runs over the merged space, so it does not care whether a value came from your CSV, from the task or from an edit. Fix it either way and the reason goes away.
+
+### Rows that can never be sent are never drafted
+
+If a mapped column is one **the task does not write** and it is blank on a row — the list has no address for that person, and the task only writes the subject and body — no run of the task could make that row sendable. So it is not drafted at all: the moment the batch is created it is `skipped` with `skip_reason: "unfillable"` and the reason in `last_error`, and it costs nothing. The same holds for a `to` column you uploaded that is not an address.
+
+`skips.unfillable` on the batch counts them, which is the moment to go back to your source for the missing addresses. Fill the cell in with a `PATCH` and the row goes back to `pending` and is drafted — a batch that had finished drafting starts again for it. A column the task *does* write is left to the task, which is what keeps "feed it a phone number and let the task find the email" working.
+
+## Editing a cell
+
+`PATCH /v1/email/batches/{batch_id}/recipients/{recipient_id}` writes into `overrides`, which is a separate layer from what the model wrote.
+
+<CodeGroup>
+```bash cURL
+curl -sS -X PATCH \
+  https://api.in.talqing.com/v1/email/batches/7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57/recipients/e58207f6-1c94-4d3a-b7e0-3f9c15a86d22 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "overrides": { "email": "asha@example.com", "subject_line": "Your Q3 order, and one question" } }'
+```
+
+```typescript TypeScript
+const row = await talqing.email.batches.recipients.update({
+  batch_id: "7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57",
+  recipient_id: "e58207f6-1c94-4d3a-b7e0-3f9c15a86d22",
+  patchEmailRecipientRequest: {
+    overrides: {
+      email: "asha@example.com",
+      subject_line: "Your Q3 order, and one question",
+    },
+  },
+});
+
+console.log(row.not_ready_reason); // null once every mapped field resolves
+```
+
+```python Python
+row = talqing.email.batches.recipients.update(
+    "7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57",
+    "e58207f6-1c94-4d3a-b7e0-3f9c15a86d22",
+    overrides={
+        "email": "asha@example.com",
+        "subject_line": "Your Q3 order, and one question",
+    },
+)
+
+print(row["not_ready_reason"])
+```
+</CodeGroup>
+
+Four rules:
+
+- **An edit is stored apart from what the model wrote** and merged last. `output` still holds the model's version, so "what the task produced" and "what you actually sent" stay separately answerable after the fact.
+- **A re-draft cannot overwrite an edit**, because drafting writes `output` and never `overrides`.
+- **An edit to one of your own uploaded columns is what the task is given** on the next draft. Correct a typo'd domain and redraft, and the new draft is about the corrected company — the cell you are looking at is the one that runs.
+- **An empty value clears the edit** rather than sending an empty field. The row falls back to whatever was underneath. The way to send nothing is to skip the row.
+- Keys are column names, so they follow the same rule as a variable name: letters, digits and underscores, starting with a letter or an underscore.
+
+This is the answer to a row whose task returned nothing for the address. Put the address in `overrides` under the column the mapping names, and the row **moves from `draft_failed` back to `draft`** in the same request — the merged space does not record which layer a value came from, and nothing downstream can tell. Clearing a mapped cell on a `draft` moves it the other way, for the same reason — to `draft_failed`, or to `skipped` / `unfillable` if it is a column the task does not write. The response always carries the row's new status.
+
+A `queued` row is still a draft, and still editable: the send re-reads the row when it takes it, so it goes out as you corrected it. Once a send has taken the row — `sending`, `sent`, `send_failed` — the request is a `409` naming the status.
+
+## Skip and restore
+
+Both are reversible, so both take a bulk shorthand.
+
+| Verb | Acts on | Moves the row to | Notes |
+| --- | --- | --- | --- |
+| `POST .../skip` | `draft`, `draft_failed` | `skipped`, `skip_reason: operator` | Takes a row out of consideration without deleting it. Accepts failed rows too: in an enrichment list where two thirds of the numbers have no address, those are the rows you most need to clear. |
+| `POST .../restore` | `skipped` | `draft`, or `pending` if it was never drafted | Undoes a skip. An `unfillable` row is refused — restoring it would skip it again; fill its cell in instead. |
+
+Each takes either `recipient_ids` or `selection: "all_eligible"`, which means every row the verb can act on — `draft` and `draft_failed` (a `queued` draft included) for skip, and the rows **a person** skipped for restore.
+
+Nothing moves silently. Rows that were in the wrong state come back in `rejected`, each with its `row_number` and a sentence — `this row is sent: only a drafted row can be skipped`.
+
+## Redrafting
+
+`POST /v1/email/batches/{batch_id}/redraft` writes rows again from scratch. It replaced `retry`, which only ever moved rows whose drafting had failed — the same transition over a narrower selection.
+
+<Warning>
+**Each redrafted row runs the task again and is billed again**, and its existing draft is discarded. `selection: "all"` on a 5 000-row batch is 5 000 task runs. Check the count first.
+</Warning>
+
+| `selection` | Moves | Refuses |
+| --- | --- | --- |
+| `failed` | rows whose drafting failed | — |
+| `stale_version` | rows an **older published version** of the task wrote | — |
+| `not_sent` | every row that has not left | — |
+| `all` | every row it can | names every `drafting`, `sending` and `sent` row in `rejected` |
+
+No selection pays for an `unfillable` row. And a `queued` row is redrafted like any other draft: **pause a send, publish a better task, redraft, resume** — the send takes each new draft as it lands, and waits for the ones still being written.
+
+`stale_version` is the one that makes the loop work: watch the output, pause the batch, improve the task, publish it, resume — and then redraft exactly the rows the old prompt wrote. `drafted_versions` on the batch is how you see the split, `stale_redraftable` is how many this selection would actually move and `stale_sent` how many of the rest have already gone, and `<` is the comparison, so a version *newer* than what is published now (you rolled back) is left alone.
+
+Before redrafting `failed`, read `draft_failures` on the batch — the reasons drafts failed, most common first. A provider outage is worth another run; a task that declined a row on purpose will most likely decline it again.
+
+Rows move to `pending` with `output`, `task_run_id`, `attempts` and `last_error` cleared. **A person's edited cells survive** unless you pass `clear_overrides: true` — `overrides` is merged last and is never written by a job, so a redraft cannot silently discard an edit.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/email/batches/7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57/redraft \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "selection": "stale_version" }'
+```
+
+```typescript TypeScript
+const res = await talqing.email.batches.recipients.redraft({
+  batch_id: "7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57",
+  redraftRequest: { selection: "stale_version" },
+});
+
+console.log(res.affected, res.rejected);
+```
+
+```python Python
+res = talqing.email.batches.recipients.redraft(
+    "7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57", selection="stale_version"
+)
+
+print(res["affected"], res["rejected"])
+```
+</CodeGroup>
+
+**Redrafting revives a batch that has already finished drafting.** A `drafted` (or `failed`) batch goes back to `drafting`, picks up exactly the rows you named, and stops again when they land. Nothing else brings a finished batch back to work.
+
+Two exceptions:
+
+- **A `canceled` batch is refused with a 409.** Cancelling is final, and a redraft would clear each row's `output` while nothing could ever draft them again — the drafts you paid for would be gone with no way back.
+- **A `paused` batch stays paused.** The rows are reset and will draft when you resume; the redraft does not un-pause a batch somebody stopped on purpose.
+
+## Sending
+
+<Warning>
+**This mails real people and cannot be undone, recalled or edited afterwards.** There is no unsend. What you *can* do is pause a send that has not finished, and cancel one that has not started — which is exactly why sending is a row rather than a fire-and-forget job.
+</Warning>
+
+`POST /v1/email/batches/{batch_id}/sends` creates a send and returns it. What it covers is its `scope`:
+
+| `scope` | Covers | Notes |
+| --- | --- | --- |
+| `selected` | exactly `recipient_ids` | The rows you reviewed. Several may be live at once, but a row belongs to at most one. |
+| `all` | every row of the batch **as it finishes drafting**, including rows not drafted yet | A standing send: create it right after upload and each draft goes out as it lands, **without anyone reading it first**. It waits while drafting runs and ends once drafting has and every draft has gone. |
+
+A standing send cannot be live beside any other send of the same batch — it already covers every row they could — so creating one while another is live, or a `selected` one while a standing one is, is a `409` naming the live send. Neither scope writes anything to the rows: a draft a live send covers reads `queued`, and is still a draft.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/email/batches/7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57/sends \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "scope": "all",
+    "start_at": "2026-09-08T03:30:00Z",
+    "window": { "start": "09:00", "end": "17:00", "days": [1, 2, 3, 4, 5] },
+    "send_gap_seconds": 45,
+    "send_daily_cap": { "kind": "fixed", "limit": 150 }
+  }'
+```
+
+```typescript TypeScript
+const { send, rejected } = await talqing.email.batches.sends.create({
+  batch_id: "7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57",
+  createEmailSendRequest: {
+    scope: "all",
+    start_at: "2026-09-08T03:30:00Z",
+    window: { start: "09:00", end: "17:00", days: [1, 2, 3, 4, 5] },
+    send_gap_seconds: 45,
+    send_daily_cap: { kind: "fixed", limit: 150 },
+  },
+});
+
+console.log(send.id, send.counts.total, send.next_send_at, rejected);
+```
+
+```python Python
+res = talqing.email.batches.sends.create(
+    "7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57",
+    scope="all",
+    start_at="2026-09-08T03:30:00Z",
+    window={"start": "09:00", "end": "17:00", "days": [1, 2, 3, 4, 5]},
+    send_gap_seconds=45,
+    send_daily_cap={"kind": "fixed", "limit": 150},
+)
+
+print(res["send"]["id"], res["send"]["counts"]["total"], res["rejected"])
+```
+</CodeGroup>
+
+### What a send carries
+
+Everything omitted comes from the batch, so `{"scope": "all"}` alone is "every draft, now and as they land, at the batch's pace".
+
+| Field | Meaning |
+| --- | --- |
+| `start_at` | When it begins. Null starts as soon as it is picked up. At most 90 days ahead. |
+| `timezone`, `window` | The hours it may send in, on its own clock. An explicit `null` window means "any hour". |
+| `send_gap_seconds` | Minimum seconds between two emails **of this batch**, across every one of its sends, 1 to 3600. `60` is one email a minute however many sends are live. |
+| `send_attempts`, `send_retry_after_minutes` | Per row, for a provider outage. An address the provider refuses is not retried, and **a rate limit costs a row neither an attempt nor this wait** — it comes back at whatever `retry-after` the provider asked for. |
+| `send_daily_cap` | How many of **this batch's** emails may leave per local day, across every one of its sends: `{"kind": "fixed", "limit": 150}`, or a [ramp](/email/creating-a-batch#warming-up-a-new-domain) such as `{"kind": "ramp", "start": 10, "end": 50, "step": 1, "interval_days": 1}`. An explicit `null` is uncapped. Omitted, a send takes the batch's limit and, for a ramp, the progress it has made. |
+| `from_email`, `from_name`, `reply_to` | The sender, for this send alone. Never written back to the batch. |
+
+`next_send_at` on the response is the one answer to "why is nothing happening", and `next_send_reason` beside it names which gate is holding it — `start`, `window`, `daily_cap`, `retry`, `gap`, or `drafting`: every row it covers that is ready has gone, and more are still being drafted. `drafting` has no time to name, so `next_send_at` is `null` with it. See [monitoring](/email/monitoring#nextdraftat-and-nextsendat).
+
+A live send **re-reads its own row as it goes**, so `PATCH` reaches it within five minutes: raise a spent cap and more go out today, remove a window and it carries on, shorten the gap and it speeds up. Nothing needs cancelling and restarting.
+
+<Warning>
+**A slow send takes a long time, and the arithmetic is worth doing before you press.** 1 240 rows at `send_gap_seconds: 45` is about 15 hours of sending; with a 09:00–17:00 window and a cap of 150 a day, it is nine working days. The dashboard says the finish date in the confirm dialog for this reason.
+</Warning>
+
+### Steering it
+
+| Verb | What it does |
+| --- | --- |
+| `POST .../sends/{send_id}/pause` | Stops on the next email. Rows stay `queued` — and editable, skippable and redraftable — and nothing is lost. |
+| `POST .../sends/{send_id}/resume` | Carries on from where it stopped. |
+| `POST .../sends/{send_id}/cancel` | Ends it. **Every unsent row is simply a draft again.** Not destructive. |
+| `PATCH .../sends/{send_id}` | Re-steers the pace, the hours, the cap and — before it begins — `start_at`. |
+
+**A send's scope never changes.** To send more, create another send; to send less, skip the rows you do not want, or cancel it and create another. Nothing is handed back on cancel because nothing was taken: a covered row was a draft all along.
+
+`PATCH` never edits the sender. A send that went out under two different addresses would be two sends with one name.
+
+### A send fails on its own, and never takes the batch with it
+
+Two things stop a send, and they stop it in two different ways.
+
+**Ten consecutive provider failures → `paused`.** A rolling counter, reset by any success, and moved only by failures that are about the account or the provider — a row Resend refuses by address is a fact about that row's data and never touches it, and neither does a rate limit. The send keeps its rows covered, keeps its schedule, its window, its pace and its cap, sets `failure_reason`, and fires `email_batch.send.paused`. **Resume** carries on from exactly where it stopped. A ten-second provider incident used to kill a send scheduled to run for days; now it costs you a button.
+
+**One account-level refusal → `failed`,** on the first occurrence: a revoked key, an unverified sending domain, an exhausted quota, or a creator who has left the workspace. Those will fail identically for every remaining row, so waiting for ten proves nothing. The send goes `failed` with a `failure_reason`, **and its unsent rows are simply drafts again.** Fix the cause and create another send; the drafts you reviewed are still there.
+
+The reverse holds too: pausing, cancelling or failing the **batch** stops drafting and does not touch a send. Stopping the spend on a list is not the same act as throwing away the drafts you already read.
+
+### The sender, for this send only
+
+`from_email`, `from_name` and `reply_to` on a send override the batch's own for that send and nothing else. Each one you omit falls back to the batch's, and none writes back.
+
+An overridden `from_email` is checked against the Resend account's verified domains before the send is created — the same check the batch's own address gets. The account itself is not overridable: a different Resend account is a different credential, a different rate limit and a different suppression list, which is a different batch.
+
+### What comes back
+
+```json
+{
+  "send": {
+    "id": "3f0b6e29-8d47-4c15-9a72-1e6d5f8c3b04",
+    "status": "scheduled",
+    "next_send_at": "2026-09-08T03:30:00Z",
+    "next_send_reason": "start",
+    "send_gap_seconds": 45,
+    "send_daily_cap": { "kind": "fixed", "limit": 150 },
+    "send_daily_cap_today": 150,
+    "scope": "selected",
+    "counts": { "total": 48, "queued": 48, "drafting": 0, "sending": 0, "sent": 0, "send_failed": 0, "skipped": 0 }
+  },
+  "rejected": [
+    {
+      "recipient_id": "b90f4c17-2a63-4d85-8e10-5c7b9a2f6a31",
+      "row_number": 12,
+      "reason": "body is empty (email_body)"
+    }
+  ]
+}
+```
+
+`counts.total` is the rows a `selected` send was created with, and `null` for an `all` send, which cannot know it while drafting runs. `queued` and `drafting` are what a live send still covers — drafts ready to go and rows still being written — and are 0 once it has ended.
+
+Everything a `selected` send would not take comes back in `rejected` with its row number and why — a row that is not in this batch, a row that is not a reviewable `draft`, a row another live send already holds, or a row whose mapped fields do not resolve. A rejected row stays a draft: fix it and put it in the next send.
+
+If **nothing** in the selection can be sent there is no send to return, so that is a `400` listing the reasons rather than an empty send. Naming the same id twice in one call is also a `400`.
+
+### Every email carries `List-Unsubscribe`
+
+```text
+List-Unsubscribe: <mailto:you@yourdomain.com?subject=unsubscribe>
+```
+
+The address is the send's `reply_to`, falling back to its `from_email`. It is RFC 2369 only — there is deliberately **no one-click unsubscribe**, because one-click needs somewhere to record the opt-out and Talqing keeps no suppression list yet. An opt-out arrives as a reply in your own inbox, and honouring it is yours to do.
+
+## One address, once per batch
+
+<Note>
+**An address is mailed at most once per batch.** The second row carrying it settles as `skipped` with `skip_reason: duplicate_recipient` and is never sent.
+</Note>
+
+The check happens when the row is claimed for sending, not at upload, and it has to: the address may not exist until the task drafts the row, so there is nothing to compare at create time. A batch fed phone numbers and told to find the email address behind each one is exactly this case.
+
+Two limits worth stating plainly:
+
+- **There is no cross-batch deduplication.** The same person on two lists is emailed twice, once per batch. Keeping that from happening is your side of the line.
+- **Talqing keeps no suppression list.** Resend does: it maintains one on your account and automatically suppresses hard bounces and spam complaints, so an address that bounced permanently stops receiving. That list lives in your Resend dashboard, not here.
+
+## Adding rows later
+
+`POST /v1/email/batches/{batch_id}/recipients` (**Add recipients** on the batch page) appends rows to any batch that is not `canceled` or `failed`, so a batch can take a CRM's new leads every day. A `drafted` batch drafts again.
+
+Duplicates are dropped before anything is drafted, so a re-pushed list costs nothing. When `field_map.to` is a column you upload, a row whose address is already in the batch, or earlier in the same upload, is skipped. When the task finds the address, a row is skipped only if its uploaded cells exactly repeat another row's. Skipped rows come back in `skipped`, with `row_number` as their position in your request. A row that is stored but can never be sent, such as one with a blank address, is in `skipped` too, with its `recipient_id`, so you can fill in the cell.
+
+<Warning>
+**A send of every row mails added rows without review.** If the batch's most recent send is a send of every row that finished on its own, adding rows reopens it. `standing_send_id` in the response names it. Otherwise the new rows are drafted and wait for you.
+</Warning>
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/email/batches/8a1c0f37-5b2e-4d6a-9e41-2f7c3d9b6e10/recipients \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "recipients": [{ "input": { "email": "meera@initech.com", "first_name": "Meera" } }] }'
+```
+
+```typescript TypeScript
+const added = await talqing.email.batches.recipients.add({
+  batch_id: "8a1c0f37-5b2e-4d6a-9e41-2f7c3d9b6e10",
+  addEmailRecipientsRequest: {
+    recipients: [{ input: { email: "meera@initech.com", first_name: "Meera" } }],
+  },
+});
+console.log(added.added, added.skipped, added.standing_send_id);
+```
+
+```python Python
+added = talqing.email.batches.recipients.add(
+    "8a1c0f37-5b2e-4d6a-9e41-2f7c3d9b6e10",
+    recipients=[{"input": {"email": "meera@initech.com", "first_name": "Meera"}}],
+)
+print(added["added"], added["skipped"], added["standing_send_id"])
+```
+</CodeGroup>
+
+## Exporting the list
+
+**Export CSV** at the top of a batch's page in the dashboard downloads every row of the batch as one file, whichever tab is showing. The columns are the ones you uploaded, then the task's output fields, then `status` (the dashboard's word from the table below) and `error` (the reason shown under that status). Those last two are added even when the batch already has a column of the same name, so that name appears twice in the header. Values are what the review table shows, a person's edits included, and are written as they are, unescaped: a cell that starts with `=` opens as a formula in a spreadsheet. Through the API, page through `GET /v1/email/batches/{batch_id}/recipients` and read each row's `columns`.
+
+## Row statuses
+
+The dashboard shows a different word for one of these; the API string is what you filter on.
+
+| API | Dashboard | Meaning |
+| --- | --- | --- |
+| `pending` | Not drafted | Uploaded, waiting to be claimed — or waiting out a retry delay. |
+| `drafting` | Drafting | The task is running for this row right now. |
+| `draft` | Draft | A draft exists **and can be sent**: its three mapped fields all resolve. The only status `send` accepts. |
+| `draft_failed` | Draft failed | Either the task failed for this row, or it finished and produced nothing sendable — an address it could not find, a subject it left empty. `last_error` says which. Not retried on its own; `redraft` puts it back, an edit that fixes the cells makes it a `draft`. |
+| `skipped` | Skipped | Taken out of consideration — by a person, as a duplicate address, or because it can never be sent (`unfillable`). |
+| `queued` | Queued | A `draft` a live send covers, on its way or waiting on that send's schedule. Computed on read, not written to the row: it is still a draft, and cancelling the send makes it read `draft` again. |
+| `sending` | Sending | The provider call for this row is in flight. |
+| `sent` | Sent | Resend accepted it. Delivery, bounces and complaints are Resend's record, not ours. |
+| `send_failed` | Send failed | The send failed for this row. `last_error` says why. |
+| `canceled` | Canceled | Never drafted, on a batch that was cancelled or stopped. Computed on read, not written to the row, which is why filtering for `canceled` on a live batch matches nothing. |
+
+## What freezes once anything has been sent
+
+The moment the batch has a live send, or one row reaches `sending`, `sent` or `send_failed`, five fields on the batch stop being editable:
+
+| Frozen | Still editable |
+| --- | --- |
+| `from_email`, `from_name`, `reply_to`, `body_format`, `field_map` | `name`, `timezone`, `window`, both pacing groups, `send_daily_cap` |
+
+Identity is frozen because rows already delivered would no longer describe what they were sent as. Pacing stays open because it is exactly what someone watching a batch wants to change. A `PATCH` that touches a frozen field returns a `400` naming the fields.
+
+`start_at` is a separate case: it moves only while the batch is still `scheduled`.
+
+<Note>
+**A row is never mailed twice, including across a crash.** Every send carries an idempotency key that is the row's own id, permanently, and Resend honours it for 24 hours. A row left mid-send by a container that died is re-sent under the same key when the send is picked up again, and Resend replays its original answer rather than mailing anyone again. Past 24 hours the key has expired; a retry that far out needs a first attempt whose outcome we never learned, which is rare enough that it is accepted rather than guarded.
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Monitoring a batch" href="/email/monitoring">
+    Statuses, counts, `next_draft_at`, `next_send_at`, self-stopping and cost.
+  </Card>
+  <Card title="Research and outreach" href="/guides/research-and-outreach">
+    A task that researches a lead, feeding a batch end to end.
+  </Card>
+</CardGroup>

@@ -1,0 +1,244 @@
+---
+title: "Media streams"
+description: "Let a contact-centre platform keep its numbers and stream the call audio to one of your agents over a WebSocket."
+---
+
+A media stream is the third way a call reaches a Talqing agent, alongside a
+[web call](/channels/web-calls) and a [phone number](/telephony/phone-numbers).
+The partner's platform terminates the phone leg and opens **one WebSocket per
+call** to a URL you give them. They keep the number, the IVR, the queue, the
+recording and the CRM. Talqing is the AI agent and nothing else.
+
+Use it when the other side already runs a contact centre and is not going to
+move a number. Nothing about their setup changes: they add one URL to one call
+flow.
+
+| | Media stream | [SIP trunk](/telephony/overview) |
+| --- | --- | --- |
+| Who owns the number | They do | You do |
+| What they configure | One URL, in their own console | A trunk, a DID and a security review |
+| Time to first call | An afternoon | Days |
+| Agent can transfer to a human | **No** | Yes |
+| Agent can hang up | Only on SparkTG | Yes |
+| Latency | Same as a Talqing phone call | Same as a Talqing phone call |
+
+Both are supported and neither replaces the other. A WebSocket is the
+low-friction door; SIP is the higher-quality one.
+
+## Supported platforms
+
+Five, and the differences between them are not cosmetic — each one decides what
+your agent can actually do on a call.
+
+| Platform | They connect with | Agent can hang up | Agent can press keys | Sends the caller's number |
+| --- | --- | --- | --- | --- |
+| SparkTG | A URL configured per tenant at onboarding | Yes | Yes | Yes |
+| Twilio | `<Connect><Stream>` in TwiML | No | No | **No** |
+| Plivo | `<Stream bidirectional="true">` in XML | No | Yes | No |
+| Exotel | A Voicebot applet in the call flow | No | No | Yes |
+| Vonage | A `connect` action in an NCCO | No | No | No |
+
+<Warning>
+On four of the five, **the agent finishing does not hang up.** Closing the
+stream hands the caller back to the partner's own call flow, which then runs
+whatever comes next — a transfer to a person, a menu, or a hangup. On Twilio and
+Vonage, nothing after the stream ends the call. Put the next step there: the
+TwiML verb after `</Connect>`, the next applet, or the next NCCO action.
+</Warning>
+
+## Set one up
+
+<Steps>
+  <Step title="Publish a voice agent">
+    A stream carries audio, so it needs a `voice` agent. A `video` agent has
+    nowhere to render an avatar and a `text` agent has no ears.
+  </Step>
+  <Step title="Create a connection">
+    In the dashboard, **Telephony → Media Streams → New connection**. Give it a
+    name, pick the partner's platform, and pick the agent that answers.
+
+    <CodeGroup>
+    ```bash cURL
+    curl -X POST https://api.in.talqing.com/v1/streams \
+      -H "Authorization: Bearer $TALQING_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "SparkTG - Acme support line",
+        "dialect": "sparktg",
+        "agent_id": "81399608-4930-4ff1-9281-f1f4932d1999"
+      }'
+    ```
+
+    ```typescript TypeScript
+    const connection = await talqing.telephony.streams.create({
+      createStreamConnectionRequest: {
+        name: "SparkTG - Acme support line",
+        dialect: "sparktg",
+        agent_id: "81399608-4930-4ff1-9281-f1f4932d1999",
+      },
+    });
+    console.log(connection.url); // shown once
+    ```
+
+    ```python Python
+    connection = talqing.telephony.streams.create(
+        name="SparkTG - Acme support line",
+        dialect="sparktg",
+        agent_id="81399608-4930-4ff1-9281-f1f4932d1999",
+    )
+    print(connection.url)
+    ```
+    </CodeGroup>
+  </Step>
+  <Step title="Copy the URL">
+    The response carries the URL in full, and so does every later read — it is an
+    address rather than a credential.
+  </Step>
+  <Step title="Give it to the partner">
+    The dashboard's setup panel carries the exact steps and, for Twilio, Plivo
+    and Vonage, a snippet to paste.
+  </Step>
+</Steps>
+
+## The URL
+
+```
+wss://streams.in.talqing.com/v1/streams/connect/{platform}/{workspace}/{agent}
+```
+
+Everything is in the path and nothing is in a query string, because Twilio's
+`<Stream url>` does not support one. All three segments are identifiers, so the
+URL is stable for the life of the connection and safe to quote in a ticket.
+
+<Warning>
+**The URL is not a credential, and it cannot be rotated.** It is derived from
+the platform, your workspace and the agent, so deleting a connection and creating
+another for the same agent on the same platform gives you the identical URL back.
+Anyone holding it can open calls against your credit balance and interrogate the
+agent for its prompt and its tools.
+
+To stop a URL answering, **disable the connection** or point it at a different
+agent. Those are the only two switches, so give the URL to the partner and to
+nobody else.
+</Warning>
+
+## Per-call metadata becomes `vars`
+
+Every one of these platforms carries a per-call bag: Twilio's `<Parameter>`,
+SparkTG's SIP-header attributes, Plivo's `extraHeaders`, Exotel's query
+parameters, Vonage's NCCO `headers`. Talqing passes it through **verbatim** —
+there is nothing to map and nothing to configure.
+
+A key called `svcId` reaches your prompt as `{{vars.svcId}}`. See
+[variables](/agents/variables).
+
+Three names are read as more than variables when they are present:
+
+| Key | What it does |
+| --- | --- |
+| `from` | The calling party's number. |
+| `to` | The called party's number. |
+| `direction` | `inbound`, or `outbound` on a call the partner placed. Twilio's own `outbound-api` and `outbound-dial` are accepted as they are. Fills `{{system_vars.direction}}`. |
+
+The person on the call is `from` — or `to` when `direction` is `outbound`. Their
+number fills `{{system_vars.human_phone_number}}` and groups the call with their
+earlier ones; the other fills `{{system_vars.agent_phone_number}}`. With no
+`direction`, the person is taken to be `from`.
+
+A value that is not a phone number — `anonymous`, or a placeholder nobody filled
+in — is ignored: the call is answered as an unidentified caller, and its
+timeline says which value was ignored. On Plivo and Vonage a number may be sent
+as digits without the `+`, since that is how those platforms write them.
+
+<Note>
+**Twilio, Plivo and Vonage send no numbers on the stream.** Without a `from` in
+the metadata, every call is anonymous: the agent cannot greet the caller by their
+number, and no call is grouped with that person's earlier ones. Without
+`direction`, every call the partner places is filed under their own number. For
+Twilio, the dashboard's snippet passes all three from a TwiML Bin, which fills
+in `{{From}}`, `{{To}}` and `{{Direction}}`; a partner returning TwiML from
+their own webhook substitutes those values themselves.
+</Note>
+
+A key that could not be a variable name — one with a hyphen or a leading digit —
+is skipped rather than failing the call, and the call's timeline says which.
+
+## What a stream call is, once it is running
+
+It is a `voice` call in every respect that matters:
+
+- it appears in [Calls](/observability/calls), with `type` `STREAM`;
+- it is transcribed, [analysed](/observability/call-analysis) and
+  [recorded](/telephony/recording) exactly as the agent's settings say;
+- it bills at the same per-minute platform fee as a phone call, plus your own
+  provider spend;
+- the caller's [conversation](/observability/conversations) carries across calls
+  when the partner sends a caller number.
+
+Two differences, both structural:
+
+**`{{system_vars.direction}}` may be absent.** The partner owns the dialling, so
+the direction is something we are told — SparkTG states it, and the others pass
+it as `direction` — or do not know. It is omitted rather than guessed — a blank
+key and a wrong one read identically in a prompt, and only one of them is honest.
+
+**Background audio is off.** The ambient and thinking sounds an agent can play
+are a second audio track, and a partner's socket carries one stream of bytes — a
+phone call hears them only because the carrier side mixes them in. The agent's
+own voice is unaffected, and the connection's panel says so when the agent it
+answers as has a bed configured.
+
+**A stream agent cannot transfer to a human.** The partner owns the phone line;
+bridging a person in over a Talqing trunk would put a second call leg on a call
+whose whole premise is that they own it. A `transfer` operation refuses itself
+with that message. Escalation has to be the partner's flow — end the stream and
+let their next step route the caller.
+
+## Audio
+
+The format is announced by the platform, per call, and Talqing uses what it is
+given in both directions. There is nothing to configure.
+
+| Format | Platforms |
+| --- | --- |
+| G.711 μ-law, 8 kHz | Twilio (always), Plivo |
+| 16-bit linear PCM, 8/16/24 kHz | SparkTG, Plivo, Exotel, Vonage |
+| Opus | **Not supported.** The call is refused by name rather than played back wrong. |
+
+## Debugging
+
+| Symptom | Cause |
+| --- | --- |
+| Calls never connect and you see nothing at all | Their platform abandons a call whose WebSocket handshake does not complete in time — SparkTG's budget is 5 seconds — and that failure leaves no event on either side. Check the URL from outside your network. |
+| The handshake is refused with 403 | The URL names no connection — check the platform and agent segments against the dashboard — or a connection you have disabled, which the response says. |
+| The call connects and ends straight away | The connection's agent has never been published, or the workspace is out of credits. The call is in Calls as failed, with the reason. |
+| The caller hears the agent and then silence | The agent finished and the stream closed. On every platform but SparkTG that hands the caller back to their flow — make sure something follows the stream. |
+| The caller hears static | A sample-rate or byte-order mismatch on their side. The call's detail page states the format that was negotiated. |
+| The agent missed part of what the caller said | The partner's audio arrived in a burst after a network stall. Audio that arrives too late is dropped rather than delivered behind real time, which would slow every reply for the rest of the call. The call's timeline says how much was dropped. |
+| `{{vars.something}}` is empty | The key was not in the metadata, or it is not a usable variable name. The call's timeline lists both. |
+| Keypad presses do nothing | The platform sends keypad events out of band; tones inside the audio are never detected. See [keypad input](/agents/keypad). |
+| A call ended by itself with "The call was ended by a Talqing deployment" | A Talqing release restarted the media-stream gateway, which closes live sockets. Those calls are not charged a platform fee. |
+
+## Limits
+
+- **One connection per agent on each platform.** The URL names both, so one
+  agent can answer a SparkTG partner and a Twilio one at once, each with its own
+  URL, disable switch and call list. Two partners on the same platform would
+  share one URL, so give each its own agent.
+- **Three hours per call**, the same cap as a phone call.
+- **No per-connection concurrency cap.** A workspace with no credit left is
+  refused; nothing else bounds how many calls a partner can open at once.
+- **A Talqing deployment ends calls in progress.** Releases are infrequent and
+  the calls they end are not charged a platform fee, but they are ended rather
+  than drained.
+- **Unidirectional streams are not supported.** That is transcription, not an
+  agent.
+
+<CardGroup cols={2}>
+  <Card title="Keypad input" href="/agents/keypad">
+    Digits the caller types, and digits the agent presses back.
+  </Card>
+  <Card title="Telephony overview" href="/telephony/overview">
+    The other way a phone call reaches an agent, over your own trunk.
+  </Card>
+</CardGroup>

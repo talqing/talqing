@@ -1,0 +1,112 @@
+---
+title: "Quickstart: phone number"
+description: "Connect your carrier, import a number you already own, and put a published voice agent on the line."
+---
+
+This quickstart goes from a carrier account to a ringing phone, in the dashboard. It assumes you already have a published voice agent — if not, do the [voice agent quickstart](/get-started/quickstart-voice-agent) first, since a number cannot be assigned to a draft.
+
+<Warning>
+**You bring a number you already own at a carrier. Talqing does not sell numbers.** Buy or port the number at Plivo, Exotel, Vobiz or Twilio, then import it here. Your carrier keeps billing you for the minutes; Talqing charges its per-minute platform fee on top.
+</Warning>
+
+## Three things have to line up
+
+| | What it is | Where it comes from |
+| --- | --- | --- |
+| **A carrier account** | Your credentials for a phone network, plus the SIP trunk Talqing builds on it | You paste the credentials; Talqing provisions the trunk |
+| **A number on it** | One DID the carrier account already owns | Imported from the carrier's own list |
+| **A published agent** | A `voice` (or `video`) agent, published | Assigned to the number |
+
+## Do it
+
+<Steps>
+  <Step title="Open Phone Numbers">
+    In the dashboard sidebar, **Telephony → Phone Numbers**. Click **Import number** (or **Import your first number** on an empty workspace). One modal walks the whole thing.
+  </Step>
+
+  <Step title="Pick your carrier">
+    Four are supported: **Plivo**, **Exotel**, **Vobiz** and **Twilio**. Pick the one you already buy numbers from.
+  </Step>
+
+  <Step title="Connect the account">
+    Give the account a name, then fill in the credentials the carrier asks for. Plivo, Vobiz and Twilio each want two fields — an Auth ID or Account SID, and an auth token. Exotel wants five: Account SID, API Key, API Token, account region and subdomain, plus three optional SIP edge fields that are already filled in correctly for an Indian account.
+
+    Click **Connect**. Two things then happen in order, and you watch them tick off: *Verifying credentials with your carrier*, then *Setting up call routing*. The second one is what builds the SIP trunk. The credentials are stored as encrypted workspace [secrets](/platform/secrets) — the dashboard never reads them back.
+
+    <Note>
+    Over the API this is two calls, not one: `POST /v1/telephony/accounts` leaves the account at `connected`, and `POST /v1/telephony/accounts/{account_id}/provision` is what takes it to `ready`. Nothing works until it says `ready`.
+    </Note>
+  </Step>
+
+  <Step title="Select the numbers to import">
+    Talqing reads the numbers this account owns **live from the carrier**, which is also the proof the credentials work. Numbers already in Talqing are shown checked, disabled and tagged **Already imported**.
+
+    Tick the one you want and click **Import**. Each number reports its own result — read every one rather than trusting the modal's success. The usual failures are `not found on this {carrier} account` (the DID is not in the carrier's list) and `already registered on this platform`.
+  </Step>
+
+  <Step title="Assign a published voice agent">
+    On the results screen, pick one under **Answer calls with** and click **Assign**. You can also do it later from the number's row — the **Answered by** column is a dropdown listing every published voice agent, and choosing the blank option unassigns.
+
+    Only a **published** agent appears there. Assigning a draft is refused with `publish the agent before assigning a number`, and a published version whose channel is not `voice` or `video` with `only published voice agents can answer SIP`.
+  </Step>
+
+  <Step title="Finish carrier-console setup, if your carrier needs it">
+    Plivo, Twilio and Vobiz are fully API-driven — there is nothing to do in their consoles, and the number is live as soon as it is assigned.
+
+    **Exotel is the exception**, because Exotel can only hand an incoming call to a Flow, never straight to a trunk. After provisioning, the carrier's card on the Phone Numbers page grows an amber band headed *"Incoming calls are blocked until you finish setup at the carrier"*, with the four steps written out: create a custom app in Exotel's App Bazaar, drop the **Connect** applet on Call Start, paste the `sip:` value the band gives you into **Dial Whom → Dial phone number(s)**, and attach the Flow to your ExoPhones. It takes about two minutes, once per account.
+
+    Then click **I've done this**. No API can verify carrier-console work, so that button is the confirmation.
+
+    <Warning>
+    Until you confirm it, **inbound is off and outbound still works**. The number provisions, dials out normally, and never rings. Its status reads **Setup needed** with the line *"Outgoing calls work. Incoming calls need the Exotel setup finished."*, and assigning an agent is refused with `this number cannot take incoming calls yet — finish the carrier setup first`.
+    </Warning>
+  </Step>
+
+  <Step title="Check that readiness reads live">
+    The number's badge on the row is the honest answer to "does this work". **Live** — green, with the line *"Answering incoming calls."* — is the only value that means an inbound call will be answered. Anything else is covered in the table below.
+  </Step>
+
+  <Step title="Place a test call">
+    On the number's row, click the phone icon (**Place a test call**). Fill in **To** in E.164 format — `+919876543210`, with the country code and the leading `+` — pick the agent, and click **Call**. Then answer your phone.
+
+    <Warning>
+    This is a **real, billable call**. It rings the number you typed, it spends your own provider keys, and Talqing debits the platform fee for every minute of it. Dial your own phone, not a customer's. If the workspace has no credit left it is refused with a 402 before anything is dialled.
+    </Warning>
+  </Step>
+
+  <Step title="Read the call back">
+    The dialog turns into a **View call** link once the call is queued. That opens the call record: the transcript with every tool call and its output, the per-stage latency breakdown, the cost split into provider spend and platform fee, the recording, and the exact frozen agent version that ran. Inbound calls land in the same place — **Monitor → Calls**.
+  </Step>
+</Steps>
+
+## When the number is not live
+
+| Badge | `readiness` | What it means | What to do |
+| --- | --- | --- | --- |
+| **No agent** | `needs_agent` | The number is provisioned and inbound-capable, but nothing is assigned to answer it — or the agent was assigned and the routing rule behind it did not get written | Pick an agent in the **Answered by** column. If one is already selected and the badge still says this, use **Run setup again** from the row menu |
+| **Setup needed** | `needs_carrier_setup` | The number cannot take incoming calls. On Exotel this is the console Flow; the number still dials out | Finish the console steps and click **I've done this** |
+| **Error** | `error` | Provisioning failed at the carrier or at the routing layer. The row prints the carrier's own message | Fix what the message names — most often a wrong Exotel subdomain, which the carrier reports as *"Authorization failed"* rather than as a region error — then **Run setup again** |
+| **Setting up** | `setting_up` | Still being wired up | Wait; it resolves on its own |
+| **Disabled** | `disabled` | Taken out of service. It stops answering immediately | **Enable number** from the row menu |
+
+Two more that are not the number's fault:
+
+- **The carrier account is not `ready`.** Creating it is not the same as provisioning it. Everything that touches a number then fails with `this carrier account is not set up yet; finish its setup first`. Use **Finish setup** on the carrier card.
+- **The agent declares a required variable with no default.** An inbound call carries no request of yours, so nothing can supply one. Assignment is refused, naming the variable: `'<name>' is required and has no default, and an inbound call carries no request to supply it`. Give the variable a default, or make it optional. See [variables](/agents/variables).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Phone numbers" href="/telephony/phone-numbers">
+    Import, provision, assign, per-number settings and the full readiness vocabulary.
+  </Card>
+  <Card title="Carrier accounts" href="/telephony/carrier-accounts">
+    Every carrier's credentials, the trunk, and the console steps in full.
+  </Card>
+  <Card title="Outbound calls" href="/telephony/outbound-calls">
+    Placing one call from the API, with userdata and caller ID.
+  </Card>
+  <Card title="Telephony troubleshooting" href="/telephony/troubleshooting">
+    No inbound audio, calls failing at setup, credentials expiring.
+  </Card>
+</CardGroup>

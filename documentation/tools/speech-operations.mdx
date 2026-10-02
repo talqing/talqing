@@ -1,0 +1,250 @@
+---
+title: "Speech operations"
+description: "say, generate_reply and add_message: making the agent talk from inside a tool, and when to wait for a line to finish."
+---
+
+Three operation kinds make the agent talk from inside a tool. `say` speaks a
+fixed line, `generate_reply` asks the model to phrase one, and `add_message`
+puts something into the model's context without anyone hearing it.
+
+| Kind | Config | What happens |
+| --- | --- | --- |
+| `say` | `text`, `wait_for_playback` | The exact line is spoken, with templates filled in. |
+| `generate_reply` | `instructions`, `wait_for_playback` | The model writes the line from your instructions and speaks it. |
+| `add_message` | `text` | A system message is inserted into the conversation. Nothing is spoken and no reply is triggered. |
+
+All three are templated, so `{{args.*}}`, `{{tooldata.*}}`, `{{userdata.*}}`,
+`{{system_vars.*}}`, `{{vars.*}}` and `{{secrets.*}}` all resolve — see
+[templating and data](/tools/templating-and-data). None of them carries
+`silent`, `publish_fields` or `background_execution`: they return nothing, so
+there is nothing to hide, publish or detach.
+
+## `say`
+
+```json
+{
+  "kind": "say",
+  "config": { "text": "Let me pull that up for you." }
+}
+```
+
+The text is spoken word for word. Use it for anything whose wording matters —
+a filler while the next operation runs, a confirmation you want phrased the same
+way every time, a disclosure.
+
+An empty or whitespace-only `text` is refused at save. A `say` whose text is
+three spaces speaks nothing, so it fails at the request that tried to store it
+rather than on a live call.
+
+## `generate_reply`
+
+```json
+{
+  "kind": "generate_reply",
+  "config": {
+    "instructions": "Tell the caller their balance and when the next payment is due, using the two values just published to tooldata. One sentence."
+  }
+}
+```
+
+`instructions` is not the line. It is what you want said; the model writes the
+words, in the language it has been speaking and in the agent's voice. Write it
+as a direction to the model, not as dialogue:
+
+- Good: `"Confirm the booking, read back the date and time, and ask if they want a reminder."`
+- Bad: `"Your booking is confirmed for {{args.date}}."` — that is a `say`.
+
+Reach for `generate_reply` when the phrasing depends on what just came back, and
+for `say` when it does not. `generate_reply` costs an extra model call in the
+same turn; `say` costs nothing but TTS.
+
+## `add_message`
+
+```json
+{
+  "kind": "add_message",
+  "config": {
+    "text": "The caller is on the Enterprise plan. Offer the priority queue if they ask about turnaround."
+  }
+}
+```
+
+The text is inserted into the conversation as a system message. The caller hears
+nothing and no reply is generated — the model simply knows it from the next turn
+onward. Use it to steer the rest of a conversation after a lookup: a tier, a
+policy, a fact the prompt could not have known when the call started.
+
+Not the place for data another operation needs. Values that later operations or
+later tools read belong in `tooldata` or `userdata`, where you can address them
+by name. `add_message` is for context the *model* should weigh.
+
+## `wait_for_playback`
+
+`say` and `generate_reply` each take `wait_for_playback` (default `false`).
+Ticked, the tree does not continue until that line has finished playing.
+
+**Leave it off.** The archetypal `say` exists precisely to cover the next
+operation's latency:
+
+```
+say "Let me pull that up for you."  →  http (1.8s)  →  say "Your balance is …"
+```
+
+Waiting there serialises the call for no benefit: the filler is there so the
+caller hears something *during* the HTTP call, not before it.
+
+Tick it only when the caller must have heard the line before the next operation
+runs — a disclosure before a recording starts, or a promise before a side effect
+they might still want to retract.
+
+<Warning>
+Two things to know before you rely on it.
+
+**The wait is transitive.** Speech is first-in-first-out, so waiting for your
+own line also waits for whatever the agent was already saying in the same turn.
+On a filler that can stall the call for several seconds — the model's own
+preamble plus your line.
+
+**An interrupted line counts as finished.** The wait ends when the line finishes
+*or is cut off*, so it is not proof the caller heard it. If that matters, pair it
+with tool-level `disable_interruptions`, which stops the caller talking over it
+in the first place.
+</Warning>
+
+If the line never finishes — a stalled TTS provider — the wait gives up after 60
+seconds and the operation fails, which its `on_error` then answers for.
+
+Two places do not need the flag at all. A `say` before an
+[`end_call`](/tools/end-call) and a `say` before a
+[`transfer`](/tools/transfer) both finish playing on their own: those two
+operations wait for outstanding speech before they act.
+
+## Silence is derived
+
+A tool in which **no operation can return a response** is silent whatever the
+`silent` flag says, and that includes operations inside `if` branches. So a tool
+whose whole tree is one `say` says that line once, rather than saying it and then
+having the model improvise a second sentence on top.
+
+That is the common case and it is deliberate: without it, the model would be
+handed a bare `"Done."` after the tool ran and would talk over the line the tree
+just delivered.
+
+If you do want a closing line, add a `generate_reply` that states what to add.
+Do not try to turn the derived silence off — it is derived from the tree, not
+from a box.
+
+```json
+[
+  {
+    "kind": "http",
+    "config": { "method": "POST", "url": "https://api.example.com/leads" },
+    "silent": true
+  },
+  { "kind": "say", "config": { "text": "Thanks — I have passed that on." } },
+  {
+    "kind": "generate_reply",
+    "config": { "instructions": "Ask whether there is anything else they need." }
+  }
+]
+```
+
+The `http` result is hidden, the `say` line is spoken verbatim, and the
+`generate_reply` is the one sentence the model contributes.
+
+## Realtime agents reword a script
+
+<Note>
+On a **realtime (speech-to-speech)** agent, a `say` is not a script. Realtime
+models have no separate text-to-speech step to hand exact words to, so the
+platform asks the model to say the line instead — and it usually will, in
+roughly those words. It may reword, reorder or trim.
+
+If the wording has to be exact — a quoted price, a legal line, a compliance
+disclosure — put that agent on a cascade model stack, where `say` hands the text
+straight to TTS. See [models](/agents/models).
+</Note>
+
+## Worked example: lookup with a filler
+
+The filler covers the HTTP call, and the model phrases the answer from what came
+back.
+
+```json
+[
+  {
+    "kind": "say",
+    "config": { "text": "One moment, let me look that up." }
+  },
+  {
+    "kind": "http",
+    "config": {
+      "method": "GET",
+      "url": "https://api.example.com/accounts/{{args.account_id}}",
+      "headers": { "Authorization": "Bearer {{secrets.BILLING_API_KEY}}" },
+      "timeout": 10
+    },
+    "silent": true,
+    "publish_fields": [
+      { "path": "balance_due", "key": "balance", "store": "tooldata" },
+      { "path": "due_date", "store": "tooldata" }
+    ]
+  },
+  {
+    "kind": "generate_reply",
+    "config": {
+      "instructions": "Tell the caller their outstanding balance is {{tooldata.balance}} and it is due on {{tooldata.due_date}}. One short sentence, then ask if they want to pay now."
+    }
+  }
+]
+```
+
+No `wait_for_playback` anywhere: the filler is doing its job precisely because
+the tree keeps moving while it plays.
+
+## Worked example: a disclosure that must land first
+
+Here the order genuinely matters — the caller has to have heard the line before
+the recording starts — so the flag goes on, and the tool sets
+`disable_interruptions` so an interrupted line cannot count as a heard one.
+
+```json
+[
+  {
+    "kind": "say",
+    "config": {
+      "text": "Before we go on, I need to let you know this call is recorded for quality and training.",
+      "wait_for_playback": true
+    }
+  },
+  {
+    "kind": "http",
+    "config": {
+      "method": "POST",
+      "url": "https://api.example.com/consent",
+      "body": {
+        "phone": "{{system_vars.human_phone_number}}",
+        "disclosed_at": "{{system_vars.now}}"
+      }
+    },
+    "silent": true
+  }
+]
+```
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Ending the call" href="/tools/end-call">
+    `end_call`, and how to word a goodbye the platform can keep.
+  </Card>
+  <Card title="Templating and data" href="/tools/templating-and-data">
+    Where `{{tooldata.*}}` and `{{userdata.*}}` come from.
+  </Card>
+  <Card title="Tools overview" href="/tools/overview">
+    `silent`, `disable_interruptions` and the other tool-level flags.
+  </Card>
+  <Card title="Patterns" href="/tools/patterns">
+    Complete trees you can paste, including lookup-then-answer.
+  </Card>
+</CardGroup>

@@ -1,0 +1,189 @@
+---
+title: "Call recording"
+description: "Recording is on by default: one stereo file per call, kept under your workspace's retention policy."
+---
+
+Every voice and video agent records its calls **by default**. One file per call,
+in stereo: the caller on the left channel and the agent on the right, so you can
+split them and listen to either side alone.
+
+`recording.enabled` on the agent turns it off. There is no per-call switch and
+no per-number setting — recording is a property of the agent that answers.
+
+<Note>
+The file is what the agent heard, after noise cancellation — not a capture of
+the phone line. It does not include background audio, which the agent publishes
+as a separate track.
+</Note>
+
+## Where the files go, and for how long
+
+Recordings are stored in object storage in the region the call belongs to, and
+are kept until your workspace's **retention policy** deletes them. The default
+retention is unlimited: nothing ages out unless you set a policy or delete
+something yourself. See [data retention and
+privacy](/platform/data-retention-and-privacy).
+
+Nothing derives a deletion. A recording is gone because something deleted it and
+stamped the record — a person, or a retention purge — which is why `deleted` and
+`expired` are different states.
+
+## Playing and downloading
+
+`GET /v1/calls/{session_id}/recording` redirects to the audio: one stereo
+Ogg/Opus file. Add `?download=true` for a link that saves as
+`call-{session_id}.ogg` instead of playing inline.
+
+<Warning>
+**The link is short-lived.** It expires within the hour, so follow it straight
+away rather than storing it or putting it in a queue. It is not a lasting
+credential — a URL copied out of a webhook payload will stop working.
+</Warning>
+
+The link supports range requests, which is what lets a player seek without
+downloading the whole call first.
+
+`GET /v1/calls/{session_id}` returns ready-made `recording.url` and
+`recording.download_url` on the call detail, so you rarely need to call the
+redirect yourself. Those two are minted on the detail only — a list of 200 calls
+does not carry 200 signed URLs nobody asked for.
+
+<CodeGroup>
+```bash cURL
+# Follow the redirect and save the file.
+curl -sSL "https://api.in.talqing.com/v1/calls/5c3ba6d2-08a7-4c1e-b6f0-7e1a94c3d2f8/recording?download=true" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -o call.ogg
+```
+
+```typescript TypeScript
+const call = await talqing.calls.get({
+  session_id: "5c3ba6d2-08a7-4c1e-b6f0-7e1a94c3d2f8",
+});
+if (call.recording.state === "available") {
+  audioElement.src = call.recording.url!;
+}
+```
+
+```python Python
+call = talqing.calls.get("5c3ba6d2-08a7-4c1e-b6f0-7e1a94c3d2f8")
+if call["recording"]["state"] == "available":
+    print(call["recording"]["url"], call["recording"]["duration_s"])
+```
+</CodeGroup>
+
+## `recording.state`
+
+Check this before offering a play button. `available` is the only playable
+value; everything else says why there is nothing to play.
+
+| State | Meaning |
+| --- | --- |
+| `available` | There is audio and it can be played. |
+| `none` | Recording was off for this agent, or the call has no audio. |
+| `pending` | The call is live, or the upload is still running. It becomes `failed` if the call ended more than five minutes ago and nothing arrived. |
+| `failed` | Recording was on and produced nothing. Deliberately distinct from `none`: one is a setting, the other is a fault. |
+| `consent_withdrawn` | The caller asked not to be recorded and the audio was discarded. |
+| `deleted` | A person deleted it. |
+| `expired` | Your retention policy deleted it. |
+| `not_shared` | Screen recordings only — see below. |
+
+## Consent
+
+`recording.consent` is `off` by default: the call is recorded and the caller is
+not told about it by us. Whether that is acceptable is a question about your
+jurisdiction and your customers, and Talqing does not decide it for you.
+
+Setting it to `disclosure` makes the agent say so.
+
+| | `off` (default) | `disclosure` |
+| --- | --- | --- |
+| Caller is told | Nothing by us. | The notice, in the greeting. |
+| The greeting must contain `{{consent.notice}}` | No | **Yes — checked at publish.** |
+| Caller can stop the recording | Yes | Yes |
+
+### The notice has to be somewhere
+
+With `disclosure`, publishing is refused unless the greeting **literally
+contains** `{{consent.notice}}`. The token resolves to the agent's
+`consent_notice` string — by default *"This call is recorded for quality and
+training purposes."* — so you choose where in the greeting it lands and Talqing
+guarantees it is spoken. A greeting carrying the notice cannot be interrupted: a
+caller saying "hello?" as they pick up does not cut it short.
+
+The refusals you will see at publish:
+
+- `recording consent is on, so the greeting must contain {{consent.notice}} to say where the notice is spoken`
+- `recording consent needs a greeting to speak the notice in`
+- `recording consent is on but the consent notice is empty`
+
+<Warning>
+A **realtime speech-to-speech agent cannot use `disclosure` at all.** It is
+refused at publish with *"recording consent needs a cascade pipeline (STT + LLM
++ TTS): a realtime model rephrases what it is asked to say, and a recording
+notice has to be spoken word for word."* A realtime model is asked to say the
+greeting rather than handed exact audio, so it may reword or trim it — fine for
+an opening line, not for a scripted disclosure. Use a cascade pipeline for an
+agent that has to disclose.
+</Warning>
+
+### Stopping, and what stopping means
+
+Whenever recording is on — with or without a notice — the agent carries a tool
+that stops it, and the model is instructed to reach for it as soon as the caller
+says they do not want to be recorded or asks for the recording to be deleted.
+The right to object does not depend on us having announced anything first.
+
+<Warning>
+Stopping **discards everything recorded so far**. You do not get the first two
+minutes; the call reads `consent_withdrawn` and there is no audio at all. The
+call itself continues normally.
+</Warning>
+
+There is no pause and no resume — only stop. Recording cannot be started again
+partway through a call.
+
+## Screen recordings
+
+A screen recording is a **separate artifact** of the same call, with its own
+state, never mixed into the audio file.
+
+| | |
+| --- | --- |
+| Default | **Off.** It is `vision_input.screenshare.record` on the agent. |
+| Where | Web voice and video calls only. There is no screen on a phone call. |
+| Format | One 1 fps H.264 MP4, `call-{session_id}-screen.mp4`. |
+| Coverage | The whole call, with black where nobody was sharing — so its timeline lines up with the audio and the transcript second for second. |
+| Retention | The same workspace policy as the audio, purged in the same pass. |
+| Endpoint | `GET /v1/calls/{session_id}/screen-recording`, with the same short-lived link and `?download=true`. |
+
+`screen_recording.state` uses the same vocabulary, plus `not_shared`: screen
+recording was on and nobody ever shared a screen. That is a normal outcome, as
+opposed to `none`, which means it was turned off.
+
+## Deleting
+
+| Call | Effect |
+| --- | --- |
+| `DELETE /v1/calls/{session_id}/recording` | Deletes the media — the audio and, where there is one, the screen video. The transcript, cost and everything else about the call stay. Immediate, and it cannot be undone. Deleting a recording that is already gone succeeds quietly. |
+| `DELETE /v1/calls/{session_id}` | Erases the call's **content**: the recording, the transcript, every tool call and its output, the session's userdata, the summary, the extracted fields and the phone numbers. The call itself stays with its duration, status and cost, so past invoices still resolve. Returns `202` — the work is scheduled and normally completes within seconds. |
+
+<Warning>
+Erasing a person's last remaining call also erases what your agents remember
+about them. The next call from that number meets an agent that has never heard
+of them.
+</Warning>
+
+A call still in progress cannot be erased — it is still writing, and a `409`
+says so. Ask again once it has ended.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Recordings in the dashboard" href="/observability/recordings">
+    Playing, downloading and deleting from the call detail.
+  </Card>
+  <Card title="Data retention and privacy" href="/platform/data-retention-and-privacy">
+    What is stored, for how long, and what you can turn off.
+  </Card>
+</CardGroup>

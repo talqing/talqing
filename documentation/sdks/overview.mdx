@@ -1,0 +1,169 @@
+---
+title: "SDKs"
+description: "Which client to reach for, how to configure it, and the conventions all three share."
+---
+
+Four packages, two languages.
+
+| You are writing | Use | What it is |
+| --- | --- | --- |
+| Server-side TypeScript or Node | `@talqing/sdk` | The whole `/v1` API. Every operation, typed. Installs one package and nothing else. |
+| A React page that joins a call | `@talqing/react` | The hooks: joining, the microphone, the transcript, images, screen share, frontend actions. |
+| A page that joins a call without React | `@talqing/client` | The same call protocol as plain functions over a LiveKit `Room`. |
+| Python | `talqing` | The whole `/v1` API, sync and async. |
+
+Both API clients are generated from the same OpenAPI document and expose the
+same operations under the same names, so an example in one translates to the
+other by mechanical substitution — `talqing.agents.versions.rollback` is that
+call in both. Only the argument style differs, and it differs uniformly.
+
+**The API client and the call layer are separate installs on purpose.** A server
+that only creates agents and reads calls should not pull in the LiveKit browser
+stack, and a page that only joins calls should not hold an API credential — so
+they are separate things to install and separate things to reason about.
+`@talqing/react` re-exports `@talqing/client`, so a React page installs one.
+
+## Install and make a call
+
+<CodeGroup>
+```bash npm
+npm install @talqing/sdk
+```
+
+```bash pip
+pip install talqing
+```
+</CodeGroup>
+
+Node 20 or newer; Python 3.10 or newer. The TypeScript package ships both ESM
+and CommonJS builds, so `import` and `require` both work. The Python package
+ships a `py.typed` marker, so your type checker sees every shape it declares.
+
+<CodeGroup>
+```typescript TypeScript
+import { TalqingClient } from "@talqing/sdk";
+
+const talqing = new TalqingClient({
+  baseUrl: "https://api.in.talqing.com",
+  token: process.env.TALQING_API_KEY,
+});
+
+const agents = await talqing.agents.list({ limit: 50 });
+console.log(agents.items.map((agent) => agent.config.name));
+```
+
+```python Python
+import os
+
+from talqing import Talqing
+
+with Talqing(
+    token=os.environ["TALQING_API_KEY"],
+    base_url="https://api.in.talqing.com",
+) as talqing:
+    agents = talqing.agents.list(limit=50)
+    print([agent["config"]["name"] for agent in agents["items"]])
+```
+</CodeGroup>
+
+Python also reads the environment for you:
+`Talqing.from_env()` takes `TALQING_API_KEY` and `TALQING_BASE_URL`, and
+anything you pass wins over both.
+
+## What both clients agree on
+
+### The base URL is required and has no default
+
+Neither client will start without one. That is deliberate: a bundler inlines
+`NEXT_PUBLIC_*` at build time, so a client that quietly fell back to localhost
+would ship a production bundle calling a server that is not there — and it would
+fail as a connection error three layers down, at runtime, on a customer's
+machine. A client that refuses to start says what is actually wrong, at the line
+that is wrong.
+
+The base URL is also how you choose a region: one token reaches every region, so
+working in a second one is the same token and a different base URL. See
+[regions](/get-started/regions).
+
+### One error type
+
+Every non-2xx raises one exception carrying the API's one error envelope. There
+is nothing to branch on. Full detail on [errors](/api-reference/errors).
+
+| | TypeScript | Python |
+| --- | --- | --- |
+| Type | `TalqingApiError` | `TalqingAPIError` |
+| Status | `.status` | `.status_code` |
+| Message | `.message` | `str(error)` |
+| Per-field problems | `.errors` | `.errors` |
+| Raw response | `.response` | `.response` |
+
+### One paging helper
+
+All thirty list endpoints return the same envelope, so each SDK ships one
+`paginate` rather than a `listAll` per resource. See
+[pagination](/api-reference/pagination).
+
+### Typed streams
+
+The six server-sent-events endpoints come back as typed frames discriminated on
+`event` — an async iterable in TypeScript, a context manager in Python. See
+[streaming](/api-reference/streaming).
+
+### Types named as the API names them
+
+Every request and response shape is exported under the API's own name:
+`AgentConfig`, `AgentResponse`, `CallOutcome`, `OperationRequest`. In TypeScript
+they are TypeScript types; in Python they are TypedDicts, which describe a plain
+`dict` at runtime and cost nothing when you run.
+
+## Where each resource lives
+
+The namespace path is identical in both languages. TypeScript spells it in camel
+case, Python in snake case; only the four names below actually differ.
+
+| Resource | TypeScript | Python |
+| --- | --- | --- |
+| Agents, versions | `agents`, `agents.versions` | `agents`, `agents.versions` |
+| Tools, versions | `tools`, `tools.versions` | `tools`, `tools.versions` |
+| Agent tasks and runs | `tasks`, `tasks.runs` | `tasks`, `tasks.runs` |
+| FAQs and entries | `faqs`, `faqs.entries` | `faqs`, `faqs.entries` |
+| Calls, batches, recipients | `calls`, `calls.batches`, `calls.batches.recipients` | same |
+| Call analysis | `calls.analysis` | `calls.analysis` |
+| Recordings | `calls.recording`, `calls.screenRecording` | `calls.recording`, `calls.screen_recording` |
+| Chats, items, messages, tokens | `chats`, `chats.items`, `chats.messages`, `chats.tokens` | same |
+| Conversations, items, sessions | `conversations`, `conversations.items`, `conversations.sessions` | same |
+| Telephony accounts and numbers | `telephony.accounts`, `telephony.phoneNumbers`, `telephony.providers` | `telephony.accounts`, `telephony.phone_numbers`, `telephony.providers` |
+| Email batches and senders | `email.batches`, `email.batches.recipients`, `email.senders` | same |
+| Integrations, MCP tools, triggers | `integrations`, `integrations.mcpTools`, `integrations.triggers` | `integrations`, `integrations.mcp_tools`, `integrations.triggers` |
+| Webhooks | `webhooks` | `webhooks` |
+| Secrets | `secrets` | `secrets` |
+| Provider keys (BYOK) | `providerKeys` | `provider_keys` |
+| Catalog, voices, avatars | `catalog`, `catalog.voices`, `catalog.voices.elevenlabs`, `catalog.avatars` | same |
+| Credits | `billing.credits` | `billing.credits` |
+| Observability | `observability` | `observability` |
+| Deferred schemas | `schemas` | `schemas` |
+| CoPilot rails | `copilot.agents`, `copilot.tools`, `copilot.tasks` | same |
+| Liveness | `health()` | `health()` |
+
+## What the SDKs do not cover
+
+Sign-in, workspaces, members, roles, personal access tokens and payments live on
+a separate control host and are outside this surface — see
+[what is not here](/api-reference/introduction). Create a token in the dashboard
+and everything above is reachable.
+
+<CardGroup cols={2}>
+  <Card title="TypeScript" href="/sdks/typescript">
+    Client options, the call shape, errors, pagination and streams.
+  </Card>
+  <Card title="React" href="/sdks/react">
+    Every hook and helper in the web-call layer, with signatures.
+  </Card>
+  <Card title="Python" href="/sdks/python">
+    Sync and async clients, the omit rule, streams and typing.
+  </Card>
+  <Card title="MCP server" href="/mcp/overview">
+    The same surface, for a coding agent in your terminal.
+  </Card>
+</CardGroup>

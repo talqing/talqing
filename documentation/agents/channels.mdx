@@ -1,0 +1,93 @@
+---
+title: "Channels"
+description: "voice, video and text: what each channel has, what it costs, and what changes when you switch."
+---
+
+`config.channel` is the first decision you make about an agent. It decides which model slots exist, whether there is a greeting to speak, whether calls are recorded, and how the agent is billed. Changing it rewrites parts of the config for you, so it is not a setting to flip casually on a published agent.
+
+| | `voice` | `video` | `text` |
+| --- | --- | --- | --- |
+| Reached by | phone number, web call | web call | API, Telegram or WhatsApp trigger |
+| Model slots | `stt` + `llm` + `tts`, or one `realtime` | `stt` + `llm` + `tts`, or one `realtime` | `llm` only |
+| `greeting` | yes | yes | no (cleared) |
+| `language` | yes | yes | no (cleared) |
+| `turn_handling` | yes | yes, minus resume-after-false-interruption | no (reset) |
+| `avatar` | no | required | no |
+| `background_audio` | yes | yes | no (off) |
+| `noise_cancellation` | yes | yes | no (off) |
+| Screen share (`vision_input`) | web calls, cascade only | web calls, cascade only | no (cleared) |
+| Images people attach | web calls, if the model reads images | web calls, if the model reads images | web chat, if the model reads images |
+| `recording` | on by default | on by default | no (off) |
+| `analysis` | on by default | on by default | on by default, when the chat ends |
+| `conversation.context` | `none` / `summary` / `transcript` | `none` / `summary` / `transcript` | `none` / `summary` / `transcript` |
+| `handoffs` | yes | yes, same avatar | yes |
+| Tools, MCP, hooks | yes | yes | yes |
+| Platform fee | $0.0035 per minute | $0.01 per minute | $0.0001 per answered message |
+
+Provider spend is separate and always yours — Talqing is bring-your-own-key, and the fee above is the only money Talqing takes. See [pricing and credits](/get-started/pricing-and-credits).
+
+## Which one to pick
+
+**`voice`** for anything that has to answer or place a phone call. A phone call only ever reaches a `voice` agent: a `video` or `text` agent cannot be assigned to a phone number, and the three call variables (`{{system_vars.human_phone_number}}`, `{{system_vars.agent_phone_number}}`, `{{system_vars.direction}}`) are always empty outside `voice`. `voice` also serves web calls from the browser SDK — see [web calls](/channels/web-calls).
+
+**`video`** is a voice agent wearing an [Anam avatar](/agents/video-avatars). Everything true of `voice` stays true: the avatar joins the call as a second participant and lip-syncs to whatever audio the agent produces, so either pipeline works. It is a web surface only, and avatar time bills per wall-clock minute of the whole call, idle included, on top of whatever the models cost.
+
+**`text`** for chat: your own product's chat window through the API and the browser SDK, or a Telegram or WhatsApp deployment. There is no speech stack and no greeting, and the fee is per answered message rather than per minute. A text agent's prompt, tools, MCP servers, handoffs, lifecycle hooks, analysis and conversation memory all work exactly as they do on a call, with a chat standing where the call does. See [chats](/channels/text-conversations).
+
+If you are unsure, build on `voice`. Switching a voice agent to `video` adds an avatar and nothing else; switching it to `text` throws the speech stack away.
+
+## What switching normalizes
+
+The config you send is not always the config you get back. Three normalizations run on every write, before validation.
+
+### Switching to `text`
+
+A text agent is a language model and tools. The server clears everything that only exists on a call:
+
+- `stt`, `tts` and `realtime` are set to `null`; `llm` is kept, and filled in with the default if absent.
+- `greeting` is set to `null`.
+- `language` is set to `null` — set the tone and language in the prompt instead.
+- `turn_handling` is reset to its defaults.
+- `background_audio` and `noise_cancellation` are turned off. Leaving noise cancellation enabled would go on demanding an ai-coustics key to publish a chat agent.
+- `vision_input` is cleared. People can still attach images in a web chat; that is a property of the model, not a setting.
+- `recording` is turned off, and with it the consent disclosure.
+
+`analysis` and `conversation` are kept as they are: both mean on a chat what they mean on a call. Analysis runs when the chat ends, and `conversation.context` decides what a new chat knows about earlier ones.
+
+### Switching to `video`
+
+- `avatar` is filled in if it is absent, with `anam/anam` and a default face.
+- Publishing fails without both an avatar model and an `avatar_id`, and without an Anam provider key.
+- Resume-after-false-interruption never runs. The avatar's audio sink cannot pause, so an interrupted sentence is not resumed even if `turn_handling.interruption.resume_false_interruption` is still `true` in the stored config. The dashboard shows the switch off on video.
+- Every handoff destination must use the same avatar provider, model, face and display name. The Anam session is opened once, for the call.
+
+### Setting `realtime`
+
+Setting `config.realtime` to a speech-to-speech model makes it the entire pipeline:
+
+- `stt`, `llm` and `tts` are all set to `null`.
+- `turn_handling.preemptive_generation` is turned off — the model detects turns inside the provider's own socket, so there is nothing to generate ahead of.
+- `on_user_turn_completed` is **refused**: LiveKit never runs that hook when the model detects turns itself.
+- `vision_input.screenshare.enabled` is **refused**, for the same reason — there is no moment at which the agent could be handed a frame.
+- A recording consent disclosure is **refused**: a realtime model rephrases what it is asked to say, and a recording notice has to be spoken word for word.
+- There is no `fallback` on a realtime model.
+
+To go back to the cascade, set `realtime` to `null` and send `stt`, `llm` and `tts`. See [models](/agents/models) for the trade between the two pipelines.
+
+## Channels and handoffs
+
+A handoff target must be on the same channel as its source, and on the same pipeline — a cascade agent cannot hand a call to a realtime one, or the other way round. On `video` the avatar has to match as well. Publishing refuses an edge that would need the media graph rewired mid-call. See [handoffs](/teams/handoffs).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Models" href="/agents/models">
+    The catalog, the cascade against realtime, and the full model tables.
+  </Card>
+  <Card title="Prompting" href="/agents/prompting">
+    Writing for speech is not writing for a chat window.
+  </Card>
+  <Card title="Video avatars" href="/agents/video-avatars">
+    Picking a face and what avatar time costs.
+  </Card>
+</CardGroup>

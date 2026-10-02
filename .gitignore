@@ -1,0 +1,70 @@
+# secrets / env
+.env
+backend/.env
+# Per-node app configs (secrets; not committed). There are two committed
+# templates — one per shape — and they must stay free of real credentials.
+backend/configs/*.config.yaml
+!backend/configs/example.control.config.yaml
+!backend/configs/example.region.config.yaml
+# The operator's deployment files (compose, bootstrap scripts, node configs) live
+# outside this repository; `deployment` is a local symlink to them.
+/deployment
+/examples/
+/public-launch-tracker
+# The control plane's Ed25519 pair, kept beside the config that carries it
+# inline. Losing the private half means nobody can ever sign in again; committing
+# it means anyone can sign in as anyone.
+*.pem
+*.local
+client_secret_*.json
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# node / next
+node_modules/
+.next/
+out/
+clients/typescript/packages/*/dist/
+mcp/dist/
+
+# The docs site build. `documentation/build.sh` regenerates it; Cloudflare Pages
+# builds it in CI, so a checked-in copy would only ever be stale.
+documentation/dist/
+documentation/export.zip
+npm-debug.log*
+.pnpm-debug.log*
+*.tsbuildinfo
+
+# data / volumes
+pgdata*/
+*.log
+.tmp-*.json
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
+
+reviews/*
+
+roadmap/*
+
+# Local working files: scratch server, notes, spec drafts and research reading.
+/TESTING.md
+/RELEASING.md
+/documentation/_research/
+tools-test-server.py
+TODOs.md
+product.md
+dev.patch
+research-kb/*
+
+scripts/*

@@ -1,0 +1,220 @@
+---
+title: "Conversation memory"
+description: "What a new call or chat knows about earlier ones with the same person: context, summary_limit and initialize_userdata."
+---
+
+`config.conversation` decides what a new call starts with. It is the answer
+whenever someone wants an agent to remember, or to forget, earlier calls with the
+same person. It works the same way on text: wherever this page says *call*, a
+[chat](/channels/text-conversations) behaves identically.
+
+```json
+{
+  "conversation": {
+    "context": "summary",
+    "summary_limit": 3,
+    "initialize_userdata": true
+  }
+}
+```
+
+Set it on the agent that **answers**. A handoff target inherits the call already in
+progress; what *it* starts with is the handoff's own `context` policy, which is a
+different field — see [context policies](/teams/context-policies).
+
+<Warning>
+**Never write "remember our earlier calls" or "ignore anything from before" into
+the prompt.** A model told to ignore what is in its context is being asked to do
+the impossible, and a model told to remember cannot see what was never loaded.
+Set the field.
+</Warning>
+
+## context
+
+<ParamField path="context" type='"none" | "summary" | "transcript"' default='"none"'>
+  How much of the past comes into a new call.
+</ParamField>
+
+**`none`** — the default. Every call starts clean. The agent is pointed at a brand
+new conversation and is told nothing about earlier ones. Those earlier conversations
+are still saved against that caller and still readable in the dashboard and over the
+API; the agent does not see them.
+
+**`summary`** — the agent is told, as background, what happened on recent calls.
+One system message goes in ahead of everything else, oldest call first, each entry
+carrying the call's timestamp, its duration, its outcome where analysis produced one,
+and the summary itself. It opens with a line that is doing real work:
+
+```text
+Summaries of your earlier conversations with this person, oldest first. This is
+background only: none of it was said on the call that is starting now, and the
+person has not heard any of it in this call.
+```
+
+The summaries come from every past call on that identity, whichever agent took it.
+A DID's inbound agent gets changed, or a call is handed off, and the next agent is
+still briefed on what came before. The current call is excluded. Finding nothing is
+an ordinary empty result, not a failure: a caller whose earlier calls were all too
+short to analyse has nothing to be briefed on.
+
+**`transcript`** — one long conversation across every call. The stored timeline is
+replayed in full, and a marker is inserted where the replay stops:
+
+```text
+--- The call you are on now starts here (2026-08-19 13:56 UTC). Everything above is
+from earlier calls with this person - context, not something said a moment ago. ---
+```
+
+Without that line a model reading a continued thread answers as though the last
+thing it read was said a moment ago. Times in the marker are UTC and say so.
+
+<Note>
+`transcript` costs what it says: every turn of every past call is in the context of
+every turn of this one, and you pay for it on your own provider key each time. On a
+caller who rings weekly, prefer `summary`.
+</Note>
+
+## summary_limit
+
+<ParamField path="summary_limit" type="integer | null" default="null">
+  How many recent calls `summary` describes. Minimum 1. Leave it empty for all of
+  them. Read only under `summary`.
+</ParamField>
+
+The limit keeps the **newest** calls, and they are then presented oldest first —
+the order a person tells a story in.
+
+## initialize_userdata
+
+<ParamField path="initialize_userdata" type="boolean" default="true">
+  Start the call already knowing what the agent learned about this person before.
+  Read under `summary` and `transcript` only.
+</ParamField>
+
+This is about [`userdata`](/agents/userdata), not the transcript. On, the call opens
+with the person's contact record as its starting bag; anything the request supplied
+is layered on top and wins. Off, the call starts with only what the request supplied.
+
+A `none` call always starts empty regardless — it loads nothing, and that includes
+the contact record.
+
+## The two hard rules
+
+**`summary` needs call analysis with its summary switched on.** Those summaries are
+what post-call analysis writes; without them the agent would start every call clean
+and look broken. Publish refuses it:
+
+```text
+'include summaries of past conversations' needs call analysis to be writing
+summaries - turn on analysis and its summary, or choose a different conversation
+context
+```
+
+Both default to on, so this only bites when you have turned one off. In the
+dashboard, picking that mode switches them back on for you; over the API, the MCP
+server or a CoPilot, you set them yourself. See
+[call analysis](/observability/call-analysis).
+
+**A chat that answers your own outreach joins that conversation, whatever
+`context` says.** When the contact's newest conversation holds only something you
+sent and nobody has replied to — a [WhatsApp template](/whatsapp/setup), say — the
+chat their reply starts continues it, so the agent can see what it is being
+answered about. Every other chat follows `context`.
+
+## On text
+
+All three modes apply to a text agent, with a chat standing where a call does:
+
+| `context` | A new chat |
+| --- | --- |
+| `none` | Gets its own conversation and starts clean. |
+| `summary` | Gets its own conversation, briefed with summaries of the contact's earlier sessions. |
+| `transcript` | Continues the contact's newest conversation. |
+
+This is only about what a **new** chat starts with. Inside one chat the model
+always sees the whole chat, and a chat lasts until something ends it — so on
+Telegram or WhatsApp, where a person's messages keep joining one chat until the
+agent's `end_call`, `context` decides what the chat *after* that one knows.
+
+## How a person is identified
+
+Memory hangs off the person, not the call. That identity is:
+
+| Surface | Identity |
+| --- | --- |
+| Web voice or video call | The `contact_key` you sent on `POST /v1/calls/token` |
+| Chat over the API | The `contact_key` you sent on `POST /v1/chats` |
+| Telegram or WhatsApp | Built by Talqing from the bot or number and the person: `telegram:<bot_id>:<chat_id>`, `whatsapp:<your number>:<their number>` |
+| Phone call | `sip:<your DID>:<their number>`, built by Talqing from the two E.164 numbers |
+
+**A web call or chat with no `contact_key` gets a freshly minted single-use one**, so it has
+no history to continue and leaves none behind that a later call can find. Two calls
+from the same person arrive as two strangers. If you set `conversation.context` and
+your callers come back, send a `contact_key`.
+
+On a phone call the identity is the pair of numbers, so a caller who rings your
+other DID is a different identity, and a caller who rings from a second handset is
+too.
+
+## What each mode actually loads
+
+| | Past transcript | Past summaries | Contact `userdata` | New conversation per call or chat |
+| --- | --- | --- | --- | --- |
+| `none` | No | No | No | Yes |
+| `summary` | No | Yes, up to `summary_limit` | If `initialize_userdata` | Yes |
+| `transcript` | Yes, in full | No | If `initialize_userdata` | No — joins the newest one |
+
+## Setting it
+
+<CodeGroup>
+```bash cURL
+curl -X PATCH https://api.in.talqing.com/v1/agents/6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "conversation": { "context": "summary", "summary_limit": 3, "initialize_userdata": true },
+      "analysis": { "enabled": true, "summary": true }
+    }
+  }'
+```
+
+```typescript TypeScript
+await talqing.agents.update({
+  agent_id: "6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+  updateAgentRequest: {
+    config: {
+      conversation: { context: "summary", summary_limit: 3, initialize_userdata: true },
+      analysis: { enabled: true, summary: true },
+    },
+  },
+});
+```
+
+```python Python
+talqing.agents.update(
+    "6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+    config={
+        "conversation": {"context": "summary", "summary_limit": 3, "initialize_userdata": True},
+        "analysis": {"enabled": True, "summary": True},
+    },
+)
+```
+</CodeGroup>
+
+Send only what changes — `conversation` and `analysis` merge key by key. See
+[updating an agent](/agents/overview#updating-an-agent).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Call analysis" href="/observability/call-analysis">
+    The summaries `summary` mode reads, and how to switch them on.
+  </Card>
+  <Card title="Userdata" href="/agents/userdata">
+    The contact record `initialize_userdata` loads.
+  </Card>
+  <Card title="Context policies" href="/teams/context-policies">
+    The other `context` field: what the next agent starts from on a handoff.
+  </Card>
+</CardGroup>

@@ -1,0 +1,126 @@
+---
+title: "Core concepts"
+description: "The twelve words the rest of the documentation assumes you know, in the order you meet them."
+---
+
+This page defines the vocabulary and points at the page that covers each one properly. Read it once before the quickstarts; come back when a word stops making sense.
+
+## Workspace
+
+A workspace is the boundary everything lives inside: agents, tools, keys, numbers, calls and the people who can see them. It exists in **every region** already — there is no enablement step — but its resources do not: an agent created against `https://api.in.talqing.com` is not in `https://api.us.talqing.com`, and neither is its call history or its credit balance. Members hold one of three roles, `ADMIN`, `EDITOR` or `VIEWER`, re-read on every request.
+
+See [workspaces and roles](/get-started/workspaces-and-roles) and [regions](/get-started/regions).
+
+## Agent
+
+An agent is one object, `config`, plus what you attach to it: tools, MCP servers, FAQs and handoff destinations. `channel` is `voice`, `video` or `text` and decides which model slots exist; `prompt` is where the behaviour lives. Only `name` is required — everything else has a default.
+
+See [agents overview](/agents/overview) and [channels](/agents/channels).
+
+## Draft and published
+
+Every write lands on the **draft**. Live traffic runs the last **published** version, which is an immutable snapshot. Nothing you change reaches a real caller until you publish, and the dashboard shows both — a `Draft` or `vN live` badge and whether the draft differs from it.
+
+See [versions](/agents/versions).
+
+## Tool
+
+A tool is one capability the model can call mid-conversation: `name`, `description`, a `json_schema` of arguments, and an ordered tree of `operations` that runs when it is called. A tool has its own draft and published lifecycle, and it must be published before an agent can attach it. **Publishing an agent pins each attached tool to the version live at that moment** — republishing the tool changes nothing live until the agent is published again.
+
+See [tools overview](/tools/overview) and the [operation tree](/tools/operation-tree).
+
+## FAQ
+
+An FAQ is a named list of question-and-answer pairs you wrote, attached to an agent or a task. Its questions go into the prompt and the agent fetches the written answer when one is asked, so the reply is your text. **An FAQ has no draft and no versions**: an edit reaches every agent attaching it from its next session, while attaching or detaching one is a config change that needs a publish.
+
+See [FAQs](/agents/faqs).
+
+## Agent task
+
+An agent task is an agent nobody talks to. Same prompt, same model, same tools, minus every conversational organ, plus the one thing a conversation cannot have: a typed structured output. It takes named inputs, does the work and returns the fields you declared. **A task has the same draft and publish lifecycle an agent has** — saving writes the draft, publishing is what makes it run.
+
+See [tasks overview](/tasks/overview).
+
+## Handoff and transfer
+
+These are two different things and they are easy to confuse.
+
+| | Goes to | Where you build it | Channel |
+| --- | --- | --- | --- |
+| **Handoff** | Another agent on Talqing | `handoffs` on the agent, or the `handoff` operation in a tool | Any |
+| **Transfer** | A human being on a phone number | The `transfer` operation in a tool | Phone calls only |
+
+A **handoff** passes the conversation from one agent to another and the platform keeps running it — each entry in `handoffs` becomes one tool the model can call, and `context` decides how much of the conversation so far the next agent starts from. A **transfer** dials a real person into the call and Talqing steps out; the destination is a literal number fixed at publish, never templated and never chosen by the model.
+
+See [handoffs](/teams/handoffs) and [transfer](/tools/transfer).
+
+## Conversation, call and session
+
+Three nouns, three different sizes.
+
+| Noun | What it is |
+| --- | --- |
+| **Conversation** | A thread with one person on one surface — a web chat, a Telegram thread, a single phone call |
+| **Call** | One voice or video session, on the phone or in a browser |
+| **Chat** | One text session, from its first message until something ends it |
+| **Session** | One agent execution inside a conversation — one call, or one chat |
+
+A conversation can have many sessions: an agent set to continue the same thread adds a session to it with every call or chat. A session carries its own usage, cost, latency metrics and close reason; a call or chat is the record you read a transcript from.
+
+See [conversations](/observability/conversations) and [calls](/observability/calls).
+
+## Contact and `contact_key`
+
+A **contact** is the person, across every conversation you have had with them. You identify them with a **`contact_key`** — your own stable string, unique in the workspace, at most 256 characters. Send the same key again and you reach the same contact and the same accumulated `userdata`; leave it out of a web call or a chat and one is minted for that session alone, so the same person arrives twice as two strangers.
+
+Some prefixes are reserved for keys the platform builds itself and your own key must not use them: `telegram:`, `whatsapp:`, `sip:`, `stream:`, `agent_copilot:`, `tool_copilot:`, `task_copilot:`.
+
+See [chats](/channels/text-conversations).
+
+## Userdata, vars and system variables
+
+Three template roots, and picking the wrong one is the usual mistake.
+
+**`{{userdata.field}}`** is what you know about the *person*. It is seeded on the request that starts a session, any tool can write to it, and it is merged onto that contact's record so it is there again next time. See [userdata](/agents/userdata).
+
+**`{{vars.name}}`** is configuration of the *session*. The agent declares each variable with a description, a default and whether it is required; the request that starts the session supplies values that override the defaults. Nothing inside the session can write it. See [variables](/agents/variables).
+
+**`{{system_vars.…}}`** is what the platform knows: six read-only keys, `human_phone_number`, `agent_phone_number`, `direction`, `now`, `date` and `time`. The first three are empty on web calls and text conversations; the last three need `timezone` set on the agent. See [variables](/agents/variables).
+
+<Warning>
+All three are visible to the model and may be read aloud. Credentials belong in a workspace secret, read as `{{secrets.NAME}}` from a tool, where the model never sees the value.
+</Warning>
+
+## Provider key, personal access token, secret
+
+Three credentials, three purposes. Readers confuse them constantly.
+
+| | What it is | Where it goes | Read back? |
+| --- | --- | --- | --- |
+| **Provider key** | *Your* OpenAI, Deepgram, ElevenLabs, Anam key | The dashboard's BYOK page, or `PUT /v1/byok/{provider}` | No — last 4 characters only |
+| **Personal access token** | *Talqing's* credential for the API, `Authorization: Bearer <token>` | Created under Organization → API Tokens | No — shown once |
+| **Secret** | A workspace value a tool needs, read as `{{secrets.NAME}}` | The dashboard's Secrets page | No — masked tail only |
+
+A provider key is proved live against the provider before it is stored, so a key it rejects is never persisted. A personal access token authenticates as its creator and inherits their live role; revoking it means deleting it. A secret resolves only inside the runtime, and a missing name raises rather than substituting an empty string.
+
+See [provider keys](/get-started/provider-keys), [authentication](/get-started/authentication) and [secrets](/platform/secrets).
+
+## Credits and the platform fee
+
+Talqing charges a per-minute **platform fee** and nothing else: $0.0035 per minute of voice, $0.01 per minute of video, and $0.00 on text. Provider spend goes to your own accounts and is reported for transparency, never collected. The fee is debited from a prepaid credit balance that is **per region**, and a workspace with nothing left in that region cannot start a new call — a call already running is never interrupted.
+
+See [pricing and credits](/get-started/pricing-and-credits) and [costs](/observability/costs).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Build a voice agent" href="/get-started/quickstart-voice-agent">
+    Put the vocabulary to work in the dashboard.
+  </Card>
+  <Card title="Agents overview" href="/agents/overview">
+    Every field of a config, with a one-line meaning.
+  </Card>
+  <Card title="Glossary" href="/platform/glossary">
+    One-line definitions of every term in these docs.
+  </Card>
+</CardGroup>

@@ -1,0 +1,95 @@
+---
+title: "Creating a batch"
+description: "Pick a sender and an approved template, build the list, map columns onto its variables, and set the pace."
+---
+
+In the dashboard, open **WhatsApp → Outbound** and press **New batch**.
+
+1. **Name, sender and template** — an optional name (the template's, if you
+   leave it blank), a connected WhatsApp number, and one of its
+   approved templates, read live from your BSP. The form says which agent
+   answers replies, or that nobody will. A template a batch cannot send is
+   listed greyed out, with the reason.
+2. **The list** — type rows in, upload a CSV with a header row, or both, up to
+   10,000 rows per upload. The list starts with the columns the template needs: `phone`,
+   plus one per template variable. **Download a sample file** gives a CSV with
+   exactly those columns.
+3. **The message** — the phone column (preselected when a column is called
+   `phone`, `phone_number`, `mobile` or `whatsapp`) and one column per template
+   placeholder (`{{1}}`, `{{2}}`… on Gupshup; named or numbered on Twilio),
+   including one that sits in the header or a button link. The preview shows
+   row 1 as it will arrive: header, body, footer and buttons.
+4. **Sending** — the timezone, optional sending hours and days, the pace (one
+   message every N seconds, default 1) and the daily cap: **Fixed** (default
+   250), **Ramp up**, or **No limit**.
+
+A ramp warms up a new sender: it starts at one number a day and rises by a step
+every so many **sending days** until it reaches its end, for example 50 a day
+rising by 25 to 250. It advances only on days the batch actually sent, so a
+weekend or a pause earns nothing, and it belongs to the batch: two batches on
+one sender each ramp on their own. Over the API, `send_daily_cap` is
+`{"kind": "fixed", "limit": 250}` or
+`{"kind": "ramp", "start": 50, "end": 250, "step": 25, "interval_days": 1}`.
+
+Creating the batch sends nothing: it lands as a **draft** you review first.
+
+## Which templates
+
+Twilio templates may have a text, image, video or document header, a footer, and
+URL, phone, quick-reply, copy-code and call buttons. Gupshup templates must be
+text-only for now. Anything else (carousel, catalog, flows, authentication) is
+listed but cannot be picked.
+
+## What is checked
+
+The batch is refused, with every problem listed, when:
+
+- a template variable is not mapped, or is mapped to a column that does not
+  exist;
+- the phone column is not in the list, or no row in it holds a valid number
+  (almost always the wrong column picked);
+- the template is no longer approved or cannot be sent from a batch, or a
+  Twilio sender is not `ONLINE`.
+
+A problem with one row never refuses the list. The row is kept, marked
+*Skipped* with the reason, and becomes *Ready* once you edit its cell on the
+batch page:
+
+| Row | Shown as |
+| --- | --- |
+| Phone blank or not a valid number | `phone is empty`, `'98x' is not a valid phone number` |
+| Same number as an earlier row | `same number as row 12` |
+| A mapped cell is blank, has a line break or tab, or more than four spaces in a row | `first_name is empty` |
+
+A number without a country code is read as a number in the **sender's**
+country. The earliest row with a number keeps it, even after you skip that row
+or it has been sent.
+
+## What the agent learns
+
+Every non-blank cell of a row becomes `{{userdata.<column>}}` for the agent that
+answers the reply — the same rule as a [call batch](/telephony/batch-calling). So
+a prompt can say `You are speaking with {{userdata.first_name}} from {{userdata.company}}`.
+
+## Over the API
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/whatsapp/batches \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "integration_id": "224c93a2-f6c9-408d-bd21-bc1459f3a76f",
+    "template_id": "HX91d46793053aedda5877d6c92a5f1b2f",
+    "to_column": "phone",
+    "variable_map": { "first_name": "first_name" },
+    "recipients": [
+      { "input": { "phone": "+919876543210", "first_name": "Asha", "company": "Acme" } }
+    ]
+  }'
+```
+</CodeGroup>
+
+`GET /v1/whatsapp/templates?integration_id=…` lists the templates with their
+header, body, footer, buttons and variables. One with `unsupported_reason` set
+cannot be sent from a batch.

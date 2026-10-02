@@ -1,0 +1,140 @@
+---
+title: "Inbound calls"
+description: "What happens when someone dials your number, and what an inbound session can and cannot know."
+---
+
+When a call reaches a number whose `readiness` is `live`, Talqing starts a
+session with the assigned agent's **current published version** and the agent
+speaks its greeting. Nothing else is needed per call — no request, no webhook, no
+callback to your servers.
+
+That is also the constraint the rest of this page is about: an inbound call
+carries no request of yours, so everything the session needs has to be on the
+agent already.
+
+## What the session knows
+
+Three `{{system_vars.*}}` fields are populated on every phone call, before the
+prompt is built, so a greeting can read them:
+
+| Variable | On an inbound call |
+| --- | --- |
+| `{{system_vars.human_phone_number}}` | The caller's number, in E.164. |
+| `{{system_vars.agent_phone_number}}` | Your number — the one they dialled. |
+| `{{system_vars.direction}}` | `inbound`. |
+
+They are read-only and fixed for the life of the call. `{{system_vars.now}}`,
+`.date` and `.time` are there too, on the agent's own timezone. See
+[variables](/agents/variables) for the full list and the templating rules.
+
+<Warning>
+**Only an agent's declared variable defaults resolve on an inbound call.** There
+is no request to supply `vars` on, so a variable declared `required` with no
+`default` can never be satisfied. Talqing refuses that state at all three doors
+— assigning the number, publishing such a config under an assigned number, and
+rolling back to a version that predates the default — so you find out while you
+are looking at the editor rather than on a customer's call.
+</Warning>
+
+If an inbound session needs a value, give the variable a default. If the value
+differs per caller, it is not a variable — read it in a tool at the start of the
+call, or from the caller's own record.
+
+## A returning caller
+
+A phone conversation is keyed on the pair of numbers: your number and theirs. So
+the second time someone rings the same number of yours, it is the same
+conversation, not a new one — with the same contact record and the same history
+behind it.
+
+What the agent does with that history is the agent's `conversation.context`
+setting:
+
+| `context` | The new call starts with |
+| --- | --- |
+| `none` (default) | Nothing. A clean session every time. |
+| `summary` | Background on recent conversations, up to `summary_limit` of them. |
+| `transcript` | The previous conversation carried on verbatim. |
+
+With `summary` or `transcript`, `initialize_userdata` (on by default) also starts
+the call already knowing what earlier ones learned about the person. Set on the
+agent that **answers**. See [conversation memory](/agents/conversation-memory).
+
+## What is refused at the door
+
+Some inbound calls never reach the agent. Each one leaves a visible call record
+with a `close_reason`, so you can see it happened rather than wondering why the
+number went quiet.
+
+| Reason | What happened | Fix |
+| --- | --- | --- |
+| `insufficient_credits` | **The workspace has no credit, so the call was not answered.** Calls already in progress are unaffected. | Top up. See [pricing and credits](/get-started/pricing-and-credits). |
+| `sip_caller_unidentified_failed` | The caller's number could not be read — withheld, or sent in a form we cannot place. Every conversation belongs to one identity, and there is nobody to file this call against. | Nothing on your side. Anonymous callers cannot be answered. |
+| `unpublished_agent_failed` | The assigned agent has no published version. | Publish it. |
+| `rejected`, `prepare_failed`, `agent_start_failed` | The agent could not start. `error` on the call says which. | See [close reasons](/observability/close-reasons). |
+
+<Warning>
+A workspace out of credit stops answering its phone. This is the failure mode
+worth alerting on — the number stays `live` and the carrier keeps delivering
+calls, and every one of them ends `insufficient_credits`.
+</Warning>
+
+## One agent, both directions
+
+The same published agent can answer inbound calls and place outbound ones.
+`{{system_vars.direction}}` is how it tells which it is on.
+
+There is no conditional syntax anywhere in a prompt or a greeting —
+substitution is textual and nothing else. So you branch by putting the value in
+front of the model and telling it what each value means:
+
+```
+You are Anita at Northwind Insurance.
+
+This call's direction is {{system_vars.direction}}.
+- On an inbound call, the customer rang you. Open by asking how you can help.
+- On an outbound call, you rang them. Say who you are and why you are calling
+  before you ask anything.
+
+The other party's number is {{system_vars.human_phone_number}}.
+```
+
+If the two jobs diverge further than a paragraph, use two agents. They can share
+tools.
+
+## Testing an inbound number
+
+Ring it. There is no simulator, and nothing in the API places an inbound call —
+by definition, the carrier does that.
+
+<Steps>
+  <Step title="Check readiness first">
+    `GET /v1/telephony/phone-numbers/{number_id}` must read `readiness: "live"`.
+    Anything else and the call will not reach the agent — see
+    [troubleshooting](/telephony/troubleshooting).
+  </Step>
+  <Step title="Call the number from a real phone">
+    From a phone whose caller ID is not withheld.
+  </Step>
+  <Step title="Read the call back">
+    `GET /v1/calls?type=SIP_INBOUND&limit=1` gives the session id;
+    `GET /v1/calls/{session_id}` gives the transcript, every tool call and its
+    output, the per-stage latency and the cost. See
+    [calls](/observability/calls).
+  </Step>
+</Steps>
+
+To rehearse an unpublished edit without touching what live callers hear, do not
+use the phone number — mint a web-call token with `agent_version: "draft"`
+instead. See [per-call configuration](/agents/per-call-configuration).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Recording" href="/telephony/recording">
+    Recording is on by default. What is kept, and what the caller is told.
+  </Card>
+  <Card title="Transfers" href="/telephony/transfers">
+    Handing an inbound caller to a person.
+  </Card>
+</CardGroup>

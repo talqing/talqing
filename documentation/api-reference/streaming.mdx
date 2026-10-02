@@ -1,0 +1,304 @@
+---
+title: "Streaming"
+description: "Every server-sent-events endpoint, every frame it emits, and how each SDK hands you a typed stream."
+---
+
+Four endpoints stay open and push events: one conversation and the three
+CoPilot rails. They are the same machine underneath — subscribe, receive a
+snapshot of where things stand, then receive what happens next — so learning
+one teaches you all four.
+
+| Stream | Endpoint | Frames |
+| --- | --- | --- |
+| Conversation | `GET /v1/conversations/{conversation_id}/events` | `conversation.snapshot`, `item.created`, `item.delivery_updated`, `turn`, `turn.failed`, `assistant.started`, `assistant.delta`, `assistant.completed` |
+| AgentCoPilot | `GET /v1/copilot/agents/{agent_id}/stream` | `snapshot`, `message`, `turn` |
+| ToolCoPilot | `GET /v1/copilot/tools/{tool_id}/stream` | `snapshot`, `message`, `turn` |
+| TaskCoPilot | `GET /v1/copilot/tasks/{task_id}/stream` | `snapshot`, `message`, `turn` |
+
+None of them take query parameters. All of them take the same
+`Authorization: Bearer` header as everything else, and all of them `404` before
+the stream opens if the resource does not exist in your workspace.
+
+## The wire format
+
+`text/event-stream`, one frame per blank-line-separated block:
+
+```
+event: assistant.delta
+data: {"event":"assistant.delta","trigger_item_id":"9c2f1a44-3d0b-4a6e-8f21-5b7c0e93a4d1","text":"Sure"}
+
+: keep-alive
+
+event: assistant.completed
+data: {"event":"assistant.completed","trigger_item_id":"9c2f1a44-3d0b-4a6e-8f21-5b7c0e93a4d1","session_id":"5b7c0e93a4d1","text":"Sure, one moment.","item_ids":["3d0b4a6e-8f21-4a6e-9c2f-1a445b7c0e93"]}
+
+```
+
+Three things follow from that:
+
+- **The JSON repeats the frame's name in its own `event` field.** Narrow on
+  that one value — the `event:` line and the body can never disagree, because
+  the line is derived from the body.
+- **A line starting `:` is a keep-alive**, sent every 15 seconds so an idle
+  proxy does not close the connection. It fires no handler.
+- **The body is never a single JSON document.** Read it with an SSE client. A
+  plain `JSON.parse` of the response body, or `response.json()`, will hang and
+  then fail.
+
+The response also carries `Cache-Control: no-cache` and `X-Accel-Buffering: no`,
+which is what stops an intermediate proxy holding every frame until the stream
+ends.
+
+## The three rules that matter
+
+**A snapshot arrives first, and again on every reconnect.** The first frame of
+every one of these streams is the whole current state — the conversation and
+all of its items, the build's status and progress, the CoPilot's entire
+timeline. It is taken after the subscription is established, so nothing can slip
+into the gap between reading it and starting to listen. Reconnecting is
+therefore how you resync: drop the connection, open it again, replace your local
+state with the snapshot.
+
+**Delivery is best effort.** Nothing on the stream is canonical. Events are
+relayed live and never queued or replayed for a client that was not attached, so
+a frame published while you were disconnected is simply gone. Every fact one
+carries is durable somewhere else — read it back from the endpoints named under
+[polling equivalents](#polling-equivalents) below.
+
+**`assistant.delta` is append, not cumulative.** Each frame carries the next
+chunk of text and not the text so far. Concatenate them. If you suspect you
+missed one, `assistant.completed` carries `text` — every delta joined — so a
+client can replace what it accumulated rather than try to reconcile it.
+
+<Note>
+The conversation stream puts an SSE `id:` line on `item.created` frames, carrying
+the item's id. Nothing on the server reads `Last-Event-ID`: a reconnect always
+starts from a fresh snapshot rather than resuming from an id. The id is there so
+a client can deduplicate an item it already has.
+</Note>
+
+## Conversation frames
+
+`GET /v1/conversations/{conversation_id}/events`. This watches a whole
+conversation, on any channel — it is what the dashboard's timeline runs on. To
+get one reply as it is generated, send the message with `stream: true` instead;
+see [chats](/channels/text-conversations#stream-the-reply).
+
+### `conversation.snapshot`
+
+Where the conversation stands. First frame, and again on every reconnect.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `conversation` | object | The conversation header — `id`, `contact_key`, `agent_id`, `agent_name`, `surface`, `summary`, `userdata`, `metadata`, `last_message_text`, `last_message_at`, timestamps. |
+| `items` | array | Every item in the conversation, oldest first, in the same shape `GET /v1/conversations/{conversation_id}/items` returns. |
+| `activity` | object | `{"state": "running"}` while a turn is in flight, `{"state": "idle"}` otherwise. |
+
+### `item.created`
+
+One new item, in exactly the shape the items list returns it, with `event` added.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id`, `conversation_id`, `session_id` | string / null | Identity. |
+| `type` | string | `message`, `function_call`, `function_call_output`, `agent_handoff` or `agent_config_update`. |
+| `direction` | string | `inbound`, `outbound` or `internal`. |
+| `role` | string / null | `developer`, `system`, `user`, `assistant` or `tool`. |
+| `text` | string / null | Null, never empty, for an item that carries only images. |
+| `attachments` | array | Image metadata with a signed URL, minted at read time. |
+| `visibility` | string | `customer_visible` or `internal`. |
+| `delivery_status` | string | `not_applicable`, `pending`, `sending`, `sent`, `failed` or `skipped`. |
+| `delivery_error` | object / null | Set when `delivery_status` is `failed`. |
+| `trigger_item_id` | string / null | The inbound item this one answers. |
+| `agent_id`, `agent_version` | string / integer / null | Which agent wrote it. |
+| `client_message_id` | string / null | The id you sent, echoed back. |
+| `provider_message_id` | string / null | The channel's own id, once delivered. |
+| `metrics`, `metadata`, `raw_payload` | object / null | Turn timings, free-form metadata, and the raw channel payload. |
+| `source` | string / null | Which surface produced it. |
+| `created_at`, `updated_at` | string | Timestamps. |
+
+### `item.delivery_updated`
+
+An outbound item reached the channel, or failed to.
+
+| Field | Type |
+| --- | --- |
+| `item_ids` | array of string |
+| `delivery_status` | string |
+| `provider_message_id` | string / null |
+| `error` | string / null |
+
+### `turn`
+
+One turn's lifecycle. The same payload on all six streams.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `turn_id` | string | The turn this describes. |
+| `status` | string | `running`, `done`, `error` or `canceled`. |
+| `session_id` | string / null | The session that ran it. |
+| `superseded_by_item_id` | string / null | Set with `canceled`: a newer message arrived and replaced this turn. |
+| `error` | string / null | Set with `error`. |
+| `item_ids` | array of string / null | What the turn produced. |
+
+### `turn.failed`
+
+The API could not queue the turn at all. It is a separate frame from `turn`
+because no worker ever owned it, so there was no turn to have a lifecycle.
+
+| Field | Type |
+| --- | --- |
+| `trigger_item_id` | string |
+| `message` | string |
+
+### `assistant.started`
+
+The reply has begun; `assistant.delta` frames follow. Carries
+`trigger_item_id`.
+
+### `assistant.delta`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `trigger_item_id` | string | Which reply this chunk belongs to. |
+| `text` | string | The next chunk. **Append it. These are not cumulative.** |
+
+### `assistant.completed`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `trigger_item_id` | string | Which reply finished. |
+| `session_id` | string / null | The session that produced it. |
+| `text` | string / null | Every delta joined. Replace what you accumulated with this. |
+| `item_ids` | array of string | The items the reply was persisted as. |
+
+## CoPilot frames
+
+All three rails — agent, tool and task — stream the same three
+frames. They are what the dashboard's CoPilot panel renders; see
+[AgentCoPilot](/agents/copilot).
+
+### `snapshot`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `messages` | array | The whole timeline, in the message shape below. |
+| `busy` | boolean | Whether a turn is running right now. |
+| `error` | string / null | Why the newest turn stopped, when it stopped badly. It is here as well as on the `turn` frame because that frame is gone the moment it is sent, and a rail that reloads a second later would otherwise show a build that stopped halfway with nothing said about why. |
+
+### `message`
+
+One row on the rail.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string | Row id. |
+| `item` | object | The typed item, discriminated on its own `type`: `message` (`role`, `content`), `function_call` (`call_id`, `name`, `arguments` — JSON as a string, because that is what the model emitted), or `function_call_output` (`call_id`, `output`). |
+| `role` | string | `developer`, `system`, `user`, `assistant` or `tool`. |
+| `content` | string / null | The flattened text, for a renderer that does not want to switch on `item`. |
+| `tool_calls` | array / null | |
+| `tool_call_id` | string / null | |
+| `name` | string / null | |
+| `created_at` | string | |
+
+### `turn`
+
+Identical to the conversation stream's `turn` frame, above.
+
+## Reading a stream
+
+<CodeGroup>
+```bash cURL
+curl -N https://api.in.talqing.com/v1/conversations/9c2f1a44-3d0b-4a6e-8f21-5b7c0e93a4d1/events \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Accept: text/event-stream"
+```
+
+```typescript TypeScript
+// Streams come back as an async iterable of typed frames. Narrow on `event`.
+const controller = new AbortController();
+const { stream } = await talqing.conversations.events(
+  { conversation_id: conversationId },
+  { signal: controller.signal },
+);
+
+let reply = "";
+for await (const frame of stream) {
+  switch (frame.event) {
+    case "conversation.snapshot":
+      console.log(frame.items.length, "items so far");
+      break;
+    case "assistant.delta":
+      reply += frame.text; // append — never cumulative
+      break;
+    case "assistant.completed":
+      reply = frame.text ?? reply; // authoritative; replace
+      console.log(reply);
+      break;
+    case "turn":
+      if (frame.status !== "running") controller.abort();
+      break;
+  }
+}
+```
+
+```python Python
+# Streams are context managers. Use one when the loop may exit early, so the
+# connection closes with it.
+reply = ""
+with talqing.conversations.events(conversation_id) as events:
+    for frame in events:
+        if frame["event"] == "conversation.snapshot":
+            print(len(frame["items"]), "items so far")
+        elif frame["event"] == "assistant.delta":
+            reply += frame["text"]  # append — never cumulative
+        elif frame["event"] == "assistant.completed":
+            reply = frame["text"] or reply  # authoritative; replace
+            print(reply)
+        elif frame["event"] == "turn" and frame["status"] != "running":
+            break
+```
+</CodeGroup>
+
+`AsyncTalqing` reads the same way with `async for`, and the stream is not a
+coroutine on either client — you do not `await` opening it.
+
+<Note>
+The TypeScript stream reconnects on its own after a transport failure, with
+exponential backoff from three seconds. Because every reconnect begins with a
+fresh snapshot frame, a client that replaces its state on `snapshot` recovers
+with no extra code. Pass `sseMaxRetryAttempts` in the options object to bound
+that, or `signal` to stop it. The Python stream does not reconnect: it ends, and
+opening it again is your call. A `Stream` that has finished cannot be reopened —
+`RuntimeError: this stream is finished; open a new one to watch again`.
+</Note>
+
+If the stream fails to open — a `404`, a `401`, a `403` — the Python client
+reads the error body before anything else and raises `TalqingAPIError` with the
+usual `status_code` and `errors`. In TypeScript the failure surfaces on the
+first iteration of the generator.
+
+## Not exposed through MCP
+
+None of these six endpoints are tools on the [MCP server](/mcp/tools). They are
+not tool-shaped: a tool call returns once, and a stream does not return at all.
+The CoPilot chat endpoints beside them are excluded for a different reason — an
+AI builder must not drive another builder agent.
+
+### Polling equivalents
+
+Nothing is unreachable as a result. Every stream has a read that answers the
+same question, and those reads *are* exposed.
+
+| Stream | Read instead |
+| --- | --- |
+| Conversation | `GET /v1/conversations/{conversation_id}/items` for the messages, `GET /v1/conversations/{conversation_id}` for the header and userdata, and `GET /v1/conversations/{conversation_id}/sessions` for what each run cost |
+| The three CoPilot rails | Nothing. A CoPilot's timeline is readable only on its own stream, and neither the rails nor their message endpoints are exposed to an AI builder |
+
+## What does not stream
+
+There is no event stream for a voice or video call. A live call is a LiveKit
+room, and the browser layer in `@talqing/react` is how you observe one
+while it is happening — see [web calls](/channels/web-calls). What a finished
+call did is on `GET /v1/calls/{session_id}`, and the push equivalent is a
+[webhook](/api-reference/webhook-events), not an SSE stream.

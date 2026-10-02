@@ -1,0 +1,222 @@
+---
+title: "Thinking and provider tools"
+description: "How long the language model may think before it answers, and the tools its provider runs on its own servers."
+---
+
+Two settings live on `config.llm`, and independently on `config.llm.fallback`: how hard the model thinks before it replies, and which of its provider's own tools it may run mid-turn. Both are per model, because both are irregular across vendors — the values one model accepts are a hard error on another.
+
+Neither exists on a `realtime` speech-to-speech model.
+
+## `reasoning_effort`
+
+Every language model entry in the catalog carries `reasoning_efforts`: the list of thinking settings that exact model was measured to accept, **ordered fastest first**. Leaving `reasoning_effort` unset means the first value in that list. An empty list means the model has no such setting, and sending one is a save error.
+
+<Warning>
+On a voice or video agent, give the model the least thinking it will accept. Every second of reasoning is a second of silence on a live call, and a caller who hears nothing assumes the line has dropped. Raise it only when you have decided the answer is worth the pause.
+</Warning>
+
+A text agent has no such pressure — nobody is listening to silence — so spend thinking there whenever the task benefits from it. The same is true of [agent tasks](/tasks/overview), which nobody is waiting on in real time.
+
+### Do not reason about the names
+
+The effort names do not order the same way at every vendor, so read the catalog's order and ignore what the words sound like:
+
+- **OpenAI rejects `minimal` outright.** Its floor is `none`.
+- **`minimal` is not the floor at xAI.** On `grok-4.3` it was measured burning *more* thinking tokens than `low` on a trivial prompt, so `none` is the only setting there that truly stops it.
+- **`grok-4.5`, `grok-4.6` and `grok-4.7` cannot stop thinking at all.** They reject `none` with a 400; `minimal` is the floor, and even at the bottom of the range they spend thinking tokens before the first word of a trivial answer. `grok-4.3` is the safer xAI model for a voice pipeline.
+- **Gemini has no `none`.** Its floor is `minimal`, which measures zero thinking tokens on the four voice-capable entries — the `none` of that family under another name. `gemini-3.8-flash` and `gemini-3.7-flash` reject `minimal` too, so their floor is `low` and it thinks; that is why those two are text-only.
+- **`gpt-6-astra` rejects both.** Its supported values start at `low`, which measured zero thinking tokens on a trivial prompt. `gpt-6-sol` is not like it: it takes `none` and stops cleanly, so within one family the floor differs per model.
+
+These lists are probed against the live APIs, not transcribed from vendor documentation, and they disagree with that documentation on several models.
+
+### The matrix
+
+| Provider | Model | Thinking efforts, fastest first | What unset means |
+| --- | --- | --- | --- |
+| xai | `grok-4.7` | minimal, low, medium, high | `minimal` |
+| xai | `grok-4.6` | minimal, low, medium, high | `minimal` |
+| xai | `grok-4.5` | minimal, low, medium, high | `minimal` |
+| xai | `grok-4.3` | none, minimal, low, medium, high | `none` |
+| openai | `gpt-6-astra` | low, medium, high | `low` |
+| openai | `gpt-6-sol` | none, low, medium, high | `none` |
+| openai | `gpt-5.6-sol` | none, low, medium, high | `none` |
+| openai | `gpt-5.6-terra` | none, low, medium, high | `none` |
+| openai | `gpt-5.6-luna` | none, low, medium, high | `none` |
+| openai | `gpt-5.5` | none, low, medium, high | `none` |
+| openai | `gpt-5.4` | none, low, medium, high | `none` |
+| openai | `gpt-5.4-mini` | none, low, medium, high | `none` |
+| openai | `gpt-5.4-nano` | none, low, medium, high | `none` |
+| openai | `gpt-4.1` | no thinking setting | nothing is sent |
+| openai | `gpt-4.1-mini` | no thinking setting | nothing is sent |
+| gemini | `gemini-3.8-flash` | low, medium, high | `low` |
+| gemini | `gemini-3.7-flash` | low, medium, high | `low` |
+| gemini | `gemini-3.6-flash` | minimal, low, medium, high | `minimal` |
+| gemini | `gemini-3.5-flash` | minimal, low, medium, high | `minimal` |
+| gemini | `gemini-3.5-flash-lite` | minimal, low, medium, high | `minimal` |
+| gemini | `gemini-3.1-flash-lite` | minimal, low, medium, high | `minimal` |
+
+Naming an effort a model does not offer is refused with the list it does offer. Naming one on a model with no such setting is refused too.
+
+An update that changes `llm.provider` or `llm.model` without sending `reasoning_effort` drops the old one, and the new model starts at its own fastest setting. The same holds for `llm.fallback`.
+
+In the dashboard the control is a **Thinking** select beside the model, in this order, and it disappears entirely on a model with fewer than two values.
+
+<Note>
+The post-call analysis model takes its own `reasoning_effort` and is checked the same way. It never inherits the live model's, because analysis runs after the caller has hung up. See [call analysis](/observability/call-analysis).
+</Note>
+
+## `builtin_tools`
+
+These are tools the model provider runs on its own servers during the agent's turn: a web search, an X search, a Python sandbox, a document store the provider hosts. The provider searches or executes and folds the result into its own reply — Talqing never sees the call.
+
+They are not Talqing tools. There is nothing to create, publish, attach or version, no operation tree, and nothing runs on our side. Each entry is `{type, config}`, and the only valid types and config keys are the ones the chosen model's catalog entry lists.
+
+<Warning>
+Two things to know before you switch one on.
+
+**The provider bills every call, and Talqing's cost estimate does not include it.** The per-minute figure in the editor prices tokens, speech and the platform fee. A search is charged separately by the provider, on your own key.
+
+**The search or code run happens before the agent speaks.** On a voice call that is a few seconds of dead air. Write the prompt so the agent says it is looking something up before it goes quiet. On an [agent task](/tasks/overview) nobody is waiting, but the same seconds come out of the run's `timeout_seconds` and cost none of its `max_steps` — the tool runs *inside* a round rather than as one.
+</Warning>
+
+### Setting them
+
+<CodeGroup>
+```bash cURL
+AGENT_ID=0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30
+
+curl -s -X PATCH "https://api.in.talqing.com/v1/agents/$AGENT_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "llm": {
+        "reasoning_effort": "none",
+        "builtin_tools": [{
+          "type": "web_search",
+          "config": { "allowed_domains": ["northwind.example"], "search_context_size": "low" }
+        }]
+      }
+    }
+  }'
+```
+
+```typescript TypeScript
+const agent_id = "0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30";
+
+await talqing.agents.update({
+  agent_id,
+  updateAgentRequest: {
+    config: {
+      llm: {
+        reasoning_effort: "none",
+        builtin_tools: [
+          {
+            type: "web_search",
+            config: { allowed_domains: ["northwind.example"], search_context_size: "low" },
+          },
+        ],
+      },
+    },
+  },
+});
+```
+
+```python Python
+agent_id = "0f9a1c3e-5d42-4b8a-9c11-6e2f7a4d8b30"
+
+talqing.agents.update(
+    agent_id,
+    config={
+        "llm": {
+            "reasoning_effort": "none",
+            "builtin_tools": [
+                {
+                    "type": "web_search",
+                    "config": {
+                        "allowed_domains": ["northwind.example"],
+                        "search_context_size": "low",
+                    },
+                }
+            ],
+        }
+    },
+)
+```
+</CodeGroup>
+
+`builtin_tools` is a list, so it is sent whole: include every tool the model should keep.
+
+An empty `config` is valid and means the provider's own defaults. In the dashboard each tool is a switch inside the Models card, under the model that offers it, with its options in a band underneath.
+
+### What each model offers
+
+Which tools exist is a property of the model, not of the agent, so changing the model drops any tool the new one does not offer. Check the catalog before switching.
+
+| Provider | `type` | What it does | Options |
+| --- | --- | --- | --- |
+| xai | `web_search` | Searches the live web and reads pages before answering. | `allowed_domains` (up to 5), `excluded_domains` (up to 5), `enable_image_understanding`, `enable_image_search` |
+| xai | `x_search` | Searches posts, profiles and threads on X. | `allowed_x_handles` (up to 20), `excluded_x_handles` (up to 20), `from_date`, `to_date`, `enable_image_understanding`, `enable_video_understanding` |
+| xai | `code_interpreter` | Writes and runs Python in a sandbox — arithmetic, dates, parsing — instead of guessing. No network, no filesystem, nothing kept between requests. | none |
+| xai | `file_search` | Searches documents you uploaded to xAI as a collection. | `vector_store_ids` (required), `max_num_results` |
+| openai | `web_search` | Searches the live web and reads pages before answering. | `allowed_domains` (up to 100, subdomains included), `search_context_size` (`low`, `medium`, `high`) |
+| openai | `code_interpreter` | Writes and runs Python in a sandbox. | `memory_limit` (`1g`, `4g`, `16g`, `64g`) |
+| openai | `file_search` | Searches a vector store you uploaded to OpenAI. | `vector_store_ids` (required), `max_num_results` (1 to 50) |
+| gemini | `google_search` | Grounds the answer in live Google results. | `exclude_domains` |
+| gemini | `url_context` | Fetches and reads any URL mentioned in the conversation. | none |
+| gemini | `code_execution` | Writes and runs Python server-side. | none |
+
+Domain and handle filters come in pairs, and the provider rejects a request carrying both — so setting `allowed_domains` and `excluded_domains` together, or the two X handle lists together, is a save error rather than a failure on a live call. The dashboard disables the second field as soon as the first has a value.
+
+OpenAI's `code_interpreter` needs a container, and the only one Talqing can offer is auto-provisioned: a container id would have to be created in your own OpenAI account first. `memory_limit` writes inside that container.
+
+<Note>
+`file_search` at OpenAI and xAI's `file_search` (labelled Collections search) search a store that lives in your own provider account. You create and fill it there; Talqing only passes its id.
+</Note>
+
+### What each one costs
+
+Charged by the provider on your own key, on top of tokens, and absent from Talqing's cost estimate.
+
+| Provider | `type` | Provider charge |
+| --- | --- | --- |
+| xai | `web_search` | $5.00 per 1,000 searches |
+| xai | `x_search` | $5.00 per 1,000 searches |
+| xai | `code_interpreter` | $5.00 per 1,000 runs |
+| xai | `file_search` | $2.50 per 1,000 searches, plus xAI's collection storage |
+| openai | `web_search` | $10.00 per 1,000 searches, plus the tokens of everything it reads |
+| openai | `code_interpreter` | Per container session, from $0.03 per 20 minutes — not per run |
+| openai | `file_search` | $2.50 per 1,000 searches, plus OpenAI's storage |
+| gemini | `google_search` | 5,000 free requests per month shared across all Gemini 3.x models, then $14.00 per 1,000, plus the tokens of everything it reads |
+| gemini | `url_context` | No separate charge — the fetched page bills as input tokens |
+| gemini | `code_execution` | No separate charge — the code and its results bill as ordinary tokens |
+
+### Rules
+
+| Rule | What happens |
+| --- | --- |
+| A `type` the chosen model does not declare | Refused, listing what the model does offer. |
+| The same `type` switched on twice | Refused. |
+| A `config` key the tool does not declare | Refused, listing the keys it takes. |
+| A value of the wrong shape — text where a switch belongs, a list too long for its limit | Refused, naming the option. |
+| A required option left unset (both `file_search` variants need `vector_store_ids`) | Refused. |
+| Both halves of a conflicting pair | Refused — the provider rejects a request carrying both. |
+| One of your own tools, or a handoff destination, named the same as a provider tool | Refused. Two things with one meaning in front of the model would kill the session at start. |
+
+### The fallback carries its own
+
+`llm.fallback.builtin_tools` is a separate list, validated against the fallback's own catalog entry. Nothing is copied down from the primary, because the same tool name is a different object at each vendor — xAI's code interpreter takes no fields and OpenAI's requires a container. A fallback with fewer tools, or none, is fine: it keeps the call and loses the search, which is the right way round. The same is true of `reasoning_effort` and `priority`. See [model fallbacks](/agents/model-fallbacks).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Models" href="/agents/models">
+    Every model with its thinking settings, provider tools and price.
+  </Card>
+  <Card title="Prompting" href="/agents/prompting">
+    Telling the agent to say it is looking something up.
+  </Card>
+  <Card title="Tools" href="/tools/overview">
+    Tools you build and Talqing runs, which is a different thing entirely.
+  </Card>
+</CardGroup>

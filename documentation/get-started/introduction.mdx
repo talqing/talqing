@@ -1,0 +1,70 @@
+---
+title: "Talqing documentation"
+sidebarTitle: "Introduction"
+description: "Talqing is a platform for building, publishing and operating AI agents that talk to people over the phone, over video and in chat."
+---
+
+Talqing is where you build an AI agent, publish it, put it in front of real people, and read back every conversation it had. An agent is a system prompt, a model stack, and the tools it may call. Anything you could have written by hand as a LiveKit agent, you can build here.
+
+## The three channels
+
+An agent runs on exactly one channel, and the channel decides which model slots it has.
+
+| Channel | What it is | Model stack |
+| --- | --- | --- |
+| `voice` | Phone calls, inbound and outbound, and voice calls in a browser | Speech-to-text → language model → text-to-speech, or one realtime speech-to-speech model |
+| `video` | A voice agent wearing an [Anam avatar](/agents/video-avatars), in the browser | The same, plus an avatar |
+| `text` | Chat: your own app over the API, or [Telegram](/channels/telegram) | A language model only |
+
+There is also the [agent task](/tasks/overview) — an agent nobody talks to, which takes named inputs, does some work and returns a typed result. Use one for research, classification and drafting, where there is an input and an answer rather than a conversation.
+
+## Strictly bring your own keys
+
+Talqing holds no provider credentials of its own. You connect your own OpenAI, Deepgram, ElevenLabs, Gemini, xAI, Sarvam, Soniox, Raya, Anam or ai-coustics accounts, those providers bill you directly at your own rates, and none of that spend passes through us.
+
+What Talqing charges is one platform fee: **$0.0035 per minute of voice, $0.01 per minute of video, and $0.0001 per answered message on text**. See [pricing and credits](/get-started/pricing-and-credits).
+
+The consequence to plan around: **nothing runs until you have added a key for every provider your agent uses.** Publishing an agent whose provider has no key is refused, naming the provider. See [provider keys](/get-started/provider-keys).
+
+## Four ways to build the same thing
+
+Every one of these works from the same operation surface — one operation per API endpoint — so nothing is reachable in one and missing from another.
+
+- **The dashboard** at `https://app.talqing.com` — editors for agents, tools and tasks, plus telephony, conversations and observability.
+- **The API and the SDKs** — `/v1` over HTTPS, with a [TypeScript](/sdks/typescript) and a [Python](/sdks/python) client generated from the same document.
+- **The CoPilots** — a build assistant inside the agent, tool and task editors. It calls the same operations you would, as you, with your role.
+- **Your own coding agent** — point Claude Code, Codex or any MCP client at [our MCP server](/mcp/overview) and it gets one tool per endpoint plus the same platform knowledge the CoPilots work from.
+
+## What you get
+
+**[Agents](/agents/overview)** with drafts and published versions, version history and rollback. **[Tools](/tools/overview)** built as an ordered tree of operations — call an API, run TypeScript, branch, speak, hand off, transfer to a human, end the call. **[Agent tasks](/tasks/overview)** with typed output. **[Phone numbers](/telephony/phone-numbers)** imported from your own carrier account, answering and placing calls. **[Batch calling](/telephony/batch-calling)** with scheduling windows, retries and pause/resume. **[Integrations](/integrations/overview)** — external MCP servers, native Google Calendar tools, Telegram. **[Observability](/observability/overview)** — every transcript, tool call, latency stage and cost line, plus [webhooks](/observability/webhooks).
+
+<Note>
+Everything a workspace owns is regional. Agents, tools, calls, phone numbers and the credit balance belong to the base URL they were created against — `https://api.in.talqing.com` or `https://api.us.talqing.com`. One token reaches every region; it names your workspace, not a place. See [regions](/get-started/regions).
+</Note>
+
+## Start here
+
+<CardGroup cols={2}>
+  <Card title="Build a voice agent" href="/get-started/quickstart-voice-agent">
+    Dashboard only. Sign in, add keys, publish an agent and talk to it in the browser.
+  </Card>
+  <Card title="Take a real phone call" href="/get-started/quickstart-phone-number">
+    Connect your carrier, import a number, point an agent at it.
+  </Card>
+  <Card title="Talk to a text agent in code" href="/get-started/quickstart-text-agent">
+    One script, end to end, in TypeScript or Python.
+  </Card>
+  <Card title="Build from your terminal" href="/get-started/quickstart-coding-agent">
+    Point Claude Code or Codex at the MCP server and build by asking.
+  </Card>
+</CardGroup>
+
+<CardGroup cols={2}>
+  <Card title="Core concepts" href="/get-started/core-concepts">
+    The vocabulary, in the order you meet it.
+  </Card>
+  <Card title="Provider keys" href="/get-started/provider-keys">
+    Which providers, how to add a key, what fails without one.
+  </Card>
+</CardGroup>

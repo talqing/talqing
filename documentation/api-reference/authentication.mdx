@@ -1,0 +1,136 @@
+---
+title: "Authentication"
+description: "Bearer tokens, the dashboard cookie session, and which role each operation needs."
+---
+
+Every endpoint except `GET /health` needs a credential. For an integration that
+credential is a personal access token, sent as a bearer token.
+
+```
+Authorization: Bearer <personal access token>
+```
+
+## Personal access tokens
+
+Create one in the dashboard under **Organization → API Tokens**. The plaintext
+value is shown once, at creation, and never again — store it before you close the
+dialog.
+
+A token is a signed string with no prefix and no expiry. Do not parse it, and do
+not assume a shape.
+
+<Warning>
+A personal access token carries its creator's live role. Change that person's
+role and every token they hold changes with it; remove them from the workspace
+and their tokens stop working on the next request. There is no per-token scope
+and no read-only token.
+</Warning>
+
+Revocation is deleting the token's row in the dashboard. The signature itself
+never expires, so the row is the check — which is also why revocation is
+immediate rather than eventual.
+
+<CodeGroup>
+```bash cURL
+curl https://api.in.talqing.com/v1/agents \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const talqing = new TalqingClient({
+  baseUrl: "https://api.in.talqing.com",
+  token: process.env.TALQING_API_KEY,
+});
+```
+
+```python Python
+talqing = Talqing(
+    token=os.environ["TALQING_API_KEY"],
+    base_url="https://api.in.talqing.com",
+)
+```
+</CodeGroup>
+
+One token reaches every region — it names your workspace, not a place. See
+[regions](/get-started/regions).
+
+## The dashboard's cookie session
+
+Signing in with Google sets `talqing_session`, an httponly cookie on the
+registrable domain, so it reaches every region's API host. It is what the
+dashboard authenticates with, it lasts 30 days, and it is stateless — there is no
+way to revoke one before it expires. Pass `credentials: "include"` in the
+TypeScript SDK to use it instead of a token. Nothing else should.
+
+<Warning>
+**Never put a personal access token in a browser.** A token has your full role
+and no scope, so shipping one to a page hands every visitor your workspace. To
+let a browser join a call, mint a short-lived LiveKit room token on your server
+with `POST /v1/calls/token` and send only that to the page — see
+[web calls](/channels/web-calls).
+</Warning>
+
+## 401 versus 403
+
+**401** means the credential is missing, malformed, revoked, or no longer a
+member of the workspace. The messages you will see are `not authenticated` (no
+credential at all), `invalid token`, `invalid session`, and the control plane's
+own verdict passed through, such as `token revoked`. A 401 is final — retrying
+the same request with the same credential gets the same answer.
+
+**403** means the credential is good and the role is not high enough. Two
+messages, and they tell you which:
+
+| Message | Meaning |
+| --- | --- |
+| `your role is view-only — ask an organization admin for editor access` | The operation needs EDITOR or ADMIN and you are a VIEWER. |
+| `only an organization admin can do this` | The operation needs ADMIN. |
+
+Membership and role are re-read on every request and never cached, so a demotion
+or a removal takes effect on the very next call.
+
+<Note>
+A **503** with `the control plane is unreachable, so this request cannot be
+authorized` is not an auth failure. The credential may be perfectly good and we
+could not check it. Retry.
+</Note>
+
+## Which role an operation needs
+
+Three roles: `ADMIN`, `EDITOR`, `VIEWER`. Roles are per workspace and are managed
+in the dashboard — see [workspaces and roles](/get-started/workspaces-and-roles).
+
+| Operations | VIEWER | EDITOR | ADMIN |
+| --- | :---: | :---: | :---: |
+| Every `GET` — agents, tools, tasks, calls, conversations, telephony, integrations, email, webhooks, observability, catalog, secret names, provider-key hints, credit balance and ledger | yes | yes | yes |
+| Create, update, delete and publish agents, tools and tasks | no | yes | yes |
+| Validate, test-run a tool, run a task, roll back a version | no | yes | yes |
+| Carrier accounts and phone numbers: import, provision, assign, unassign, edit | no | yes | yes |
+| Place a call: `POST /v1/calls/outbound`, `POST /v1/calls/token` | no | yes | yes |
+| Call batches and email batches: create, edit, pause, resume, cancel, send | no | yes | yes |
+| Chats: start, send a message, end, mint a browser token, erase. Conversations: edit | no | yes | yes |
+| Integrations and triggers: create, edit, delete | no | yes | yes |
+| Webhooks: create, edit, delete, rotate the secret, test-fire | no | yes | yes |
+| Call analysis: preview and backfill | no | yes | yes |
+| Send a message to a CoPilot | no | yes | yes |
+| Secrets: `POST /v1/secrets`, `DELETE /v1/secrets/{secret_id}` | no | no | yes |
+| Provider keys: `PUT /v1/byok/{provider}`, `DELETE /v1/byok/{provider}` | no | no | yes |
+| Buy credits: `POST /v1/billing/credits/checkout` | no | no | yes |
+
+Secrets and provider keys are ADMIN-only in both directions of writing, but their
+list endpoints are readable by everyone — reads return only a name and a masked
+tail, never a value.
+
+<Note>
+`POST /v1/calls/token` needs EDITOR. The request can carry a whole agent
+definition, an override or a team, which means running an arbitrary prompt on an
+arbitrary model paid for with the workspace's own provider keys. A VIEWER cannot
+start a web call over the API.
+</Note>
+
+## Provider keys are not Talqing tokens
+
+Talqing is strictly bring-your-own-key. The token on this page authenticates you
+to Talqing; the OpenAI, Deepgram or ElevenLabs key that actually runs your agent
+is a **provider key**, stored per workspace and never sent in a request header.
+See [provider keys](/get-started/provider-keys).

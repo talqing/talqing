@@ -1,0 +1,187 @@
+---
+title: "Expressive delivery"
+description: "Let the agent write laughs, whispers and pauses into its own speech, on the two voices that can speak them."
+---
+
+`tts.expressive` lets the agent shape how a line lands, not only what it says.
+With it on, the model writes delivery tags into the words it produces — a
+laugh, a drop to a whisper, a pause before the number that matters — and the
+voice performs them.
+
+It works on exactly three models, and switching it on anywhere else is refused.
+
+| Model | Dialect | Speed control |
+| --- | --- | --- |
+| `xai/xai-tts` | xAI speech tags: point tags in `[brackets]`, span tags in closed `<angle brackets>` | 0.7 – 1.5 |
+| `elevenlabs/eleven_v3` | ElevenLabs audio tags: five `[bracket]` tags, each colouring the next few words | None — pace is a tag |
+| `elevenlabs/eleven_v3_conversational` | The same ElevenLabs audio tags, performed the same way, at half the price | None — pace is a tag |
+
+```json
+{
+  "tts": {
+    "provider": "elevenlabs",
+    "model": "eleven_v3",
+    "voice": "hpp4J3VqNfWAUOO0d1Us",
+    "expressive": true,
+    "stability": 0.45,
+    "similarity_boost": 0.8
+  }
+}
+```
+
+Set it on a model with no dialect and the write is refused, naming the three
+that have one:
+
+```
+text-to-speech model 'elevenlabs/eleven_flash_v2_5' cannot speak delivery tags,
+so expressive delivery would change nothing - turn it off, or pick one of:
+xai/xai-tts, elevenlabs/eleven_v3, elevenlabs/eleven_v3_conversational
+```
+
+<Note>
+  Expressive delivery is a `tts` setting, so it exists only on the
+  speech-to-text → LLM → text-to-speech cascade. A speech-to-speech agent has no
+  `tts` object, and a text agent has none either.
+</Note>
+
+## How it works
+
+Each expressive model's catalog entry carries a block of prose, and turning the
+toggle on appends that block to the agent's system prompt. The block is what
+teaches the tag vocabulary — it is the only place the tags are ever written
+down, and nothing on Talqing's side rewrites, strips or translates what the
+model emits. The text goes to the provider with the tags in it, and the provider
+performs the ones it knows.
+
+The block is appended after your prompt, after `{{userdata.*}}` substitution, and it is the same string for every session on
+the agent. It also reaches a handoff target that inherits this voice, so a
+target does not need its own copy.
+
+Because the tags are part of the model's output text, they appear in the
+transcript and on the call record — which is how you see what the agent chose to
+do.
+
+### What it costs
+
+Both sides of every turn, and both are billed to your own provider key:
+
+- **Input.** The dialect block is added to the system prompt on every model
+  call for the whole call. With prompt caching it is a cached prefix after the
+  first turn, but it is never free.
+- **Output.** Every tag the model writes is output tokens, and on ElevenLabs and
+  xAI the tag characters are also text-to-speech characters.
+
+## The tag vocabularies
+
+Write tags only from the dialect of the model you are on. xAI silently drops a
+label it does not recognise, so a tag from the other dialect does nothing there
+rather than being spoken.
+
+<AccordionGroup>
+<Accordion title="xai/xai-tts">
+
+Placed at a point in the line:
+
+```
+[pause] [long-pause] [laugh] [chuckle] [giggle] [cry] [sigh] [breath]
+[inhale] [exhale] [tsk] [tongue-click] [lip-smack] [hum-tune]
+```
+
+Wrapped around a phrase, and always closed:
+
+```
+<emphasis> <whisper> <soft> <loud> <build-intensity> <decrease-intensity>
+<higher-pitch> <lower-pitch> <slow> <fast> <sing-song> <singing> <laugh-speak>
+```
+
+The block the agent is given also tells it to use one tag only where a real
+person's voice would do that thing, never to put a pause beside sentence
+punctuation, never to emphasise more than a single word, and to stay composed on
+bad news however casual the call has been. An example line it is shown:
+
+```
+I have you down for [pause] Thursday the <emphasis>ninth</emphasis>.
+<slow>Your reference is A 7 X 9.</slow>
+```
+
+</Accordion>
+
+<Accordion title="elevenlabs/eleven_v3 and eleven_v3_conversational">
+
+One dialect across both models. Five tags, and no wrapping form at all:
+
+```
+[laughs] [sighs] [whispers] [slow] [excited]
+```
+
+Each colours roughly the next four or five words and then delivery returns to
+normal, so a tag goes directly in front of the phrase it belongs to. The example
+line the agent is shown:
+
+```
+That's all confirmed for Thursday the ninth. [slow] Your reference is A 7 X 9.
+```
+
+This is why v3 has no speed control: pace is one of the tags.
+
+</Accordion>
+</AccordionGroup>
+
+## Two rules enforced at publish
+
+### A fallback voice must match the setting
+
+The dialect is taught once, at compile time, from the primary voice. A failover
+happens mid-turn, on text the model has already produced with tags in it — so
+the fallback has to be a voice that speaks tags too.
+
+```
+expressive delivery is on for 'elevenlabs/eleven_v3' but off for
+'elevenlabs/eleven_flash_v2_5' - a fallback takes over mid-call, and the agent
+keeps writing delivery tags either way, so set both the same
+```
+
+In practice that means the two dialect models back each other, or the agent has
+no text-to-speech fallback. See [model fallbacks](/agents/model-fallbacks).
+
+### Every handoff target must use the same voice
+
+A [handoff](/teams/handoffs) target inherits the source's transcript, which is
+full of tags, and is few-shot into writing its own. So a handoff **out of** an
+expressive agent is refused unless the target uses the same provider, the same
+model and `expressive: true`.
+
+```
+a handoff out of an agent with expressive delivery must keep the same voice, or
+the target inherits a transcript full of delivery tags and reads them out to the
+caller - source uses elevenlabs/eleven_v3 with expressive delivery on, target
+uses elevenlabs/eleven_flash_v2_5 with expressive delivery off
+```
+
+Handing off **into** an expressive agent is fine — the history it inherits is
+plain text, which every voice speaks. And because a legal target is itself
+expressive, the rule applies to that target's own outgoing edges too: one
+expressive agent puts its whole downstream graph on one voice.
+
+<Warning>
+  Nothing validates a tag you write by hand. A `[laughs]` typed into a
+  `greeting`, a [`say` operation](/tools/speech-operations) or a handoff
+  `message` is never checked against the model's dialect — and on a voice with
+  no dialect it is read out as the word. Measured on
+  `elevenlabs/eleven_flash_v2_5`: `[laughs]` reaches the caller as "Laughs".
+  Put a tag in fixed text only when the agent's own voice speaks that dialect.
+</Warning>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Voices" href="/agents/voices">
+    Picking the voice, its speed, and the ElevenLabs settings step.
+  </Card>
+  <Card title="Handoffs" href="/teams/handoffs">
+    Routing a conversation to another agent, and what has to match.
+  </Card>
+  <Card title="Prompting" href="/agents/prompting">
+    Writing the system prompt the dialect block is appended to.
+  </Card>
+</CardGroup>

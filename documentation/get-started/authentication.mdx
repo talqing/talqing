@@ -1,0 +1,131 @@
+---
+title: "Authentication"
+description: "Sign in with Google, create a personal access token, and send it as a Bearer header from anywhere."
+---
+
+There are two credentials on Talqing and they belong in different places: a **personal access token** for code, and a **dashboard session cookie** for a browser on `app.talqing.com`. Nothing else authenticates a request.
+
+## Signing in
+
+Sign-in is **Google OAuth only**. There is no email-and-password login and no way to set a password. The first successful Google sign-in for an address creates the user and their own workspace; every visit after that re-issues the session cookie.
+
+There is no domain auto-join. Belonging to a workspace comes from an [invite](/get-started/workspaces-and-roles) or from creating one, and from nothing else — sharing an email domain with an existing member grants nothing.
+
+## Personal access tokens
+
+A personal access token is how code talks to the API. Create one in the dashboard under **Organization → API Tokens**, give it a name, and copy the value: **it is shown once and never again.** Nothing on the platform can print it back to you, so if you lose it, delete the token and make another.
+
+Send it as a Bearer header:
+
+```
+Authorization: Bearer <token>
+```
+
+<Warning>
+A real token is a long opaque string with **no prefix**. Some of our client READMEs still show a placeholder that looks like `tq_your_token` — that is a documentation bug, not a format. Nothing strips or adds a prefix, so a value with `tq_` glued to the front is sent verbatim and comes back `401`.
+</Warning>
+
+### A token is its creator
+
+A token authenticates **as the person who created it** and carries that person's **live** role, read fresh on every request. Three consequences worth planning around:
+
+- Demote someone from ADMIN to EDITOR and every token they ever made loses admin powers on the next call. Promote them and the tokens gain them. You do not reissue anything.
+- Remove someone from the workspace and their tokens for that workspace are deleted with the membership. The JWT still verifies cryptographically, but the row behind it is gone and the request is refused.
+- **Revoking a token means deleting it.** Tokens do not expire, and the signature is not the check — the stored row is. Delete it from the tokens list and the next request with it fails.
+
+An ADMIN sees every token in the workspace and can delete a teammate's. An EDITOR or VIEWER sees only their own. Values are never shown in the list, only the name, the owner and when it was created.
+
+### The MCP token
+
+Alongside tokens you created by hand, the list shows one with `kind: mcp`. That one is issued automatically — one per person per workspace — and is what the dashboard renders into ready-to-paste [MCP configuration](/mcp/setup) so a new signup can point Claude Code or Codex at the platform without first learning what an access token is. Unlike a manual token it can be read again whenever you need it. Deleting it rotates it: the next dashboard visit issues a replacement and anything still configured with the old value stops working.
+
+### One token, every region
+
+A token names your **workspace**, not a place. The same token works against `https://api.in.talqing.com` and `https://api.us.talqing.com`, and nothing in the token, the header or any request body says which region you are in — the base URL is the whole of that choice. See [regions](/get-started/regions).
+
+### Where a token must never go
+
+A personal access token is a workspace credential with a human's full role behind it. It belongs on a server you control, in an environment variable or a secret manager.
+
+Do not put one in a browser bundle, a mobile app, a public repository, a CI log, or anywhere a customer could read it. Anyone holding it can do everything its owner can do, in every region, until someone notices and deletes the row.
+
+**A browser talks to an agent a different way.** Your server calls `POST /v1/calls/token` with your personal access token and hands the browser back a short-lived call token that connects to exactly one call and can do nothing else. That is the only credential that should ever reach a page. See [web calls](/channels/web-calls).
+
+## The dashboard session cookie
+
+Signing in sets `talqing_session`, a 30-day HttpOnly cookie scoped to the registrable domain so that one cookie reaches the dashboard, the control plane and every region's API host. It is stateless: the cookie is the whole credential, with no server-side session store, so **it cannot be revoked before it expires** — signing out clears it in that browser and nothing more. Switching workspaces re-issues it, which is why you reload after switching.
+
+The TypeScript SDK can send the cookie instead of a token, which is what the dashboard itself does:
+
+```typescript
+const talqing = new TalqingClient({
+  baseUrl: "https://api.in.talqing.com",
+  credentials: "include",
+});
+```
+
+This only works from a page served on the dashboard's own origin. The Python SDK has no equivalent and requires a token — it is a server-side client with no browser origin to inherit.
+
+## 401 versus 403
+
+They mean different things and only one of them is worth changing your code over.
+
+| Status | Means | What to do |
+| --- | --- | --- |
+| `401` | No credential, a malformed one, a deleted token, or a user who is no longer a member of this workspace | Fix the credential. Retrying is pointless — this is final |
+| `403` | The credential is good; this **role** may not do this | Ask an ADMIN for a higher role, or do it as someone who has one |
+| `503` | We could not check the credential at all because the control plane was unreachable | Retry with backoff. The credential may be perfectly good |
+
+The messages are specific: `invalid token` for a signature that does not verify, `token revoked` for a token whose row is gone, `you are not a member of this organization` for a membership that was removed. A write attempted by a VIEWER answers `your role is view-only — ask an organization admin for editor access`; an admin-only route answers `only an organization admin can do this`.
+
+**Membership is re-read on every single request and never cached.** Removing someone, or changing their role, takes effect on their very next call — there is no propagation delay and nothing to invalidate.
+
+## A complete authenticated request
+
+Read the base URL and the token from the environment; never inline either.
+
+<CodeGroup>
+```bash cURL
+export TALQING_API_KEY="…"
+export TALQING_BASE_URL="https://api.in.talqing.com"
+
+curl -sS "$TALQING_BASE_URL/v1/agents?limit=5" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+import { TalqingClient } from "@talqing/sdk";
+
+const talqing = new TalqingClient({
+  baseUrl: process.env.TALQING_BASE_URL ?? "https://api.in.talqing.com",
+  token: process.env.TALQING_API_KEY,
+});
+
+const agents = await talqing.agents.list({ limit: 5 });
+console.log(agents.items.map((a) => a.config.name));
+```
+
+```python Python
+from talqing import Talqing
+
+# Reads TALQING_API_KEY and TALQING_BASE_URL; both are required.
+with Talqing.from_env() as talqing:
+    agents = talqing.agents.list(limit=5)
+    print([a["config"]["name"] for a in agents["items"]])
+```
+</CodeGroup>
+
+The TypeScript client requires `baseUrl` and reads no environment variables of its own — the `process.env` above is your code, not the SDK's. `Talqing.from_env()` in Python does read `TALQING_API_KEY` and `TALQING_BASE_URL`, and raises if either is missing rather than defaulting to a region you did not pick.
+
+## What authentication does not cover
+
+Signing in, workspaces, members, roles and personal access tokens all live on a separate control plane, and none of them is part of the published API or either SDK. There is no endpoint that mints a credential and no endpoint that changes who is in the workspace, so an agent you point at the API — a CoPilot, an MCP client, your own script — cannot grant itself more access than the token it was given. That is structural, not a permission check.
+
+<CardGroup cols={2}>
+<Card title="Regions" href="/get-started/regions">
+  One token, two base URLs, and what belongs to which.
+</Card>
+<Card title="Workspaces and roles" href="/get-started/workspaces-and-roles">
+  What ADMIN, EDITOR and VIEWER can each do.
+</Card>
+</CardGroup>

@@ -1,0 +1,402 @@
+---
+title: "Versions"
+description: "Every write lands on the draft. Live traffic runs the last published version until you publish again."
+---
+
+An agent has two states at all times: a **draft** you edit, and a **published**
+version that live traffic runs. Every write — from the dashboard, the API, the
+MCP server or AgentCoPilot — lands on the draft. Nothing you change reaches a
+real caller until you publish.
+
+This is the operational concept the rest of the platform hangs off, so it is
+worth getting exact before you build anything real.
+
+| | Draft | Published version |
+| --- | --- | --- |
+| What it is | `agents.config` — one mutable config per agent | An immutable numbered snapshot, one per publish |
+| Who sees it | Only you, in the editor and over the API | Every inbound call, outbound call, batch dial and text conversation |
+| How it changes | `PATCH /v1/agents/{agent_id}` | Only by publishing again, or rolling back |
+| Tool attachments | Track whatever is published now | Pinned to the tool version live at publish time |
+| Numbering | None | `1`, `2`, `3`… never reused, never rewritten |
+
+`GET /v1/agents/{agent_id}` returns both: `config` is the draft, and
+`published_version` is the number live right now (`null` while the agent has
+never been published). Compare `updated_at` against `published_at` to tell an
+agent whose draft has moved on from one whose draft is what calls are running.
+
+## Publishing
+
+`POST /v1/agents/{agent_id}/publish` runs publish-grade validation, freezes the
+draft as the next version number, and points `published_version` at it. It
+returns the version, the timestamp and any warnings validation raised — warnings
+do not block a publish, but they are worth reading.
+
+If validation fails, nothing is published and you get a `400` listing every
+problem. See [validation](/agents/validation) for the full list of refusals and
+how to fix each one.
+
+Publishing needs the editor role. So does `validate` — both are `POST`
+endpoints, and a viewer gets a `403`.
+
+## Order of operations with tools
+
+Attaching an unpublished tool is rejected, so tools have to be published before
+the agent that uses them. The sequence is always the same.
+
+<Steps>
+  <Step title="Create or update the tool">
+    `POST /v1/tools` or `PATCH /v1/tools/{tool_id}`, including its operation
+    tree. This lands on the tool's own draft.
+  </Step>
+  <Step title="Validate the tool">
+    `POST /v1/tools/{tool_id}/validate`. Optional, but it tells you what publish
+    will refuse.
+  </Step>
+  <Step title="Publish the tool">
+    `POST /v1/tools/{tool_id}/publish`. Until this succeeds, the tool cannot be
+    attached to anything — attaching it fails with `tool 'name' has no published
+    version - publish it before attaching`.
+  </Step>
+  <Step title="Attach it to the agent">
+    `PATCH /v1/agents/{agent_id}` with `tools: [{"tool_id": "…"}]`. Leave
+    `tool_version` out — a draft tracks whatever is published now.
+  </Step>
+  <Step title="Validate the agent">
+    `POST /v1/agents/{agent_id}/validate`.
+  </Step>
+  <Step title="Publish the agent">
+    `POST /v1/agents/{agent_id}/publish`.
+  </Step>
+</Steps>
+
+`PATCH /v1/agents/{agent_id}` takes only the fields you change, but `tools` is a
+list and is sent whole: include every tool the agent should keep. See
+[updating an agent](/agents/overview#updating-an-agent).
+
+## Publishing an agent pins its tools
+
+<Warning>
+Publishing an agent records, for each attached tool and lifecycle hook, the tool
+version that is live **at that moment**. Republishing the tool afterwards does
+not change what live calls do. The agent has to be published again for the new
+tool version to reach a caller.
+</Warning>
+
+This surprises everyone once. Fix a bug in `check_order`, publish the tool, ring
+the number, and the agent still runs the old operation tree — because the agent
+version that answers still names `check_order` v3.
+
+The rule is worth the surprise: without it, publishing a tool would silently
+change the behaviour of every agent that attaches it, including agents you were
+not editing and did not test.
+
+The pin lives in the frozen config: a published version's `tools` entries carry
+`{"tool_id": "…", "tool_version": 3}`, where the draft's carry
+`{"tool_id": "…", "tool_version": null}`. Two agent versions with an otherwise
+identical config can therefore behave differently, and the pinned numbers are
+the only place that shows — which is why the dashboard's diff has a Tools
+section listing `v3 → v4` per tool.
+
+Two things do **not** pin:
+
+- **MCP servers.** `mcps` names an integration, and its `allowed_tools` is read
+  live: narrowing it reaches every already-published agent on its next turn.
+- **FAQ content.** A published version freezes *which* FAQs are attached, not
+  what they say. An FAQ has no versions: editing a question or an answer reaches
+  every agent attaching it from its next session, with no publish. See
+  [FAQs](/agents/faqs#edits-are-live).
+
+## Version history
+
+`GET /v1/agents/{agent_id}` returns `versions`: every publish, newest first,
+with its number, `published_at` and the email of whoever published it. (The
+list endpoint omits this — fetch the agent to get it.)
+
+`GET /v1/agents/{agent_id}/versions/{version}` returns one version's frozen
+config in full: the prompt, the models, the turn handling and the tool versions
+it pinned, exactly as they were at that publish.
+
+In the dashboard, **Version history** in the agent editor puts any two of those
+side by side — including the draft, which is compared like a version even though
+it is not one. It opens on the comparison that matters most, what is live
+against what you are editing, and shows changed fields grouped by section
+(Identity & prompt, Models, Vision input, Turn handling, Tools & integrations,
+Session behaviour) plus the per-tool pinned versions. Copy JSON on either side
+hands you the raw version response.
+
+### Rollback
+
+`POST /v1/agents/{agent_id}/versions/{version}/rollback` puts an earlier version
+back into production. Precisely:
+
+- **No new version is created.** `published_version` moves to point at the older
+  one. Version 5 does not become version 7; it becomes live again as version 5.
+- **The draft is replaced** by that version's config, so any unpublished edits
+  are lost.
+- **The restored draft is unpinned.** A frozen version pins its tools; a draft
+  never does. Rolling back to a version that pinned `check_order` v3 gives you a
+  draft attached to `check_order` at whatever is published now — so publishing
+  that draft again pins the current tool version, not v3.
+- **`updated_at` is set to that version's `published_at`**, not to now, so a
+  rolled-back agent does not read as having unpublished edits.
+- It is refused with a `400` if that version cannot answer a phone number this
+  agent is assigned to — see [validation](/agents/validation).
+
+<Warning>
+Rollback takes effect immediately and cannot be undone. Calls already in
+progress finish on the version they started; everything that starts afterwards
+runs the restored one.
+</Warning>
+
+## What republishing reaches, and when
+
+| Surface | When a publish takes effect |
+| --- | --- |
+| A call in progress | Never. The version is resolved once, when the call starts, and that call finishes on it. |
+| A new inbound call | Immediately. The dispatch rule on the number names the agent, not a version. |
+| A new outbound call or web call | Immediately, unless the request pinned `agent_version`. |
+| A running outbound batch | Every dial placed after the publish. A batch re-resolves the agent on each pass. |
+| An open chat | On the next message. |
+| A handoff into this agent | Immediately. A handoff target named by `agent_id` is entered at its latest published version. |
+
+Two exceptions run through the whole table. A call, batch or conversation that
+was started with `agent_version` pinned, with an `agent_override`, or with an
+inline definition keeps what it was started with — see
+[per-call configuration](/agents/per-call-configuration). And a call that is
+still in progress never changes, whatever else does.
+
+Phone numbers deserve spelling out: **assigning a number is a one-time act**.
+`POST /v1/telephony/phone-numbers/{number_id}/assign` requires the agent to be published
+and stores the agent id on the number. Republish the agent and live routing
+follows on its own — you do not re-assign, and there is nothing to redo. See
+[phone numbers](/telephony/phone-numbers).
+
+<Note>
+Agents are regional. An agent published against `https://api.in.talqing.com`
+does not exist in `https://api.us.talqing.com`, and neither do its versions. The
+same personal access token reaches both.
+</Note>
+
+## The full sequence
+
+Create a tool, publish it, attach it, publish the agent.
+
+<CodeGroup>
+```bash cURL
+AGENT_ID=9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704
+
+# 1. Create the tool
+TOOL=$(curl -sS https://api.in.talqing.com/v1/tools \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "check_order",
+    "description": "Look up the status of a customer order by its id.",
+    "json_schema": {
+      "type": "object",
+      "properties": { "order_id": { "type": "string" } },
+      "required": ["order_id"]
+    },
+    "operations": [
+      {
+        "kind": "http",
+        "config": {
+          "method": "GET",
+          "url": "https://api.example.com/orders/{{args.order_id}}"
+        }
+      }
+    ]
+  }')
+TOOL_ID=$(echo "$TOOL" | jq -r .id)
+
+# 2. Validate, then 3. publish the tool
+curl -sS -X POST "https://api.in.talqing.com/v1/tools/$TOOL_ID/validate" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+curl -sS -X POST "https://api.in.talqing.com/v1/tools/$TOOL_ID/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"changelog": "first version"}'
+
+# 4. Attach it — `tools` is sent whole
+curl -sS -X PATCH "https://api.in.talqing.com/v1/agents/$AGENT_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"config\": {\"tools\": [{\"tool_id\": \"$TOOL_ID\"}]}}"
+
+# 5. Validate, then 6. publish the agent
+curl -sS -X POST "https://api.in.talqing.com/v1/agents/$AGENT_ID/validate" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+curl -sS -X POST "https://api.in.talqing.com/v1/agents/$AGENT_ID/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+import { TalqingClient } from "@talqing/sdk";
+
+const talqing = new TalqingClient({
+  baseUrl: "https://api.in.talqing.com",
+  token: process.env.TALQING_API_KEY,
+});
+
+const agentId = "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704";
+
+const tool = await talqing.tools.create({
+  createToolRequest: {
+    name: "check_order",
+    description: "Look up the status of a customer order by its id.",
+    json_schema: {
+      type: "object",
+      properties: { order_id: { type: "string" } },
+      required: ["order_id"],
+    },
+    operations: [
+      {
+        kind: "http",
+        config: {
+          method: "GET",
+          url: "https://api.example.com/orders/{{args.order_id}}",
+        },
+      },
+    ],
+  },
+});
+
+const toolReport = await talqing.tools.validate({ tool_id: tool.id });
+if (toolReport.errors.length) throw new Error(toolReport.errors.join("; "));
+await talqing.tools.publish({
+  tool_id: tool.id,
+  publishToolRequest: { changelog: "first version" },
+});
+
+await talqing.agents.update({
+  agent_id: agentId,
+  updateAgentRequest: { config: { tools: [{ tool_id: tool.id }] } },
+});
+
+const report = await talqing.agents.validate({ agent_id: agentId });
+if (report.errors.length) throw new Error(report.errors.join("; "));
+report.warnings.forEach((w) => console.warn(w));
+
+const published = await talqing.agents.publish({ agent_id: agentId });
+console.log(`live on v${published.version} at ${published.published_at}`);
+```
+
+```python Python
+from talqing import Talqing
+
+agent_id = "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704"
+
+with Talqing.from_env() as talqing:
+    tool = talqing.tools.create(
+        name="check_order",
+        description="Look up the status of a customer order by its id.",
+        json_schema={
+            "type": "object",
+            "properties": {"order_id": {"type": "string"}},
+            "required": ["order_id"],
+        },
+        operations=[
+            {
+                "kind": "http",
+                "config": {
+                    "method": "GET",
+                    "url": "https://api.example.com/orders/{{args.order_id}}",
+                },
+            }
+        ],
+    )
+
+    tool_report = talqing.tools.validate(tool["id"])
+    if tool_report["errors"]:
+        raise SystemExit("\n".join(tool_report["errors"]))
+    talqing.tools.publish(tool["id"], changelog="first version")
+
+    talqing.agents.update(agent_id, config={"tools": [{"tool_id": tool["id"]}]})
+
+    report = talqing.agents.validate(agent_id)
+    if report["errors"]:
+        raise SystemExit("\n".join(report["errors"]))
+    for warning in report["warnings"]:
+        print("warning:", warning)
+
+    published = talqing.agents.publish(agent_id)
+    print(f"live on v{published['version']} at {published['published_at']}")
+```
+</CodeGroup>
+
+Reading the history and rolling back:
+
+<CodeGroup>
+```bash cURL
+# Every publish, newest first
+curl -sS "https://api.in.talqing.com/v1/agents/$AGENT_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" | jq '.published_version, .versions'
+
+# One version's frozen config, tool pins included
+curl -sS "https://api.in.talqing.com/v1/agents/$AGENT_ID/versions/4" \
+  -H "Authorization: Bearer $TALQING_API_KEY" | jq '.config.tools'
+
+# Put v4 back into production
+curl -sS -X POST "https://api.in.talqing.com/v1/agents/$AGENT_ID/versions/4/rollback" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const { published_version, versions } = await talqing.agents.get({ agent_id: agentId });
+console.log(published_version, versions);
+
+const v4 = await talqing.agents.versions.get({ agent_id: agentId, version: 4 });
+console.log(v4.config.tools); // [{ tool_id: "…", tool_version: 3 }]
+
+await talqing.agents.versions.rollback({ agent_id: agentId, version: 4 });
+```
+
+```python Python
+agent = talqing.agents.get(agent_id)
+print(agent["published_version"], agent["versions"])
+
+v4 = talqing.agents.versions.get(agent_id, 4)
+print(v4["config"]["tools"])  # [{"tool_id": "…", "tool_version": 3}]
+
+talqing.agents.versions.rollback(agent_id, 4)
+```
+</CodeGroup>
+
+## Testing an edit without publishing
+
+You do not have to publish to try a change. Any call-starting request can take
+`agent_version: "draft"`, which runs the unpublished working copy for that one
+call — validated and tool-pinned at request time — while live callers keep
+hearing the published version. The same requests can also pin an older version
+number. See [per-call configuration](/agents/per-call-configuration).
+
+## Endpoint reference
+
+| Endpoint | Does |
+| --- | --- |
+| `PATCH /v1/agents/{agent_id}` | Change the draft; send only the fields that change |
+| `POST /v1/agents/{agent_id}/validate` | Publish-grade check, publishes nothing |
+| `POST /v1/agents/{agent_id}/publish` | Freeze the draft as the next version and make it live |
+| `GET /v1/agents/{agent_id}` | Draft config, `published_version`, and the version list |
+| `GET /v1/agents/{agent_id}/versions/{version}` | One frozen config, tool pins included |
+| `POST /v1/agents/{agent_id}/versions/{version}/rollback` | Make that version live and replace the draft |
+
+Deleting an agent deletes its published versions with it, permanently: its past
+calls keep their transcripts but no longer show the prompt, greeting and tools
+they ran. It is
+refused with a `409` while anything would still send calls or messages to it —
+an enabled phone number, stream connection or integration trigger, a call batch
+that is not over, or another agent or tool that hands off to it — and every
+blocker is named.
+
+<CardGroup cols={2}>
+  <Card title="Validation" href="/agents/validation">
+    Every reason a publish is refused, and the fix for each.
+  </Card>
+  <Card title="Per-call configuration" href="/agents/per-call-configuration">
+    Run the draft, pin a version, or override one field for a single call.
+  </Card>
+  <Card title="Publishing tools" href="/tools/testing-and-publishing">
+    Test runs, tool versions, and the pin-at-agent-publish rule from the tool side.
+  </Card>
+</CardGroup>

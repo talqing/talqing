@@ -1,0 +1,399 @@
+# Template for a REGION's configs/{env}.{region}.config.yaml — everything a
+# region reads, and nothing control reads. The real files are gitignored and
+# dockerignored because they hold secrets; this one is committed, so KEEP IT FREE
+# OF REAL CREDENTIALS. Every value below is either a placeholder or a non-secret
+# default.
+#
+#   cp configs/example.region.config.yaml configs/local.in.config.yaml
+#   # fill in every {{TOKEN}}, then:
+#   echo "ENV=local.in" >> backend/.env
+#
+# There are TWO templates, because there are two shapes: this one and
+# configs/example.control.config.yaml. A region holds no control-plane DSN, no
+# session SIGNING key and no payment credentials; it holds the tenant secrets
+# key, the media stack and its link to control. Shipping the wrong half is
+# refused at boot, by name.
+#
+# Unfilled values are written as {{TOKEN}} and nothing else. That is the one
+# pattern every guard greps for — the deploy script refuses to ship a file that
+# still contains one, and a bare `TODO` alongside it. A placeholder
+# written any other way (a bare HOST, an empty string) is invisible to it.
+#
+# The file loaded is decided by ENV, which names both the environment and the
+# node: `local.in`, `dev.in`, `prod.us`. It comes from the process environment or
+# backend/.env. `env:` and `region:` below must match it or startup fails — so
+# change both when you copy this. TALQING_CONFIG_FILE overrides the path
+# entirely.
+#
+# The filename is the first line of defence and the reason the node is in it: a
+# `prod.us.config.yaml` mis-copied onto the India droplet is not loaded and
+# wrong, it is NOT FOUND, and the process refuses to start naming the file it
+# wanted.
+#
+# Missing required keys fail fast at startup with a pydantic ValidationError
+# naming the key. Keys with a default may be omitted; they are all spelled out
+# here so this doubles as the reference for what exists. settings/settings.py
+# is authoritative.
+#
+# Generating the secrets marked below:
+#   secrets_fernet_key  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+#   oauth_state_key     python -c "import secrets; print(secrets.token_urlsafe(48))"
+#   internal_token      openssl rand -hex 32  — generate it ONCE for this region
+#                       and put the same value in control's `regions[] entry
+#   passwords           python -c "import secrets; print(secrets.token_hex(32))"
+#   session_verify_key  the PUBLIC half of the control plane's Ed25519 key —
+#                       the same string in every region. Generated alongside the
+#                       private half; see example.control.config.yaml's header.
+#   livekit api_key/secret  must match backend/livekit.yaml and the sip/livekit
+#                           droplet configs, or every join is rejected
+
+env: local
+# This region's slug — a product identifier, never a datacenter. It must match
+# the tail of ENV.
+region: in
+
+security:
+  # Fernet key encrypting tenant secrets at rest. Rotating it strands every
+  # stored secret, so treat it as permanent per environment. REGION ONLY — the
+  # control plane holds no tenant secrets and must not hold the key to any.
+  secrets_fernet_key: "{{SECRETS_FERNET_KEY}}"
+  # Signs browser chat tokens (POST /v1/chats/{id}/token). REGION ONLY.
+  #   python -c "import secrets; print(secrets.token_urlsafe(48))"
+  chat_token_secret: "{{CHAT_TOKEN_SECRET}}"
+  session_cookie_name: talqing_session
+  # The domain the cookie is scoped to. It must match the control plane's
+  # EXACTLY, or the cookie control issues never reaches this API — and it should
+  # be as narrow as every host in the environment allows, because two
+  # environments claiming the same domain share one cookie and log each other
+  # out. See example.control.config.yaml, which explains the whole rule. Leave
+  # null locally, where there is one host.
+  session_cookie_domain: null
+  # session_cookie_domain: dev.talqing.com  # dev
+  # session_cookie_domain: talqing.com      # prod
+  #
+  # Ed25519 PUBLIC key, PEM. The control plane mints every session and personal
+  # access token; a region only verifies, locally and offline. There is
+  # deliberately NO session_signing_key here: a region that can MINT a session
+  # can forge one for any other region, and the config refuses one outright.
+  session_verify_key: |
+    {{SESSION_VERIFY_KEY_PEM}}
+  # HS256, for the integration OAuth state this region mints and reads back
+  # itself. It never crosses a host, so each node generates its own.
+  oauth_state_key: "{{OAUTH_STATE_KEY}}"
+  # Hosts tenant tool code may reach despite pointing at a private
+  # range. Empty in dev/prod: this is the SSRF guard.
+  ssrf_allow_hosts: []
+  # ssrf_allow_hosts: [host.docker.internal]   # local only, to reach the host
+
+# How this region reaches the control plane. Every authenticated request makes
+# one synchronous call here for the user, their role and the organization — there
+# is no cache, deliberately, so that removing a member takes effect on their very
+# next request. A bearer token and NOT a DSN: this box runs tenant-authored tool
+# code, and a connection string into the global identity store does not belong
+# on it.
+control:
+  api_url: http://api-control:8000
+  # api_url: https://api.control.talqing.com    # prod
+  # ONE SECRET FOR THIS REGION, used in BOTH directions: sent when calling
+  # control, and accepted here when control calls back to push credit. It must be
+  # THE SAME STRING as control's `regions[<this region>].internal_token` — two
+  # different values 401 every authenticated request in this region. Each region
+  # has its own, which is what keeps one region unable to speak for another.
+  internal_token: "{{IN_INTERNAL_TOKEN}}"
+  # Rotating it is a two-sided edit on two droplets deployed minutes apart, so
+  # for the length of a rotation the other value is accepted too. Blank normally.
+  # previous_internal_token: "{{IN_PREVIOUS_INTERNAL_TOKEN}}"
+  # Wall-clock cap on one round trip. On the auth hot path, so a control plane
+  # that has stopped answering must fail fast rather than hold a worker.
+  timeout_seconds: 5.0
+
+app:
+  api_public_url: http://localhost:8000
+  dashboard_public_url: http://localhost:3000
+  # Service name on the compose network, not localhost — the API and workers
+  # call it from inside their own containers.
+  code_exec_url: http://code-exec:8090
+  cors_origins:
+    - http://localhost:3000
+  # Local examples often bind a random port; the regex saves editing
+  # cors_origins each time. Set to null in dev/prod and list origins explicitly.
+  cors_origin_regex: "^http://(localhost|127\\.0\\.0\\.1):[0-9]+$"
+
+# The DSN is one string so query parameters can be stated. Against a managed
+# Postgres that means `?sslmode=require` — without it asyncpg falls back to
+# `prefer`, which is TLS but unverified, and silently.
+#
+# pool_max_size has no default in settings.py and must be set here. It is a PER
+# PROCESS ceiling — the api, each worker and each live-call job process open
+# their own pool from this number — and nothing sums them against the server's
+# max_connections, so it is what decides the concurrent-call limit. The
+# arithmetic is in pgbouncer/pgbouncer.ini. A single container can narrow its own
+# share with TALQING_PG_DATA_POOL_MAX.
+#
+# There is NO `control:` block here. A region has no connection into the global
+# identity store, which is what makes that a property of the deployment rather
+# than a promise; it reaches control over HTTP instead.
+postgres:
+  # Data plane: this region's tenant rows. Every organization exists in every
+  # region and routes here — there is no per-tenant DSN in the control plane any
+  # more.
+  data:
+    default_dsn: postgresql://talqing:{{PG_PASSWORD}}@data-pg:5432/talqing_data
+    pool_min_size: 1
+    pool_max_size: 10
+    # Tenants that do NOT live on default_dsn IN THIS REGION. Absent = the
+    # default, which is every tenant until one earns its own database. It lives
+    # here rather than in the control plane, which would otherwise hold one
+    # region's fact about another.
+    #
+    # Adding one is four ordered steps and the config edit is the LAST: add a
+    # [databases] entry in pgbouncer.ini (the database NAME is what routes),
+    # create the database, add the override, restart — which migrates it on boot.
+    #
+    # WARNING: this does not move data. A tenant switched to an override after it
+    # has rows points at an empty database, and the application will serve that
+    # as an empty workspace. Moving a live tenant is a dump, a restore and a
+    # window.
+    tenant_overrides: {}
+    # tenant_overrides:
+    #   "0f2a…-uuid": postgresql://talqing:…@bigco-pg:5432/talqing_data_bigco
+
+redis:
+  # Cluster mode everywhere — local and dev run one node holding all 16384
+  # slots, prod the same on its own droplet. Cluster mode serves database 0
+  # only, so the URL must end in /0.
+  url: redis://redis:6379/0
+
+kafka:
+  bootstrap_servers: kafka:9092
+  text_turns_topic: talqing.text.turns.v1
+  # A consumer group cannot have more active members than the topic has
+  # partitions; extra text-worker replicas sit idle.
+  text_consumer_group: talqing-text-workers-v1
+  # Deferred work that has come due (retention purges today). Kafka never
+  # carries the schedule itself — that lives in `scheduled_jobs`.
+  jobs_topic: talqing.jobs.due.v1
+  jobs_consumer_group: talqing-job-executors-v1
+
+livekit:
+  # Private signal address used by the API and workers. May point at any node in
+  # the cluster — Redis routes each job to whichever node hosts the room.
+  url: ws://livekit:7880
+  # Browsers get one of these at random from POST /v1/calls/token. Several names
+  # may resolve to the same host while there is only one.
+  public_urls:
+    - ws://localhost:7880
+  api_key: "{{LIVEKIT_API_KEY}}"
+  api_secret: "{{LIVEKIT_API_SECRET}}"
+  agent_name: talqing-rtc
+  sip:
+    # Public SIP host:port announced to the carrier — the Kamailio edge, which
+    # picks a livekit-sip backend per call. ONE ENTRY, always: a region has one
+    # SIP edge, and this file belongs to one region. (It stays a list because
+    # each telephony account is pinned to an entry at creation and keeps it, so
+    # a second name can be added without moving existing accounts.) Empty means
+    # telephony provisioning fails until it is set.
+    uri:
+      - localhost:5060
+    transport: tcp   # tcp | tls | udp
+    # 3h wall-clock cap per call, sent to LiveKit on the inbound trunk and on
+    # CreateSIPParticipant. Unset, livekit-sip would apply its own 24h ceiling.
+    # Keep inside the voice worker's drain_timeout (workers/voice/main.py) —
+    # a shorter drain force-closes live calls on every deploy.
+    max_call_duration_seconds: 10800
+    # Outbound: how long the callee's phone rings. Inbound: how long the
+    # caller waits for the agent to join. LiveKit's default is 3 minutes
+    # for both; its documented ceiling is 80s.
+    ringing_timeout_seconds: 60
+    # Twilio's credential for a WhatsApp call's SIP leg. One per region;
+    # generate with: python -c "import secrets; print(secrets.token_hex(24))"
+    whatsapp:
+      username: talqing-whatsapp
+      password: "{{WHATSAPP_SIP_PASSWORD}}"
+
+
+# DigitalOcean Spaces — call recordings, in every environment including local.
+#
+# THERE IS NO MinIO, and the reason is not the one people reach for. Two things
+# are wrong with a stand-in here, and only the first is obvious:
+#
+#   1. MinIO's server answers `PutBucketCors` with NotImplemented, so the
+#      bucket's CORS rule cannot be applied to it. This one has a
+#      workaround — `MINIO_API_CORS_ALLOW_ORIGIN` on the container emits the
+#      same header — so it is not what settles it.
+#   2. SigV4 signs the Host header. The API signs the URL and the BROWSER
+#      fetches it, so both have to name the bucket by the same address; inside
+#      compose the API sees `minio:9000` and a browser can only reach
+#      `localhost:9000`, and that URL comes back `SignatureDoesNotMatch`.
+#      Closing that means every developer editing /etc/hosts, which is a setup
+#      step a clean clone should not need to discover by having audio 403.
+#
+# Both disappear against a real bucket, which is one address for everyone. The
+# cost is real and accepted: local development writes to a real bucket, and
+# `docker compose down -v` does not clear it.
+#
+# The bucket must be PRIVATE. The API never serves the audio — it answers with a
+# short-lived presigned URL and the browser fetches the object from the bucket,
+# which is what makes seeking cheap.
+#
+# One endpoint, used by the API, the workers and the browser: SigV4 signs the
+# Host header, so a URL cannot be rewritten for a second address afterwards.
+#
+# The bucket also needs a CORS rule for the dashboard's origin, or the player's
+# Caller/Agent channel switch silently outputs nothing while audio still plays.
+#
+# There is deliberately NO lifecycle rule. Retention is `tenants.retention_days`,
+# default unlimited, enforced by the `session.purge` job; a bucket-wide rule
+# would delete objects the database says are kept forever.
+#
+# `force_path_style: true` for anything that is not AWS itself.
+#
+# Two buckets, each with its own key: DigitalOcean limited-access keys are
+# scoped to one bucket, so the name and the credentials are nested together
+# rather than paired by hand. The CORS rule belongs to the recordings bucket
+# only; an attachment is rendered by a plain `<img>`, which is not preflighted.
+storage:
+  endpoint_url: https://sfo3.digitaloceanspaces.com
+  region: sfo3
+  force_path_style: true
+  recordings:
+    name: your-recordings-bucket
+    access_key: "{{SPACES_ACCESS_KEY}}"
+    secret_key: "{{SPACES_SECRET_KEY}}"
+  # Images people attach to a conversation.
+  attachments:
+    name: your-attachments-bucket
+    access_key: "{{SPACES_ATTACHMENTS_ACCESS_KEY}}"
+    secret_key: "{{SPACES_ATTACHMENTS_SECRET_KEY}}"
+
+telephony:
+  # ISO 3166-1 alpha-2. The LAST resort when a number arrives as bare national
+  # digits and nothing better is known — the region of the DID a call arrived on
+  # is preferred, because a platform-wide default cannot be right for two
+  # regions at once. Set it to the country this region actually serves.
+  default_e164_region: IN
+  # Batch outbound calling — how one dialling pass paces itself. There is no
+  # discovery interval and no lock TTL: a batch is a `call.batch.dial` job, so
+  # `scheduled_at` says when the next pass runs and the claim says who runs it.
+  batch:
+    pass_interval_seconds: 30
+    dial_interval_seconds: 1.0
+    dial_timeout_seconds: 30.0
+  # WebSocket media streams — a partner's contact-centre platform terminates the
+  # PSTN leg and connects one socket per call to the gateway
+  # (`api.stream.main`, the `stream-gateway` container).
+  streams:
+    # The hostname the URL we hand a partner names. Only used to BUILD that URL;
+    # what the gateway serves is decided by Caddy and the container's port. Blank
+    # means media streams are unconfigured in this region, and
+    # `create_stream_connection` answers 503 saying so rather than minting a URL
+    # nobody can dial.
+    public_host: streams.<region>.talqing.com
+    # Wall-clock cap on one stream call, enforced by the gateway itself —
+    # nothing else in the stack bounds one, because
+    # `livekit.sip.max_call_duration_seconds` is pushed to livekit-sip and
+    # reaches nothing on a socket. Held at the same 3h as a phone call, and like
+    # it must stay inside the voice worker's drain_timeout.
+    max_call_duration_seconds: 10800
+    # How long a partner's platform waits for our handshake. NOT enforced — the
+    # deadline is theirs and the failure is invisible to us — so this only
+    # decides when the gateway logs a slow connect, which is the one warning we
+    # get before "some calls just don't connect".
+    accept_deadline_ms: 5000
+
+# Platform-wide provider keys. Tenants may override these with their own
+# (BYOK); an empty key simply means that provider is unavailable until a tenant
+# supplies one. `xai` must be present as a key even if blank; `exa` must be set.
+providers:
+  xai:
+    api_key: ""
+    base_url: https://api.x.ai/v1
+  # Exa's hosted MCP — the Agent, Tool and Task CoPilots' web search and page
+  # reading, on Talqing's own key. Required: a region without it refuses to boot.
+  exa:
+    api_key: "{{EXA_API_KEY}}"
+  sarvam:
+    api_key: ""
+  # Raya (Bakbak) Indic TTS + STT. Platform key: pays for the voice
+  # gallery the editor browses. Agent runs use the tenant's own key.
+  raya:
+    api_key: ""
+  # Soniox real-time STT + TTS. Platform key: pays for the TTS voice
+  # gallery the editor browses. Agent runs use the tenant's own key.
+  soniox:
+    api_key: ""
+  gemini:
+    api_key: ""
+  elevenlabs:
+    api_key: ""
+  openai:
+    api_key: ""
+  deepgram:
+    api_key: ""
+  anam:
+    api_key: ""
+  # ai-coustics SDK license for noise cancellation. No platform-paid path:
+  # agent runs use the tenant's own license, so nothing reads this yet.
+  aicoustics:
+    api_key: ""
+
+# Local Silero VAD — user speech detection and barge-in.
+vad:
+  min_speech_duration: 0.1
+  min_silence_duration: 0.1
+  activation_threshold: 0.5   # strictly between 0 and 1
+
+# Per-provider OAuth apps for INTEGRATIONS. Blank client_id/client_secret
+# disables that integration. redirect_uri must match what is registered with the
+# provider.
+#
+# `google` appears in both configs and differently: a region holds the Calendar
+# integration's redirect_uri, control holds login_redirect_uri. One Google
+# client, two URIs, both registered.
+oauth:
+  google:
+    client_id: ""
+    client_secret: ""
+    redirect_uri: http://localhost:8000/v1/integrations/oauth/google_calendar/callback
+  # DCR/PKCE providers: registration is dynamic, so only a redirect override
+  # exists. Blank uses the default built from app.api_public_url.
+  cal_com:
+    redirect_uri: http://localhost:8000/v1/integrations/oauth/cal_com/callback
+  calendly:
+    redirect_uri: ""
+  asana:
+    client_id: ""
+    client_secret: ""
+    redirect_uri: http://localhost:8000/v1/integrations/oauth/asana/callback
+  jira:
+    redirect_uri: ""
+  rocketreach:
+    redirect_uri: http://localhost:8000/v1/integrations/oauth/rocketreach/callback
+  hubspot:
+    client_id: ""
+    client_secret: ""
+    redirect_uri: http://localhost:8000/v1/integrations/oauth/hubspot/callback
+
+# Prepaid credits. The BALANCE is regional — it is a data-plane table, because
+# the debit shares a transaction with sessions.platform_fee on the per-call
+# settlement path — so a workspace has one per region. Taking the payment is
+# control's, and `signup_grant_usd` lives there too because control is what
+# issues the grant to every region.
+billing:
+  # Below this the dashboard warns; it never blocks. Only a zero balance does.
+  low_balance_warning_usd: "2"
+  # One entry per pack on sale. A region RENDERS this list beside the balance;
+  # only control reads `dodo_product_id`, because only control creates a
+  # checkout. So this appears in both configs and the Dodo credentials appear in
+  # neither of a region's — a region carrying one is refused at startup.
+  #
+  # Amounts are quoted so they reach Decimal exactly rather than through a float,
+  # and each must equal the amount its id names.
+  packs: []
+  # packs:
+  #   - { id: usd_20,   amount: "20",   dodo_product_id: pdt_… }
+  #   - { id: usd_50,   amount: "50",   dodo_product_id: pdt_… }
+  #   - { id: usd_100,  amount: "100",  dodo_product_id: pdt_… }
+  #   - { id: usd_200,  amount: "200",  dodo_product_id: pdt_… }
+  #   - { id: usd_500,  amount: "500",  dodo_product_id: pdt_… }
+  #   - { id: usd_1000, amount: "1000", dodo_product_id: pdt_… }

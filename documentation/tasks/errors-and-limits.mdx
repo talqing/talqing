@@ -1,0 +1,128 @@
+---
+title: "Errors and limits"
+description: "The two budgets that bound a run, every error.type a failure can carry, and everything refused when a task is saved."
+---
+
+Reference for what stops a task run, what a failure means, and what a task config is refused for.
+
+## The two budgets
+
+| Setting | Default | Range | What it bounds |
+| --- | --- | --- | --- |
+| `max_steps` | 25 | 1 to 50 | Model → tools → model **rounds** per attempt, on a standalone run. |
+| `timeout_seconds` | 300 | 10 to 600 | Wall-clock time for the whole run — or, entered by an agent, for the whole sub-conversation. |
+
+**Entered by an agent, only one of the two applies.** `max_steps` is a property of a session and a task borrows the caller's, so a task on a call runs on that channel's ceiling — three rounds per reply on voice and video, twenty-five on text — with a fresh budget on every user turn. `timeout_seconds` still applies, and there it is the only bound on how long the task may hold the caller: keep it short on a voice agent. See [agent tasks](/agents/agent-tasks#steps-and-what-bounds-them).
+
+**`max_steps` counts rounds, not tool calls.** Four tools called in one reply cost one step. It is the runaway-loop guard — the number that stops a model looping over a search tool forever — not the time budget.
+
+`timeout_seconds` is the real bound. A run that ends without a result is re-prompted up to twice and **each re-prompt starts the step budget over**, so a task with `max_steps: 25` can legitimately spend 75 rounds before anything gives up. Only the clock stops that. See [running and runs](/tasks/running-and-runs).
+
+Lowering `max_steps` to tidy up is the most common way to break a research task: it fails with `step_limit`, which reads like the prompt is wrong when it is not.
+
+**A [provider tool](/agents/reasoning-and-builtin-tools) spends the clock and none of the steps.** A `web_search` or a code run happens *inside* one round, on the provider's servers, while the model is composing that round's reply — so a task that searches five times has still taken one step, and can have spent a minute doing it. A run of one that fails does so as `timeout`, and `max_steps` is untouched: raising it changes nothing.
+
+The trace does not show those calls either. It records the rounds Talqing ran, and a provider-executed tool never reaches us as a call — so a run that searched five times reads as one step with a long duration. See [running and runs](/tasks/running-and-runs).
+
+## `error.type`
+
+A failed **standalone** run carries `error: {type, message}`. `type` is a closed vocabulary of eight, and the point of it is that each one sends you somewhere different. A task entered by an agent has no run record and none of these: it fails as an ordinary tool failure the calling model is told about, and the reason is in the call's transcript.
+
+| `error.type` | What it means | Whose | Fix |
+| --- | --- | --- | --- |
+| `missing_vars` | A `required` variable had no value and no default. Caught before anything was compiled, so nothing ran and nothing was spent. | Yours, in the request | Supply the value, or give the variable a `default`. |
+| `no_output` | The model finished without calling `submit_result`, and the re-prompts did not change that. | Yours, in the prompt and in `submit_result_description` | **Fix what the model was told.** The prompt says what the task is for; `submit_result_description` is the only thing saying that finishing means calling the tool. Do not raise `max_steps` — that was not the problem. |
+| `step_limit` | Every round of an attempt was used and no result came back. | Yours, in the config | **Raise `max_steps`**, or narrow what the task does. Reported apart from `no_output` precisely so nobody rewrites a prompt that was never at fault. |
+| `timeout` | `timeout_seconds` elapsed and the run was abandoned. | Yours, in the config | Raise the timeout, or cut the work. A slow tool is worth timing on its own first. |
+| `provider_error` | The model provider or an MCP server failed. | Neither | Not yours to fix in the config. Retry it. A `fallback` on the LLM covers the model half. |
+| `configuration` | Something the task needs is missing at run time: a provider key you have not added, a tool that was deleted or unpublished since the task was saved, an integration whose credential no longer resolves. | Yours, in the workspace | The message names it. Add the key under [provider keys](/get-started/provider-keys), republish the tool, or reconnect the integration. |
+| `platform` | The run failed for a reason that is not about your task. | Ours | Retry, and tell us at hello@talqing.com if it persists. |
+| `canceled` | A deploy or a restart stopped the run before it finished. The tokens it had already spent are still priced onto it. | Ours | Nothing. An email batch row is drafted again automatically, without spending an attempt; a run you started by hand is one you can start again. |
+
+A failed run is still a `200` with `status: "failed"` — the run happened, and its trace, tokens and cost are on the response. The `4xx` cases below are the ones where no run happens at all.
+
+## Refused when you run
+
+`POST /v1/tasks/{task_id}/runs` checks the input contract before it starts anything, and returns a `400` rather than recording a failed run.
+
+| Status | Cause | Message |
+| --- | --- | --- |
+| `400` | A value for a name the task does not declare | `this task does not declare a variable named 'emial'` |
+| `400` | A `required` variable with no value and no default | `'email' is required and has no default` |
+| `422` | A `vars` value that is not a string | Substitution is textual; send `"007"`, not `7`. |
+| `403` | The viewer role | Running a task is a write. |
+| `404` | No such task in this region | Tasks are regional — check the base URL. |
+
+The `400` bodies use the standard envelope, with every problem listed at once:
+
+```json
+{
+  "detail": {
+    "message": "these values do not match the task's variables",
+    "errors": ["this task does not declare a variable named 'emial'"]
+  }
+}
+```
+
+## Refused when you save
+
+Checks come in **two grades**, exactly as an agent's do. A draft write runs the rules a half-written task can still be judged on; publishing runs those plus the ones that need a finished config. An invalid config is a `400` listing every problem, and nothing is stored.
+
+| Refusal | Message shape |
+| --- | --- |
+| A tool that does not exist, or has no published version | `tool 'get_order' has no published version - publish it before attaching` |
+| An integration that is not MCP-capable | `integration 'Resend' is not MCP-capable and cannot be attached as a tool` |
+| Two attached MCP servers sharing a `tools_namespace` | Names the namespace. |
+| Two attached tools exposing the same name to the model | Names the tool. |
+| An unknown LLM provider or model, or a `reasoning_effort` that model does not offer | Lists what the catalog accepts. |
+| A `{{token}}` in the prompt with no root of ours — `{{name}}`, `{{customer.number}}` | `the system prompt reads {{customer.number}}, which is not a variable …` |
+| `{{system_vars.x}}` that is not a system variable | Lists the system variables. |
+| `{{system_vars.now}}` / `.date` / `.time` with no `timezone` set | Names the field to set. |
+| `{{secrets.NAME}}`, `{{args.x}}` or `{{tooldata.x}}` in the prompt | Says why each one cannot be there. |
+| The same name twice in `output` | `these output fields are declared more than once: …` |
+| A name that is both a variable and an output field | `these names are both a variable and an output field: …` |
+| A task name already used in the workspace (`409`) | `a task with that name already exists` |
+| An inline tool or MCP server whose name already exists (`409`) | Reference the existing one by id, or rename. |
+| Anything the config shape forbids (`422`) | A field a task does not have — `greeting`, `stt`, `channel` — an `output` list longer than 25, an output field name outside `^[a-z][a-z0-9_]{0,39}$`, an empty field description, `max_steps` outside 1–50, `timeout_seconds` outside 10–600, a `timezone` that is not an IANA name. |
+
+`DELETE /v1/tasks/{task_id}` is refused with a `409` while an email batch is still drafting with that task, naming the batches. Cancel them first. Deleting a task that finished drafting a batch is fine — the batch keeps rendering, and so does the run history.
+
+## Refused when you publish
+
+`POST /v1/tasks/{task_id}/validate` runs exactly these without publishing, so you can read them before you commit to anything. `POST /v1/tasks/{task_id}/publish` refuses on the same list.
+
+| Refusal | Message shape |
+| --- | --- |
+| **No provider key for the model.** The check an agent also defers to publish, and the failure most people hit on their first task. | `no OpenAI API key for this workspace - add one under BYOK` |
+| `output` is empty | `this task declares no output fields, so a run has nothing to produce …` |
+| A problem in an attached tool's operation tree | The tool's own validation message. |
+| An email batch still drafting whose CSV has no column for a variable this config makes required | `the email batch 'Q3 outreach' would break: the task requires a 'tone' variable and the list has no such column …` |
+| An email batch still drafting whose `field_map` names an output field this config removes | `the email batch 'Q3 outreach' would break: field_map.body names 'greeting', which is neither a column in the list nor something the task produces` |
+
+The last two also refuse a **rollback** to a version with the same problem — a batch's columns are fixed once its rows are uploaded, so every door into that state is closed rather than just the obvious one.
+
+### Warnings
+
+`validate_task` and `publish_task` return `warnings`. These do not block a publish.
+
+| Warning | Why it matters |
+| --- | --- |
+| The prompt reads `{{vars.x}}` that the task does not declare | It resolves to nothing on every run. Usually a typo. |
+| The task has no prompt at all | Nothing is added to the prompt, so the only thing the model is told is what its tools do — the output field descriptions and the two finishing tools' own. |
+| The prompt reads `{{system_vars.human_phone_number}}`, `.agent_phone_number` or `.direction` | There is no call, so these are always empty. |
+| An attached integration is not `active` | A run leaves it out until it is — an expired connection never blocks a save. |
+
+## Every limit
+
+| Limit | Value |
+| --- | --- |
+| `output` fields | at most 25; at least 1 to publish |
+| Output field name | lower-case letters, digits and underscores, starting with a letter, up to 40 characters |
+| Output field types | `string`, `boolean`, `integer`, `number` — no arrays, no nested objects |
+| `max_steps` | 1 to 50, default 25 |
+| `timeout_seconds` | 10 to 600, default 300 |
+| Trace entries kept per run | 200 |
+| Trace field length | 4,000 characters, then cut and flagged `truncated` |
+| Runs per page | default 50, maximum 200 |
+| Tasks per page | default 200, maximum 200 |
+| Versions of a task | unbounded — every publish freezes one |

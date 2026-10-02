@@ -1,0 +1,218 @@
+---
+title: "Schema and description"
+description: "The name, description and argument schema are what the model actually sees — and what decides whether it calls your tool correctly."
+---
+
+The model never sees your operation tree. It sees three things: the tool's
+`name`, its `description`, and its `json_schema`. Everything about whether a
+tool gets called at the right moment, with the right values, is decided by
+those three fields.
+
+Treat them as prompt engineering, not as bookkeeping.
+
+## `name`
+
+The function name the model is shown. It must match
+`^[a-zA-Z_][a-zA-Z0-9_]*$` — a save with anything else is rejected — and it must
+be unique in the workspace. Use snake_case and name the capability, not the
+implementation: `book_appointment`, not `post_booking_v2`.
+
+Seven names are reserved, because the runtime injects tools under them:
+`stop_recording`, `voicemail_detected`, `submit_result`, `finish_without_result`, `get_faq_answers`, `lk_agents_cancel_task` and `lk_agents_get_running_tasks`. Creating a tool with one of those returns
+`400 '<name>' is reserved by the platform`.
+
+## `description`
+
+The description tells the model **when** to call the tool. This matters as much
+as the implementation: a correct tool that fires at the wrong moment is worse
+than no tool.
+
+Write the conditions, including the ones that should stop it firing.
+
+**Weak:**
+
+```text
+Books an appointment.
+```
+
+The model has no idea whether to call it when the caller says "what have you got
+on Tuesday?", whether to call it again when they change their mind, or what
+happens if they have not named a time. It will guess, differently, on every
+call.
+
+**Strong:**
+
+```text
+Book a clinic appointment. Call this only after the caller has agreed to one
+specific date and time — never to browse what is available, which is what
+find_appointment_slots is for. If they want to move an existing booking, call
+reschedule_appointment instead; calling this twice creates two bookings.
+```
+
+If a tool has a cost the caller can feel — a booking, a charge, an email that
+reaches a real person — say so in the description, and say what has to be true
+before it fires.
+
+A tool with an empty description is shown to the model with nothing but its
+name. The dashboard flags it in the tool list as *"No description — the model has
+only the name to go on."*
+
+## `json_schema`
+
+The arguments the model fills in. Two rules do most of the work.
+
+**Declare only values the agent can know or ask the caller for.** An internal
+account UUID is not one of them: the model will invent a plausible-looking one.
+Take the order number the caller can read out, and look the UUID up inside the
+tree.
+
+**Give every property a `description`.** It is the only instruction the model
+gets on what to put in that field and how to get it out of the conversation. A
+bare `{"type": "string"}` is how a tool ends up called with "next Tuesday" where
+it needed `2026-09-01`.
+
+Then: mark as `required` only what the tool genuinely cannot run without —
+everything marked required is something the model will invent a value for rather
+than leave out — and use `enum` wherever the set of values is closed, so
+`gold`, `Gold` and `gold tier` cannot all reach your API.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "date": {
+      "type": "string",
+      "description": "The appointment date as YYYY-MM-DD. Convert what the caller said ('next Tuesday') using today's date before sending it."
+    },
+    "time": {
+      "type": "string",
+      "description": "24-hour start time as HH:MM, e.g. 14:30. Must be one of the slots find_appointment_slots returned."
+    },
+    "reason": {
+      "type": "string",
+      "enum": ["consultation", "follow_up", "vaccination", "test_results"],
+      "description": "Why they are coming in. Ask if the caller has not said; do not guess from context."
+    },
+    "notes": {
+      "type": "string",
+      "description": "Anything the clinician should know before the visit, in the caller's own words. Leave out if they mention nothing."
+    }
+  },
+  "required": ["date", "time", "reason"]
+}
+```
+
+Updating the schema on an existing tool is a patch. Omitted fields are left
+alone; `json_schema` is replaced wholesale:
+
+<CodeGroup>
+```bash cURL
+curl -X PATCH https://api.in.talqing.com/v1/tools/2b7d1f08-4c9a-4e6b-8f21-0d5a3c7e9b44 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "json_schema": {
+      "type": "object",
+      "properties": {
+        "date": { "type": "string", "description": "The appointment date as YYYY-MM-DD." },
+        "time": { "type": "string", "description": "24-hour start time as HH:MM." }
+      },
+      "required": ["date", "time"]
+    }
+  }'
+```
+
+```typescript TypeScript
+await talqing.tools.update({
+  tool_id: "2b7d1f08-4c9a-4e6b-8f21-0d5a3c7e9b44",
+  patchToolRequest: {
+    json_schema: {
+      type: "object",
+      properties: {
+        date: { type: "string", description: "The appointment date as YYYY-MM-DD." },
+        time: { type: "string", description: "24-hour start time as HH:MM." },
+      },
+      required: ["date", "time"],
+    },
+  },
+});
+```
+
+```python Python
+talqing.tools.update(
+    "2b7d1f08-4c9a-4e6b-8f21-0d5a3c7e9b44",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "date": {"type": "string", "description": "The appointment date as YYYY-MM-DD."},
+            "time": {"type": "string", "description": "24-hour start time as HH:MM."},
+        },
+        "required": ["date", "time"],
+    },
+)
+```
+</CodeGroup>
+
+## Which JSON Schema is accepted
+
+The schema is checked against **JSON Schema Draft 2020-12**, and the whole
+vocabulary of that draft is accepted — `enum`, `required`, `minimum`,
+`maxLength`, `pattern`, `format`, `items`, nested `properties`, `$defs`,
+`anyOf`. Nothing is stripped on the way in.
+
+Three rules on top of the draft:
+
+| Rule | Refusal |
+| --- | --- |
+| `json_schema` must be a JSON object. | `tool json_schema must be a JSON object` |
+| It must be a valid Draft 2020-12 schema. | `tool json_schema is invalid: <reason>` |
+| It must describe an **object** — the model calls a function with named parameters, not a bare string or array. | `tool json_schema must describe an object of named parameters` |
+
+One convenience: a schema with no top-level `type` is read as an object, so
+`{"properties": { … }, "required": [ … ]}` is accepted and means the same thing
+as writing `"type": "object"` yourself. An empty `{}` means the tool takes no
+arguments.
+
+Two things about how the schema is used:
+
+- **`{{args.NAME}}` is checked against the top-level `properties` keys only.**
+  A nested value is read with dots at runtime — `{{args.address.city}}` —
+  and validation checks `address` is declared, not `city`.
+- **The model's arguments are validated against the same schema before the tree
+  runs.** A call that violates it never reaches your endpoints; the tool fails
+  with `Tool arguments are invalid at <path>: <message>` and the model is handed
+  that sentence.
+
+<Warning>
+The dashboard's **Arguments** table models a flat object of `string`, `number`,
+`integer`, `boolean` and `enum` properties, each with a description and a
+required flag — and saving from the dashboard rewrites `json_schema` from that
+table. A richer schema written through the API survives being read, but the next
+dashboard save drops whatever the table cannot represent: `items` on an array,
+nested `properties`, `minimum`, `pattern`, `format`, `default`. Keep tools with
+hand-written schemas on the API, or keep the schema inside the table's reach.
+</Warning>
+
+## Common mistakes
+
+| Mistake | What happens | Fix |
+| --- | --- | --- |
+| A property with no `description` | The model fills it from the shape of the name and gets format, units or scope wrong | One sentence saying what goes in it and how to get it out of the conversation |
+| Everything marked `required` | The model invents values rather than omit one | Require only what the tree cannot run without |
+| Free-text where the set is closed | `gold`, `Gold` and `gold tier` all reach your API | `enum` |
+| An argument the caller cannot know (an internal id) | The model hallucinates a plausible id | Take what the caller can say, look the rest up in the tree |
+| Dates as free text | "next Tuesday" arrives at an API that wants `2026-09-01` | Say the format in the description, and set the agent's `timezone` so it knows what "today" is |
+| `{{args.x}}` for an undeclared `x` | Publish fails: `{{args.x}} is not a declared tool parameter` | Declare it, or read the value from `tooldata`/`userdata` |
+| A name that is not an identifier | `422` at save | snake_case, starting with a letter or `_` |
+| A credential as an argument | The *model* chooses your API key. Publish warns on `Authorization`, `X-Api-Key`, `Api-Key` and `Cookie` headers built from `{{args.…}}` | A [workspace secret](/platform/secrets), read as `{{secrets.NAME}}` |
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="The operation tree" href="/tools/operation-tree">
+    What runs once the model has called the tool.
+  </Card>
+  <Card title="Templating and data" href="/tools/templating-and-data">
+    Reading `{{args.…}}` and moving values between operations.
+  </Card>
+</CardGroup>

@@ -1,0 +1,53 @@
+---
+title: "Setup"
+description: "What a WhatsApp batch needs before it can send: a connected number, an approved template, and people who opted in."
+---
+
+A WhatsApp batch sends one approved template to every row of a CSV, from a
+number you connected under [WhatsApp → Numbers](/channels/whatsapp). When someone
+replies, the agent on that number answers — it already knows the row's columns
+and the template it "sent".
+
+## Before your first batch
+
+<Steps>
+  <Step title="Connect the number">
+    Follow [WhatsApp](/channels/whatsapp) to connect a Twilio or Gupshup sender.
+    Enable inbound messages with a published text agent if you want replies
+    answered; without one, replies are still counted but nobody answers them.
+  </Step>
+
+  <Step title="Get a template approved at your BSP">
+    Talqing sends templates; it does not create them. Build one in Twilio's
+    Content Template Builder or your Gupshup app and submit it to WhatsApp. Once
+    it is approved it appears in the batch form. Twilio templates may carry a
+    media header, a footer and buttons; Gupshup templates must be text-only for
+    now. See [which templates](/whatsapp/creating-a-batch#which-templates).
+  </Step>
+</Steps>
+
+## Rules Meta enforces
+
+**Opt-in is mandatory.** You may only message people who gave you their number
+and agreed to hear from you on WhatsApp. Messaging anyone else breaks
+[WhatsApp's Business Messaging Policy](https://business.whatsapp.com/policy) and
+puts your number at risk.
+
+**Categories.** Every template is `marketing`, `utility` or `authentication`,
+and Meta keeps re-checking approved ones. A promotional template submitted as
+utility is approved as marketing instead, and repeated miscategorization can
+cost you the ability to send utility templates. A first message to a prospect is
+always marketing.
+
+**US numbers never receive marketing templates.** The row fails with Twilio
+error `63049`. The batch form warns when a marketing template meets `+1`
+numbers.
+
+**Per-person marketing limit.** Meta caps the marketing templates any one person
+receives, based on how they engage. Hitting it also fails the row (`63049` on
+Twilio, `131049` from Meta). Don't retry it the same day.
+
+**Messaging limit.** Your business portfolio can start conversations with 250
+unique people a day, rising to 2,000, 10,000, 100,000 and unlimited as your
+quality holds. Every number in the portfolio shares it — which is why a batch's
+daily cap defaults to 250.

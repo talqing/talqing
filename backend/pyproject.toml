@@ -1,0 +1,218 @@
+[project]
+name = "talqing-backend"
+version = "0.1.0"
+license = "LicenseRef-Sustainable-Use-1.0"
+description = "Backend services for talqing"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  # LiveKit Agents + plugins (pinned together; verified mutually compatible).
+  # The audio end-of-turn model (turn_handling.turn_detection = "livekit") needs
+  # nothing extra: livekit-agents pulls in livekit-local-inference, whose wheel
+  # carries the v1-mini weights. livekit-plugins-turn-detector is the deprecated
+  # text model and is deliberately NOT installed. The xAI plugin provides
+  # self-hosted LLM/STT/TTS hitting api.x.ai directly, never the LiveKit Cloud
+  # gateway.
+  "livekit-agents==1.8.3",
+  "livekit-plugins-openai==1.8.3",
+  # Google runs every Gemini model: the Live API, which has no OpenAI-compatible
+  # shim at all, and since 2026-08 the text LLMs too (`api: native` in the
+  # catalog). Google serves no /responses endpoint, so Search grounding, URL
+  # context and code execution are reachable on this plugin and nowhere else.
+  "livekit-plugins-google==1.8.3",
+  "livekit-plugins-sarvam==1.8.3",
+  # Raya's Bakbak TTS. The one plugin here not pinned to a PyPI version, because
+  # Raya has not published one — their docs say to install from source. Pinned to
+  # a commit rather than a branch so a force-push cannot change what we build;
+  # move it to `livekit-plugins-raya==x.y.z` the day it lands on PyPI. This is
+  # the TTS half only — their STT has no plugin at all and lives in plugins/raya.
+  "livekit-plugins-raya @ git+https://github.com/raya-voice-ai/livekit-plugins-raya.git@4cbad8f",
+  # Soniox real-time STT + TTS. Both halves are published and mature, so unlike
+  # Raya above there is nothing of ours in plugins/ — this line is the whole
+  # integration on the runtime side.
+  "livekit-plugins-soniox==1.8.3",
+  "livekit-plugins-silero==1.8.3",
+  "livekit-plugins-xai==1.8.3",
+  "livekit-plugins-elevenlabs==1.8.3",
+  "livekit-plugins-deepgram==1.8.3",
+  "livekit-plugins-anam==1.8.3",
+  # ai-coustics speech enhancement (noise cancellation on the caller's audio).
+  # Versioned on its own line, not with the plugins above; it only needs
+  # livekit-agents>=1.4.2. The ~70 MB wheel embeds the models and the native
+  # inference core, so it runs on our own workers against the tenant's own
+  # license key — no LiveKit Cloud, unlike Krisp/BVC.
+  "livekit-plugins-ai-coustics==0.3.2",
+  # Not the newest livekit (1.1.20 is out): livekit-agents pins the rtc client
+  # to an exact version, so this line only ever restates what 1.8.3 already
+  # requires. It moves when livekit-agents moves.
+  "livekit==1.1.18",
+  "livekit-api==1.2.1",
+  "livekit-protocol==1.1.27",
+  # PyAV — recording duration probe and screen-share frame decoding.
+  "av==16.1.0",
+  # Custom MCP Server integrations. Matches the version livekit-agents[mcp]
+  # 1.8.3 expects.
+  "mcp>=1.24.0,<2",
+
+  # API / control plane.
+  "fastapi~=0.115",
+  "uvicorn[standard]~=0.32",
+  "python-multipart~=0.0.12",
+  "pydantic~=2.9",
+  "pydantic-settings~=2.6",
+  "email-validator~=2.2",
+
+  # Data access.
+  "asyncpg~=0.30",
+  "redis~=8.1",
+  "aiokafka==0.14.0",
+
+  # Security.
+  "cryptography~=44.0",
+  "pyjwt~=2.9",
+
+  # Post-call analysis's LLM client (`services/llm_client.py`). Every brain is
+  # OpenAI-compatible (base_url from the catalog), so swapping vendors is
+  # config-only. The uv lockfile pins the resolved version.
+  #
+  # Held below 3 on purpose, and since 1.8.0 livekit-agents holds the same cap
+  # itself (`openai>=2,<3`) — the 3.x SDK swaps httpx for httpx2 underneath and
+  # no plugin release has been built against it. Kept stated here rather than
+  # inherited, because we import it directly too. Lift it in its own change,
+  # not as a passenger on a plugin bump.
+  "openai<3",
+
+  # DigitalOcean Spaces (call recordings), in every environment. aioboto3 rather
+  # than boto3 because the upload runs on the voice worker's event loop during
+  # session finalize, where a blocking PUT would stall every other call sharing
+  # that process.
+  "aioboto3~=15.5",
+  # The recording is handed to that upload as an open file rather than as bytes,
+  # so the disk reads have to be non-blocking too. aioboto3 already depends on
+  # this; named here because we import it directly.
+  "aiofiles~=25.1",
+  # Image attachments: decode, EXIF-transpose, strip metadata, resize, re-encode
+  # (`services/attachments.py`). livekit-agents offers the same library as its
+  # `images` extra, but that extra is for encoding VideoFrames — this is our own
+  # ingest path, so it is named here rather than acquired as a side effect of a
+  # plugin's optional dependency.
+  "pillow~=12.3",
+
+  # Misc.
+  # Google's phone-number metadata, as a pure-Python package. Telephony
+  # normalization is a DATASET question, not a logic one — trunk prefixes,
+  # number plans and which national forms exist differ per country and change —
+  # and the second region is what made hand-rolling it indefensible. See
+  # services/telephony/e164.py.
+  "phonenumbers~=9.0",
+  "pyyaml~=6.0",
+  # http2 extra (the `h2` package): httpx otherwise speaks HTTP/1.1, which
+  # RocketReach's Cloudflare rule answers with a bot challenge rather than a
+  # response. See services/integrations/oauth/protocol.oauth_http_client.
+  "httpx[http2]~=0.27",
+  "jsonschema~=4.23",
+  "prometheus-client~=0.21",
+  # Full IANA DB for zoneinfo (legacy aliases like Asia/Calcutta that browsers
+  # still emit). Slim images often ship incomplete /usr/share/zoneinfo.
+  "tzdata>=2025.1",
+]
+
+[dependency-groups]
+dev = [
+  # Pinned to match the root dev group and .pre-commit-config.yaml: three ruff
+  # installs formatting the same tree must agree, or output flips per venv.
+  "ruff==0.16.0",
+  "pytest>=8.0",
+  "pytest-asyncio>=0.24",
+  # Chosen over pyright: pydantic model fields resolve to Unknown under pyright,
+  # so it silently passed the settings typo this was added to catch.
+  "mypy==1.19.0",
+  # PyYAML ships no inline types; catalog.yaml and the config loader both go
+  # through it, so real stubs beat silencing the import.
+  "types-PyYAML>=6.0",
+  # Same for aiofiles, which the recording upload opens its file with.
+  "types-aiofiles>=24.1",
+]
+
+[tool.uv]
+package = false
+default-groups = ["dev"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["."]
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "I",   # isort
+  "B",   # bugbear
+  "UP",  # pyupgrade
+]
+ignore = [
+  "E501",  # line length — enforced by formatter where practical
+  "B008",  # Call in default arg (FastAPI Query/Depends patterns + plugin shims)
+  "B904",  # raise-from in except — intentional HTTPException mapping
+  "B905",  # zip(strict=) — noisy for MVP
+  "UP046", # Generic[T] subclass form is fine at MVP
+  "UP047", # generic function type params — same
+]
+
+[tool.ruff.lint.per-file-ignores]
+"services/**" = ["E402"]
+"workers/session/**" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["."]
+exclude = ["^\\.venv/"]
+# livekit plugins and several provider SDKs ship no stubs; without this every
+# import becomes an error and drowns the signal we actually want.
+ignore_missing_imports = true
+# These fire constantly on deliberate codebase style rather than on defects:
+# userdata, tool payloads and job metadata are dict[str, object] on purpose, so
+# every spread, index and narrow is flagged. Left off so the checker stays a
+# bug-finder rather than a style argument. `attr-defined` — the code that caught
+# livekit's ParticipantKind.SIP and settings' public_url — stays on everywhere.
+disable_error_code = [
+  "arg-type",
+  "assignment",
+  "call-overload",
+  "dict-item",
+  "index",
+  "method-assign",
+  "misc",
+  "return-value",
+  "type-var",
+  "typeddict-item",
+  "union-attr",
+  "valid-type",
+  "var-annotated",
+]
+
+# Burn-down list, not a policy. Nearly all of these are one root cause: catalog
+# lookups return the base CatalogEntry, so callers that know they hold a
+# TTSEntry/STTEntry read fields the base does not declare. Typing that lookup
+# per-kind clears most of the list. Only attr-defined is relaxed here — these
+# modules stay checked for everything else. Do not extend without a reason.
+[[tool.mypy.overrides]]
+module = [
+  "compiler.compile",
+  "compiler.integrations",
+  "compiler.operations",
+  "services.agents.language",
+  "services.agents.validate",
+  "services.billing.pricing",
+  "services.catalog.voices.common",
+  "services.integrations.oauth.registry",
+]
+disable_error_code = ["attr-defined"]

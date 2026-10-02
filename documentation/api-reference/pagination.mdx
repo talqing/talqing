@@ -1,0 +1,185 @@
+---
+title: "Pagination"
+description: "The page envelope every list endpoint returns, limit and offset paging, and the walk helper in each SDK."
+---
+
+Every list endpoint on this API returns the same envelope and pages the same
+way. There is one shape to parse and one helper per SDK that walks all of them.
+
+```json
+{
+  "items": [],
+  "has_more": false,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `items` | array | This page of results. Empty, never `null`, and never a bare array at the top level. |
+| `has_more` | boolean | Whether another row exists past this page. |
+| `limit` | integer | The page size that was applied — the one you sent, or the endpoint's default. |
+| `offset` | integer | The offset that was applied. |
+
+All four are always present. Paging is `limit` and `offset` as query parameters:
+
+```bash
+curl "https://api.in.talqing.com/v1/calls?limit=50&offset=100" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+## There is no total and no cursor
+
+A page is built by asking the database for `limit + 1` rows and trimming the
+extra one. `has_more` is whether that extra row came back. Nothing ever runs a
+`count(*)` over the table, which is what keeps a list of a hundred thousand
+calls as fast as a list of ten.
+
+The cost of that is exactly what you would expect:
+
+- **No total.** You cannot render "page 3 of 40" or "1,284 calls" without
+  walking the list to the end. There is no field to read it from and no
+  parameter that asks for one.
+- **No cursor.** `offset` is the only way forward. Most lists are ordered newest
+  first — agents and tools by last edit, calls and conversations by start — so a
+  row created while you are paging shifts every later row down by one, and a
+  long walk can hand you the same item twice or step over one. The one
+  append-only list, conversation items, is ordered oldest first and is stable
+  to walk forward.
+
+If you need a stable snapshot of a busy list, filter it down to a closed window
+first: `GET /v1/calls` takes `start` and `end`, and a window that has already
+ended cannot grow underneath you.
+
+## Choosing a page size
+
+`limit` is capped per endpoint. On all but one the ceiling is **200**, which is
+also the default on most of them; `GET /v1/conversations/{conversation_id}/items`
+allows **500**. A `limit` above the ceiling
+is a `422`, not a silent clamp:
+
+```json
+{
+  "detail": {
+    "message": "limit: Input should be less than or equal to 200",
+    "errors": ["limit: Input should be less than or equal to 200"]
+  }
+}
+```
+
+Both SDK helpers default to 200. Take the maximum for small rows — a call
+summary, an agent header, a phone number. Drop it for rows that carry text: a
+conversation item holds the full message body and its attachment metadata, and
+500 of those is a large response to hold in memory for no benefit. There is no
+rate limit, so a smaller page costs you round trips and nothing else.
+
+## Walking every page
+
+Each SDK ships one helper rather than a `listAll` per resource, because the
+envelope is identical everywhere.
+
+<CodeGroup>
+```bash cURL
+# has_more is the loop condition; advance offset by limit yourself.
+curl "https://api.in.talqing.com/v1/agents?limit=200&offset=0" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+curl "https://api.in.talqing.com/v1/agents?limit=200&offset=200" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+import { paginate } from "@talqing/sdk";
+
+for await (const agent of paginate((query) => talqing.agents.list(query))) {
+  console.log(agent.config.name);
+}
+
+// Filters go in the closure, alongside the query the helper supplies.
+for await (const call of paginate((query) =>
+  talqing.calls.list({ ...query, agent_id: agentId, type: "SIP_INBOUND" }),
+)) {
+  console.log(call.id, call.close_reason);
+}
+```
+
+```python Python
+from talqing import paginate
+
+for agent in paginate(talqing.agents.list):
+    print(agent["config"]["name"])
+
+# Filters pass straight through as keyword arguments.
+for call in paginate(talqing.calls.list, agent_id=agent_id, type="SIP_INBOUND"):
+    print(call["id"], call["close_reason"])
+```
+</CodeGroup>
+
+Both take a `limit` of their own — `paginate(fn, { limit: 50 })` in TypeScript,
+`paginate(fn, limit=50)` in Python — which is the page size they request, not a
+ceiling on how many items they yield. They stop when `has_more` is false.
+
+`paginate_async` is the awaited form in Python, driven with `async for`. In
+TypeScript `paginate` is already an async generator and works against either
+client.
+
+## Which endpoints page
+
+Thirty endpoints return a page. The SDK method names below are the
+TypeScript spelling; Python is the same path in snake case
+(`telephony.phone_numbers.list`).
+
+| Endpoint | SDK | Default | Max |
+| --- | --- | ---: | ---: |
+| `GET /v1/agents` | `agents.list` | 200 | 200 |
+| `GET /v1/tools` | `tools.list` | 200 | 200 |
+| `GET /v1/tasks` | `tasks.list` | 200 | 200 |
+| `GET /v1/tasks/{task_id}/runs` | `tasks.runs.list` | 50 | 200 |
+| `GET /v1/faqs` | `faqs.list` | 200 | 200 |
+| `GET /v1/calls` | `calls.list` | 200 | 200 |
+| `GET /v1/calls/batches` | `calls.batches.list` | 50 | 200 |
+| `GET /v1/calls/batches/{batch_id}/recipients` | `calls.batches.recipients.list` | 100 | 200 |
+| `GET /v1/chats` | `chats.list` | 100 | 200 |
+| `GET /v1/chats/{chat_id}/items` | `chats.items.list` | 200 | 500 |
+| `GET /v1/conversations` | `conversations.list` | 100 | 200 |
+| `GET /v1/conversations/{conversation_id}/items` | `conversations.items.list` | 200 | 500 |
+| `GET /v1/conversations/{conversation_id}/sessions` | `conversations.sessions.list` | 100 | 200 |
+| `GET /v1/telephony/accounts` | `telephony.accounts.list` | 200 | 200 |
+| `GET /v1/telephony/accounts/{account_id}/remote-numbers` | `telephony.accounts.remoteNumbers` | 200 | 200 |
+| `GET /v1/telephony/phone-numbers` | `telephony.phoneNumbers.list` | 200 | 200 |
+| `GET /v1/telephony/providers` | `telephony.providers.list` | 200 | 200 |
+| `GET /v1/streams` | `telephony.streams.list` | 200 | 200 |
+| `GET /v1/email/batches` | `email.batches.list` | 50 | 200 |
+| `GET /v1/email/batches/{batch_id}/recipients` | `email.batches.recipients.list` | 50 | 200 |
+| `GET /v1/email/batches/{batch_id}/sends` | `email.batches.sends.list` | 50 | 200 |
+| `GET /v1/whatsapp/batches` | `whatsapp.batches.list` | 50 | 200 |
+| `GET /v1/whatsapp/batches/{batch_id}/recipients` | `whatsapp.batches.recipients.list` | 50 | 200 |
+| `GET /v1/integrations` | `integrations.list` | 200 | 200 |
+| `GET /v1/integrations/catalog` | `integrations.catalog` | 200 | 200 |
+| `GET /v1/integrations/{integration_id}/triggers` | `integrations.triggers.list` | 200 | 200 |
+| `GET /v1/secrets` | `secrets.list` | 200 | 200 |
+| `GET /v1/webhooks` | `webhooks.list` | 200 | 200 |
+| `GET /v1/webhooks/{webhook_id}/deliveries` | `webhooks.deliveries` | 50 | 200 |
+| `GET /v1/billing/credits/ledger` | `billing.credits.ledger` | 200 | 200 |
+
+Everything else answers whole. `GET /v1/catalog`,
+`GET /v1/integrations/{integration_id}/mcp-tools`, `GET /v1/email/senders` and
+`GET /v1/observability` take no paging parameters at all — they are bounded by
+what the workspace configured, not by how much traffic it has run.
+
+### The two voice and avatar catalogs are the exception
+
+`GET /v1/catalog/voices` and `GET /v1/catalog/avatars` page, but not in this
+envelope, because they are reading a provider's library rather than a table of
+yours. They carry their own filter facets alongside the results, so neither is a
+`Page` and neither works with the SDK helpers.
+
+| Endpoint | Paging parameters | Envelope |
+| --- | --- | --- |
+| `GET /v1/catalog/voices` | `page` (0-based, default 0) | `voices`, `has_more`, `page`, `total_count` (may be `null`), plus `languages`, `accents`, `genders`, `workspace_key` |
+| `GET /v1/catalog/avatars` | `offset` (default 0), `limit` (default and max 100) | `avatars`, `has_more`, plus `active_versions`, `render_styles`, `workspace_key` |
+
+Walk those with `has_more` by hand. Most providers hand back their whole voice
+list in one response and answer `has_more: false` on the first request;
+`total_count` is the one count anywhere in this API, and it is nullable because
+a provider does not always report one.

@@ -1,0 +1,107 @@
+---
+title: "Telephony overview"
+description: "How a phone call reaches an agent: a carrier account, a number on it, and a published voice agent."
+---
+
+A phone call reaches a Talqing agent when three things line up, in that order: a
+**carrier account** (the credential for a phone network), a **phone number** on
+that account, and a **published voice agent** assigned to the number. Miss any
+one and the number is registered but nothing answers it.
+
+| What | Why it exists | Page |
+| --- | --- | --- |
+| Carrier account | The credential Talqing uses to reach a phone network on your behalf. Phone numbers hang off one. | [Carrier accounts](/telephony/carrier-accounts) |
+| Phone number | A number you already own at that carrier, imported and wired up here. | [Phone numbers](/telephony/phone-numbers) |
+| Assigned agent | The published `voice` agent that answers when the number rings. | [Inbound calls](/telephony/inbound-calls) |
+
+## The other way in: somebody else's contact centre
+
+Everything below assumes you own the number. If the phone leg belongs to a
+partner's contact-centre platform instead — SparkTG, a Twilio or Plivo shop,
+Exotel, Vonage — they can keep all of it and stream you the audio over one
+WebSocket per call. See [media streams](/channels/media-streams).
+
+| | SIP trunk (this page) | [Media stream](/channels/media-streams) |
+| --- | --- | --- |
+| Who owns the number | You | They do |
+| Setup on their side | A trunk, a DID, a security review | One URL in one call flow |
+| Agent can transfer to a human | Yes | **No** |
+| Agent can hang up | Yes | Only on SparkTG |
+| Latency | Carrier → edge → agent | The same shape, and the same transcode |
+
+Be blunt about the trade: a trunk gives your agent everything, and a stream gets
+a partner live this week without touching a single number.
+
+## You never buy a number through Talqing
+
+There is no number search and no number purchase here. You buy numbers in your
+carrier's own console, on your own carrier account, and Talqing imports the ones
+you choose. That follows from the same rule as the rest of the platform: the
+carrier relationship, the carrier invoice and the number itself stay yours.
+On a call, Talqing charges a per-minute platform fee and nothing else —
+see [pricing and credits](/get-started/pricing-and-credits).
+
+## Supported carriers
+
+Four, and only four. Nothing else can be connected.
+
+| Carrier | Account fields | Credential fields | Carrier-console work |
+| --- | --- | --- | --- |
+| Plivo | `auth_id` | `auth_token` | None |
+| Twilio | `account_sid` | `auth_token` | None |
+| Vobiz | `auth_id` | `auth_token` | None |
+| Exotel | `account_sid`, `region`, `subdomain` | `api_key`, `api_token` | One step you do in the Exotel console before inbound works |
+
+## The two directions
+
+A number carries calls in whichever directions you enable on it, and the two
+have different prerequisites.
+
+| Direction | Needs | What starts the call |
+| --- | --- | --- |
+| Inbound | An active, inbound-capable number **and** a published voice agent assigned to it | Someone dials your number |
+| Outbound | An active, outbound-capable number on a ready carrier account | `POST /v1/calls/outbound`, or a [batch](/telephony/batch-calling) |
+
+Outbound needs no assignment: the agent is named on each request. Inbound has no
+request to name one on, which is why the number itself has to carry the answer.
+
+<Note>
+Phone numbers, carrier accounts, calls and your credit balance are **regional**
+— they belong to the base URL they were created against. The same personal
+access token works in every region; the resources do not cross. See
+[regions](/get-started/regions).
+</Note>
+
+## Getting a number answering
+
+<Steps>
+  <Step title="Connect a carrier account">
+    Record the carrier credential, then run setup on it. Some carriers need a
+    step in their own console that no API can verify.
+    [Carrier accounts](/telephony/carrier-accounts)
+  </Step>
+  <Step title="Import a number you own">
+    List what the account owns at the carrier and import the ones you want.
+    Importing provisions each number as it goes.
+    [Phone numbers](/telephony/phone-numbers)
+  </Step>
+  <Step title="Assign a published voice agent">
+    One agent per number. Republishing that agent updates live routing on its
+    own — you never reassign. [Inbound calls](/telephony/inbound-calls)
+  </Step>
+  <Step title="Place a call out of it">
+    Dial one number with `POST /v1/calls/outbound`, or a whole list with a
+    batch. [Outbound calls](/telephony/outbound-calls)
+  </Step>
+</Steps>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart: phone number" href="/get-started/quickstart-phone-number">
+    The whole path in the dashboard, ending in a real call.
+  </Card>
+  <Card title="Troubleshooting" href="/telephony/troubleshooting">
+    Number not live, calls not arriving, calls failing at setup.
+  </Card>
+</CardGroup>

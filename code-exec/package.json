@@ -1,0 +1,16 @@
+{
+  "name": "talqing-code-exec",
+  "version": "0.1.0",
+  "private": true,
+  "license": "SEE LICENSE IN LICENSE.md",
+  "description": "talqing code-execution service: runs AI-authored tool code in a fresh V8 isolate per request. JSON in, JSON out; no platform credentials.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "esbuild": "^0.24.0",
+    "isolated-vm": "^7.0.0",
+    "undici": "^6.19.0"
+  }
+}

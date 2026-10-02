@@ -1,0 +1,282 @@
+---
+title: "Versions"
+description: "Every write lands on the draft. Runs and email batches use the last published version until you publish again."
+---
+
+A task has two states at all times: a **draft** you edit, and a **published**
+version that runs. Every write — from the dashboard, the API, the MCP server or
+TaskCoPilot — lands on the draft. Nothing you change reaches a run until you
+publish.
+
+This is [the agent lifecycle](/agents/versions), field for field. If you know
+that one you know this one; the rest of this page is the differences.
+
+| | Draft | Published version |
+| --- | --- | --- |
+| What it is | `agent_tasks.config` — one mutable config per task | An immutable numbered snapshot, one per publish |
+| Who sees it | Only you, in the editor and over the API | Every `run_task`, and every row an [email batch](/email/overview) drafts |
+| How it changes | `PATCH /v1/tasks/{task_id}` | Only by publishing again, or rolling back |
+| Tool attachments | Track whatever is published now | Pinned to the tool version live at publish time |
+| Numbering | None | `1`, `2`, `3`… never reused, never rewritten |
+
+`GET /v1/tasks/{task_id}` returns both: `config` is the draft,
+`published_version` is the number live right now (`null` while the task has
+never been published), and `versions` is the publish history.
+
+## A draft can be unfinished
+
+This is the point of having one. A task saves before it has a provider key, a
+prompt or an output field, so you can name it, open the editor and build it
+there — with TaskCoPilot beside you — instead of being sent to the BYOK page
+before you have written a word.
+
+The checks split into [two grades](/tasks/errors-and-limits): a draft write runs
+the rules a half-written task can still be judged on — a duplicate output name,
+an unpublished tool, an unknown `{{token}}` — and publishing adds the ones that
+need a finished config: a workspace key for the model, and at least one `output`
+field.
+
+## Publishing
+
+`POST /v1/tasks/{task_id}/publish` runs publish-grade validation, freezes the
+draft as the next version number, and points `published_version` at it. It
+returns the version, the timestamp and any warnings — warnings do not block a
+publish, but they are worth reading.
+
+`POST /v1/tasks/{task_id}/validate` runs exactly the same checks and publishes
+nothing, which is what the dashboard does before it offers the button. If
+validation fails, nothing is published and you get a `400` listing every
+problem.
+
+Both need the editor role.
+
+## Publishing a task pins its tools
+
+<Warning>
+Publishing a task records, for each attached tool, the tool version that is live
+**at that moment**. Republishing the tool afterwards does not change what runs.
+The task has to be published again for the new tool version to reach a run.
+</Warning>
+
+The case for pinning is stronger here than on a call: an email batch drafts for
+hours, and a tool republished halfway through must not silently change what the
+second half of the list is sent.
+
+The pin lives in the frozen config — a published version's `tools` entries carry
+`{"tool_id": "…", "tool_version": 3}` where the draft's carry
+`{"tool_id": "…", "tool_version": null}`. **MCP servers do not pin**: `mcps`
+names an integration, and its `allowed_tools` approval is read live. **Neither
+does FAQ content**: a version freezes which [FAQs](/agents/faqs) are attached,
+and their entries are read live at the start of each run.
+
+## Which version a run used
+
+Every `task_runs` row records `task_version`. A run of the published version
+carries that number; a `version: "draft"` run carries `null`. Two runs either
+side of a publish are told apart by it, and an [email batch's](/email/reviewing-and-sending)
+review table uses it to show which definition drafted each row.
+
+`POST /v1/tasks/{task_id}/runs` runs the published version unless `version` says
+otherwise — see [running and runs](/tasks/running-and-runs).
+
+## Version history
+
+`GET /v1/tasks/{task_id}` returns `versions`: every publish, newest first, with
+its number, `published_at` and the email of whoever published it. (The list
+endpoint omits this — fetch the task to get it.)
+
+`GET /v1/tasks/{task_id}/versions/{version}` returns one version's frozen config
+in full.
+
+In the dashboard, **History** in the task editor puts any two of those side by
+side — including the draft, which is compared like a version even though it is
+not one. It opens on what is live against what you are editing, and groups
+changed fields by section (Identity & prompt, Model, Output, Tools, Limits) with
+the per-tool pinned versions beside them.
+
+### Rollback
+
+`POST /v1/tasks/{task_id}/versions/{version}/rollback` puts an earlier version
+back into production. Precisely:
+
+- **No new version is created.** `published_version` moves to point at the older
+  one.
+- **The draft is replaced** by that version's config, so any unpublished edits
+  are lost.
+- **The restored draft is unpinned**, so publishing it again pins whatever tool
+  versions are current — not the ones that version froze.
+- **`updated_at` is set to that version's `published_at`**, not to now, so a
+  rolled-back task does not read as having unpublished edits.
+- It is refused with a `400` if that version would break an email batch that is
+  still drafting.
+
+<Warning>
+Rollback takes effect immediately and cannot be undone. A run already in flight
+finishes on the version it started.
+</Warning>
+
+## Email batches follow the published version
+
+A batch is refused at creation against a task that has never been published:
+`publish '<name>' before drafting a batch with it`. After that it follows the
+task's **current** published version, re-read on every drafting pass — matching
+the way an outbound call batch follows its agent's.
+
+Nothing pins a version onto the batch row. Publish a change mid-batch and the
+rows drafted after that moment use it, while the rows drafted before still name
+the old one on their runs.
+
+That freedom has a guard. A batch's CSV columns and its `field_map` are fixed
+once its rows are uploaded, so **publishing and rolling back are both refused**
+while a live batch would break — a variable this config makes required that the
+list has no column for, or an output field it removes that the mapping points
+at. The message names the batch and the problem.
+
+## The full sequence
+
+Create the draft, build it, publish it, run it.
+
+<CodeGroup>
+```bash cURL
+TASK_ID=$(curl -sS -X POST https://api.in.talqing.com/v1/tasks \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"config": {"name": "Research a company"}}' | jq -r .id)
+
+# Fill it in — send only the fields you set
+curl -sS -X PATCH "https://api.in.talqing.com/v1/tasks/$TASK_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "prompt": "Research the company behind {{vars.domain}} and say what they sell.",
+      "vars": [{ "name": "domain", "description": "Their website domain", "required": true }],
+      "output": [
+        { "name": "what_they_sell", "type": "string", "description": "Two sentences. Send null if you could not read enough to say." }
+      ]
+    }
+  }'
+
+# Pre-flight, then publish
+curl -sS -X POST "https://api.in.talqing.com/v1/tasks/$TASK_ID/validate" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+curl -sS -X POST "https://api.in.talqing.com/v1/tasks/$TASK_ID/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+
+# Runs the published version
+curl -sS -X POST "https://api.in.talqing.com/v1/tasks/$TASK_ID/runs" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  --max-time 200 \
+  -d '{ "vars": { "domain": "northwind.example" } }'
+```
+
+```typescript TypeScript
+const task = await talqing.tasks.create({
+  createTaskRequest: { config: { name: "Research a company" } },
+});
+
+await talqing.tasks.update({
+  task_id: task.id,
+  patchTaskRequest: {
+    config: {
+      prompt: "Research the company behind {{vars.domain}} and say what they sell.",
+      vars: [{ name: "domain", description: "Their website domain", required: true }],
+      output: [
+        {
+          name: "what_they_sell",
+          type: "string",
+          description: "Two sentences. Send null if you could not read enough to say.",
+        },
+      ],
+    },
+  },
+});
+
+const report = await talqing.tasks.validate({ task_id: task.id });
+if (report.errors.length) throw new Error(report.errors.join("; "));
+report.warnings.forEach((w) => console.warn(w));
+
+const published = await talqing.tasks.publish({ task_id: task.id });
+console.log(`live on v${published.version}`);
+
+const run = await talqing.tasks.runs.create({
+  task_id: task.id,
+  runTaskRequest: { vars: { domain: "northwind.example" } },
+});
+console.log(run.task_version, run.output);
+```
+
+```python Python
+task = talqing.tasks.create(config={"name": "Research a company"})
+
+talqing.tasks.update(
+    task["id"],
+    config={
+        "prompt": "Research the company behind {{vars.domain}} and say what they sell.",
+        "vars": [{"name": "domain", "description": "Their website domain", "required": True}],
+        "output": [
+            {
+                "name": "what_they_sell",
+                "type": "string",
+                "description": "Two sentences. Send null if you could not read enough to say.",
+            }
+        ],
+    },
+)
+
+report = talqing.tasks.validate(task["id"])
+if report["errors"]:
+    raise SystemExit("\n".join(report["errors"]))
+for warning in report["warnings"]:
+    print("warning:", warning)
+
+published = talqing.tasks.publish(task["id"])
+print(f"live on v{published['version']}")
+
+run = talqing.tasks.runs.create(task["id"], vars={"domain": "northwind.example"})
+print(run["task_version"], run["output"])
+```
+</CodeGroup>
+
+## Testing an edit without publishing
+
+You do not have to publish to try a change. `POST /v1/tasks/{task_id}/runs` takes
+`version: "draft"`, which runs the unpublished config for that one run —
+validated at publish grade and tool-pinned at request time — while everything
+else keeps using the published version. That run records `task_version: null`.
+
+This is the loop TaskCoPilot works in. The dashboard's Run panel does not offer
+it: publishing is how an edit becomes runnable there, for a task as for an agent.
+
+## Endpoint reference
+
+| Endpoint | Does |
+| --- | --- |
+| `PATCH /v1/tasks/{task_id}` | Change the draft; send only the fields that change |
+| `POST /v1/tasks/{task_id}/validate` | Publish-grade check, publishes nothing |
+| `POST /v1/tasks/{task_id}/publish` | Freeze the draft as the next version and make it live |
+| `GET /v1/tasks/{task_id}` | Draft config, `published_version`, and the version list |
+| `GET /v1/tasks/{task_id}/versions/{version}` | One frozen config, tool pins included |
+| `POST /v1/tasks/{task_id}/versions/{version}/rollback` | Make that version live and replace the draft |
+
+Deleting a task deletes its published versions with it, permanently. Its runs
+survive, with `task_id` null and `task_name` and `task_version` intact.
+
+<Note>
+Tasks are regional. A task published against `https://api.in.talqing.com` does
+not exist in `https://api.us.talqing.com`, and neither do its versions. The same
+personal access token reaches both.
+</Note>
+
+<CardGroup cols={2}>
+  <Card title="Errors and limits" href="/tasks/errors-and-limits">
+    Every refusal at each grade, and the fix.
+  </Card>
+  <Card title="Running and runs" href="/tasks/running-and-runs">
+    Which version runs, and what a run records about it.
+  </Card>
+  <Card title="Tools and MCP servers" href="/tasks/tools-and-mcps">
+    What a publish pins, and what it does not.
+  </Card>
+</CardGroup>

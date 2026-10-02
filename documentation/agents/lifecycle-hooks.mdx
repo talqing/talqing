@@ -1,0 +1,337 @@
+---
+title: "Lifecycle hooks"
+description: "on_enter, on_exit and on_user_turn_completed: tools that run on their own schedule rather than when the model decides."
+---
+
+Three fields on an agent config point at a tool that runs at a fixed moment rather
+than when the model chooses to call it:
+
+```json
+{
+  "on_enter": { "tool_id": "3d7c1f88-4a2e-4b16-9b52-0f3a1c4d5e60" },
+  "on_exit": { "tool_id": "9a1e2b74-6c33-4f0a-8b12-77c5d9e0aa31" },
+  "on_user_turn_completed": null
+}
+```
+
+Each is one tool reference or `null`. The tool has to be **published** before you
+attach it, exactly as an attached tool does, and publishing the agent pins it to the
+tool version live at that moment. A tool can be both attached and wired to a hook —
+it is one tool either way.
+
+## When each fires
+
+| Hook | Voice and video | Text |
+| --- | --- | --- |
+| `on_enter` | A session opens, before the greeting | Once, when the chat's first message arrives |
+| `on_exit` | Call end, or a handoff away from this agent | Once, when the chat ends — or on a handoff away from this agent |
+| `on_user_turn_completed` | After every spoken turn, before the model replies | After every inbound message, before the model replies |
+
+### on_enter
+
+The hook runs **to completion first**, and the greeting waits for it. That is the
+point: the greeting resolves `{{userdata.…}}` against the live session bag the hook
+has just written to, so the opening line can be true about what the hook found.
+
+```text
+Hi {{userdata.name}}, I can see your order {{userdata.last_order_id}} is out for
+delivery. Is that what you are calling about?
+```
+
+The price is the hook's own latency ahead of the agent's first word. If you do not
+want the caller sitting through a CRM lookup in silence, open the hook's tree with a
+`say` — it plays while the rest of the tree runs.
+
+Then exactly one opening line, or none:
+
+- The greeting, wherever there is one. **An agent reached by a handoff runs its
+  `on_enter` and then speaks its own greeting**, like any other agent.
+- Failing that, and only on a handoff, a generated line: the caller has just asked
+  for something and is waiting on this agent to answer it. On the first agent of a
+  call the same silence is the "let the caller speak first" shape, and is left alone.
+
+On text, `on_enter` runs **once per [chat](/channels/text-conversations)**, when
+its first message arrives — not when `POST /v1/chats` creates it, and never again
+however long the chat goes quiet between messages. Text agents have no greeting,
+so the reply to that first message is what follows it.
+
+If the hook hands the call on or hangs up, the agent has no opening line left to
+speak and none is attempted.
+
+### on_exit
+
+Fires when the session closes — the call or chat ending — or on a handoff away from
+this agent.
+
+On text that is **once, when the chat ends**: the agent's `end_call`, or
+`POST /v1/chats/{id}/end`. A chat has no inactivity timeout, so a chat nobody ends
+never runs it. Whatever the hook says is saved to the chat, and sent to the person
+on Telegram or WhatsApp. When the agent ends the chat with `end_call`, the hook runs
+after that turn's response has been returned, so read what it said from the chat's
+items.
+
+This is where an outcome gets logged, a lead gets posted, a CRM gets a note. A
+failure here never crashes the call — a failing POST leaves a log line, not a dropped
+caller.
+
+### on_user_turn_completed
+
+Fires after every user turn and **before the language model replies**, with the
+user's words available as `{{args.user_message}}`. On voice and video that is each
+spoken turn; on text, each inbound message.
+
+On text, `{{args.user_message}}` is the message text only. An image attached to the
+same message goes into the context before the hook runs, but it has no string form,
+so it is not in the argument.
+
+On an agent with [screen share](/agents/vision-and-images) on, the newest frame of
+the shared screen is already in the context this hook runs against, so anything the
+hook adds to the context lands after it.
+
+The hook can stop the turn: ending the call or handing off from inside it suppresses
+this agent's reply, and the target agent answers the turn instead. A hook that raises
+is logged and the turn continues.
+
+<Warning>
+**A realtime agent cannot use `on_user_turn_completed`.** A speech-to-speech model
+detects the end of a turn inside the provider's socket, so the hook would never fire
+at all. Saving one is refused:
+
+```text
+realtime models detect the end of a turn themselves, so the 'after each user turn'
+hook would never run - remove the hook, or use a speech-to-text / LLM /
+text-to-speech pipeline
+```
+</Warning>
+
+## What a hook tool may not be
+
+**A hook tool cannot contain a `transfer` operation.** A hook runs outside a turn,
+so the transfer's wait for outstanding speech does nothing and the caller would be
+handed over mid-word. Checked at agent publish, because the same tool is perfectly
+valid attached normally:
+
+```text
+the 'on_enter' hook cannot use tool 'escalate_to_human': it contains a transfer, and
+a hook runs outside a turn, so the agent cannot finish speaking before the handover.
+Attach it as a normal tool the model can call instead.
+```
+
+**A hook tool cannot read tool arguments it will not be given.** At agent publish the
+hook's operation tree is re-validated against the arguments that hook actually
+supplies: `user_message` for `on_user_turn_completed`, and nothing at all for
+`on_enter` and `on_exit`. So a tool whose tree reads `{{args.account_id}}` publishes
+fine on its own and is refused as an `on_enter` hook:
+
+```text
+tool 'on_enter hook look_up_customer' / operations[0] / http: {{args.account_id}} is
+not a declared tool parameter
+```
+
+A hook has no model behind it to fill arguments in. Give it what it needs from
+`{{userdata.…}}`, `{{vars.…}}` or `{{system_vars.…}}` instead.
+
+`transfer` is the only operation a hook is refused. The ordinary ones behave as they
+do anywhere — `http`, `code`, `if`, `say`, `add_message`, `set_variable`, `end_call`
+and `handoff` all work. Publishing fields into `userdata` from a hook is the normal
+way to get a value in front of the agent before it speaks.
+
+## Worked examples
+
+### Load a CRM record on enter
+
+The tool takes no arguments — a hook has nothing to give it — and identifies the
+caller from `{{system_vars.human_phone_number}}`, which is filled in by the platform.
+
+```json
+{
+  "name": "load_customer",
+  "description": "Look up the caller in the CRM before the agent greets them.",
+  "json_schema": {},
+  "operations": [
+    {
+      "kind": "say",
+      "config": { "text": "One moment while I pull up your account." }
+    },
+    {
+      "kind": "http",
+      "config": {
+        "method": "GET",
+        "url": "https://crm.example.com/customers/by-phone",
+        "query": { "phone": "{{system_vars.human_phone_number}}" },
+        "headers": { "Authorization": "Bearer {{secrets.CRM_TOKEN}}" },
+        "timeout": 5
+      },
+      "on_error": "continue",
+      "publish_fields": [
+        { "path": "customer.name", "key": "name", "store": "userdata" },
+        { "path": "customer.plan", "key": "tier", "store": "userdata" },
+        { "path": "customer.open_ticket", "key": "open_ticket", "store": "userdata" }
+      ]
+    }
+  ]
+}
+```
+
+`on_error: "continue"` is deliberate: a CRM that is down should leave a thinner
+greeting, not a failed call.
+
+The prompt then reads what the hook published:
+
+```text
+You are the support line for Acme. The caller is {{userdata.name}}, on the
+{{userdata.tier}} plan, with open ticket {{userdata.open_ticket}}. Any of those may
+come through blank if the lookup failed - if so, ask rather than guessing, and never
+mention a blank field.
+```
+
+Keep the greeting itself free of fields the lookup might not have found. A missing
+value resolves to nothing and the greeting collapses the leftover whitespace, but it
+does not fix up punctuation — `"Hi {{userdata.name}}, thanks for calling"` becomes
+`"Hi , thanks for calling"` when the CRM had no name. A prompt can be told to work
+around a blank; a greeting is spoken exactly as it resolves.
+
+```text
+Thanks for calling Acme. How can I help?
+```
+
+### Log an outcome on exit
+
+```json
+{
+  "name": "log_call_outcome",
+  "description": "Post the finished call to the operations webhook.",
+  "json_schema": {},
+  "operations": [
+    {
+      "kind": "http",
+      "config": {
+        "method": "POST",
+        "url": "https://ops.example.com/calls",
+        "headers": { "Authorization": "Bearer {{secrets.OPS_TOKEN}}" },
+        "body": {
+          "phone": "{{system_vars.human_phone_number}}",
+          "direction": "{{system_vars.direction}}",
+          "ended_at": "{{system_vars.now}}",
+          "customer": "{{userdata.name}}",
+          "booked": "{{userdata.appointment_id}}"
+        }
+      },
+      "on_error": "continue"
+    }
+  ]
+}
+```
+
+`{{system_vars.now}}` inside a tool is the moment the tool ran, so this timestamp is
+the end of the call rather than the start. In a prompt it would be frozen at the
+moment the agent picked up — see [variables](/agents/variables).
+
+### Flag a turn as it happens
+
+```json
+{
+  "name": "flag_turn",
+  "description": "Send each caller turn to the moderation service and record the verdict.",
+  "json_schema": {
+    "type": "object",
+    "properties": {
+      "user_message": { "type": "string", "description": "What the caller just said." }
+    },
+    "required": ["user_message"],
+    "additionalProperties": false
+  },
+  "operations": [
+    {
+      "kind": "http",
+      "config": {
+        "method": "POST",
+        "url": "https://moderation.example.com/classify",
+        "headers": { "Authorization": "Bearer {{secrets.MODERATION_TOKEN}}" },
+        "body": { "text": "{{args.user_message}}" },
+        "timeout": 3
+      },
+      "on_error": "continue",
+      "publish_fields": [
+        { "path": "verdict", "key": "last_turn_verdict", "store": "userdata" }
+      ]
+    }
+  ]
+}
+```
+
+`{{args.user_message}}` is the one argument this hook is given. Note the
+`json_schema`: a tool is validated against **its own** declared parameters when you
+publish the tool, so `user_message` has to be declared there or the tool itself will
+not publish. Then, at agent publish, the tree is checked again against what the hook
+actually supplies — and `user_message` is exactly that.
+
+Keep the timeout short. This runs between the caller finishing and the agent
+starting to answer, and every millisecond is silence on the line.
+
+<Note>
+A hook is not the place for a slow job. `on_enter` delays the greeting,
+`on_user_turn_completed` delays every reply, and `on_exit` runs while the call is
+being torn down. If the work can take seconds, post it to something that can take
+its time.
+</Note>
+
+## Attaching one
+
+<CodeGroup>
+```bash cURL
+curl -X PATCH https://api.in.talqing.com/v1/agents/6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "on_enter": { "tool_id": "3d7c1f88-4a2e-4b16-9b52-0f3a1c4d5e60" },
+      "on_exit": { "tool_id": "9a1e2b74-6c33-4f0a-8b12-77c5d9e0aa31" }
+    }
+  }'
+```
+
+```typescript TypeScript
+await talqing.agents.update({
+  agent_id: "6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+  updateAgentRequest: {
+    config: {
+      on_enter: { tool_id: "3d7c1f88-4a2e-4b16-9b52-0f3a1c4d5e60" },
+      on_exit: { tool_id: "9a1e2b74-6c33-4f0a-8b12-77c5d9e0aa31" },
+    },
+  },
+});
+await talqing.agents.publish({ agent_id: "6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7" });
+```
+
+```python Python
+talqing.agents.update(
+    "6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7",
+    config={
+        "on_enter": {"tool_id": "3d7c1f88-4a2e-4b16-9b52-0f3a1c4d5e60"},
+        "on_exit": {"tool_id": "9a1e2b74-6c33-4f0a-8b12-77c5d9e0aa31"},
+    },
+)
+talqing.agents.publish("6f2b0f4c-2f3d-4c7a-9c1e-1d2a8f0b41c7")
+```
+</CodeGroup>
+
+Send only the hooks you change; the rest of the config is kept. An explicit `null`
+detaches a hook. See [updating an agent](/agents/overview#updating-an-agent).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Operation tree" href="/tools/operation-tree">
+    What a hook tool's tree can contain.
+  </Card>
+  <Card title="Userdata" href="/agents/userdata">
+    What a hook publishes, and who reads it afterwards.
+  </Card>
+  <Card title="Handoffs" href="/teams/handoffs">
+    How a target agent enters, and what runs when it does.
+  </Card>
+  <Card title="Versions" href="/agents/versions">
+    Publishing, and the tool version a hook is pinned to.
+  </Card>
+</CardGroup>

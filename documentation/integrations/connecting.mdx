@@ -1,0 +1,256 @@
+---
+title: "Connecting"
+description: "Connect an OAuth provider from the dashboard or a key-based provider through the API, and read what each status means."
+---
+
+There are two connect paths, and which one a provider takes is fixed:
+`auth_type` in the [catalog](/integrations/catalog) says `oauth` or `manual`.
+
+- **OAuth providers must be connected from the dashboard.** The flow is a
+  browser redirect signed against your dashboard session, so there is nothing an
+  API client can do with it. `POST /v1/integrations` refuses an OAuth provider
+  with `connect <Provider> with OAuth`.
+- **Manual providers take their credentials on create**, through the API or the
+  dashboard form. Nothing redirects anywhere.
+
+## Connecting an OAuth provider
+
+<Steps>
+  <Step title="Open the Integrations page">
+    In the dashboard, go to **Integrations** and press **Add integration**. Pick
+    the provider from the catalog list.
+  </Step>
+  <Step title="Authorize">
+    The browser is sent to the provider's authorization page, with PKCE and a
+    state value signed against your current dashboard session. Approve the access
+    it asks for.
+  </Step>
+  <Step title="Come back">
+    The provider redirects back, the code is exchanged for tokens, and you land
+    on the Integrations page again. A refusal comes back as the provider's own
+    message on that page rather than an error screen.
+  </Step>
+  <Step title="Approve tools">
+    For a provider that lends tools, the tool-approval modal opens as soon as
+    you return, because a server nobody has looked at is exactly the one whose
+    ninety tools end up in an agent unread. See [MCP
+    servers](/integrations/mcp-servers#approving-tools).
+  </Step>
+</Steps>
+
+A successful connection writes one integration, `active`, named
+`<Provider> - <account>` — `Google Calendar - ada@northwind.com` — falling back
+to the bare provider name when the provider reports no identity. If that name is
+already taken the new one gets a numeric suffix: `Asana (2)`. The access and
+refresh tokens are stored encrypted; nothing reads them back out through the
+API. The account identity the provider reported — email, username, portal — is
+stored alongside and is what the dashboard shows in the Account column.
+
+The state is checked against the session that started the flow, so finishing a
+connect in a different browser, a different login, or a different workspace is
+refused rather than connecting the wrong account.
+
+### Reconnecting
+
+Reconnect when a connection goes to `needs_reconnect`, when you have changed what
+the account can see on the provider's side, or when someone revoked the grant.
+Use the **Reconnect** button on the integration's row — it starts the same flow
+with `integration_id` set, so the tokens are replaced on the existing row rather
+than a second one being created.
+
+Two things about a reconnect:
+
+- **Your tool approval survives it.** `allowed_tools` and `tools_namespace` are
+  left alone, so an agent's behaviour does not change under it.
+- **Some providers do not re-issue a refresh token on re-consent.** Google is
+  one. When that happens the previous refresh token is kept, which is what makes
+  the reconnect work at all rather than failing with "no offline access".
+
+<Note>
+Setting an OAuth integration back to `active` through the API when there is no
+stored credential is refused with
+`reconnect <Provider> before activating this integration`. There is no way to
+flip a dead connection back on without going through the browser flow.
+</Note>
+
+## Connecting a manual provider
+
+Pass the credential in plaintext and the platform stores it as a [workspace
+secret](/platform/secrets) and wires the reference for you. The preferred name
+is derived from the provider — `TAVILY_API_KEY`, `RESEND_API_KEY`,
+`EXA_API_KEY`, `TELEGRAM_BOT_TOKEN` — and gets a suffix if that name is already
+in use, so an existing secret is never overwritten.
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/integrations \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "display_name": "Tavily",
+    "provider": "tavily",
+    "credentials_ref": "tvly-your-api-key"
+  }'
+```
+
+```typescript TypeScript
+const integration = await talqing.integrations.create({
+  createIntegrationRequest: {
+    display_name: "Tavily",
+    provider: "tavily",
+    credentials_ref: "tvly-your-api-key",
+  },
+});
+
+console.log(integration.id, integration.status, integration.credentials_ref);
+// … "active" "{{secrets.TAVILY_API_KEY}}"
+```
+
+```python Python
+integration = talqing.integrations.create(
+    display_name="Tavily",
+    provider="tavily",
+    credentials_ref="tvly-your-api-key",
+)
+
+print(integration["id"], integration["status"], integration["credentials_ref"])
+# … active {{secrets.TAVILY_API_KEY}}
+```
+</CodeGroup>
+
+To reuse a secret you already have, send the reference instead of the value:
+
+```json
+{
+  "display_name": "Tavily",
+  "provider": "tavily",
+  "credentials_ref": "{{secrets.TAVILY_SHARED_KEY}}"
+}
+```
+
+A reference to a secret that does not exist is refused at create with
+`tavily: secret 'TAVILY_SHARED_KEY' does not exist`. Only `{{secrets.…}}`
+resolves here; no other template root is available to an integration.
+
+Two providers check the credential with the vendor before the row is written, so
+a key the provider will not accept fails the create rather than producing a
+connection that looks fine and cannot work:
+
+- **Telegram** calls `getMe` and stores the bot id and username.
+- **Resend** lists your domains and stores the account identity.
+
+Rotating a key later is the same field on `PATCH /v1/integrations/{id}`: send
+`credentials_ref` again with the new value. Omit it and the current credential is
+kept.
+
+## Statuses
+
+| Status | What it means | What to do |
+| --- | --- | --- |
+| `active` | Connected and usable. The only status an agent can attach or a trigger can run on. | Nothing. |
+| `disabled` | Switched off deliberately. Not attachable; drops out of already-published agents. | `PATCH` it back to `active` when you want it again. |
+| `needs_reconnect` | The stored OAuth credential stopped working — refresh was refused, or the provider answered 401 twice during a call. Set by the platform, never by you. | Reconnect from the dashboard. |
+| `error` | Nothing on the platform sets this today. It exists so you can mark a connection you know is broken. | Treated exactly like `disabled`. `PATCH` back to `active` to undo. |
+
+Anything other than `active` has the same four effects: the integration cannot be
+attached to an agent, it disappears from a published agent's next call, a trigger
+on it cannot be enabled, and `GET /v1/integrations/{id}/mcp-tools` answers
+`activate or reconnect this integration before listing tools`.
+
+<Warning>
+A published agent that still names a disabled integration **does not fail** — it
+starts the call without those tools. The model keeps whatever your prompt told it
+about them and will try to use tools that are no longer there. If you disable an
+integration for more than a moment, take it out of the agents that use it and
+republish them.
+</Warning>
+
+## Connecting the same provider twice
+
+Two accounts on one provider is a normal thing to want — two Asana workspaces,
+two Google accounts. The display name is disambiguated for you. **The tools
+namespace is not.**
+
+Both connections default to the provider key, so both present their tools as
+`asana_<tool>`, and every tool name they share would reach the model twice.
+Attaching both to one agent is refused:
+
+```
+'Asana (2)' and 'Asana' both present their tools under 'asana' - every tool
+name they share would reach the model twice. Give one of them a different tool
+namespace.
+```
+
+Set a namespace on the second one — `asana_eu`, `asana_ops` — before you attach
+it anywhere. This is deliberate: a silent rename would move tool names under
+prompts you had already written. See
+[namespacing](/integrations/mcp-servers#namespacing).
+
+Reconnecting an account that is already connected can come back as
+`an integration for this account already exists`. That is the identity check
+doing its job — reconnect the existing row instead of creating a second one.
+
+## Renaming, disabling and deleting
+
+**Renaming** is `display_name` on a `PATCH`. It is a label only: nothing in an
+agent config points at it, so nothing breaks. Names are unique in a workspace, so
+a collision comes back as `an integration with that name already exists`.
+
+**Disabling** is `PATCH {"status": "disabled"}`. Agents keep the attachment in
+their config and lose the tools on their next call. Saving them still works;
+validating or publishing one warns
+`integration 'Tavily' is disabled - its tools are left out until you enable it`.
+A channel integration (Telegram, WhatsApp) also stops its provider delivering:
+every enabled [trigger](/integrations/triggers) is unregistered, and enabling the
+integration registers them again.
+
+**Deleting** is permanent and takes the triggers under it with it. For Telegram
+it also deletes the bot's webhook with Telegram; for a Twilio WhatsApp number it
+clears the sender's webhook and calling; for an OAuth provider it revokes
+the tokens with the provider. Agents that still name the deleted integration
+behave exactly as they do for a disabled one: the call starts without those
+tools.
+
+<CodeGroup>
+```bash cURL
+INTEGRATION_ID=7c2f1a90-4e83-4d16-9b7a-2c5e08f31d64
+
+curl -X PATCH "https://api.in.talqing.com/v1/integrations/$INTEGRATION_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"display_name": "Tavily (research)", "status": "disabled"}'
+```
+
+```typescript TypeScript
+const integration_id = "7c2f1a90-4e83-4d16-9b7a-2c5e08f31d64";
+
+await talqing.integrations.update({
+  integration_id,
+  patchIntegrationRequest: { display_name: "Tavily (research)", status: "disabled" },
+});
+```
+
+```python Python
+integration_id = "7c2f1a90-4e83-4d16-9b7a-2c5e08f31d64"
+
+talqing.integrations.update(
+    integration_id,
+    display_name="Tavily (research)",
+    status="disabled",
+)
+```
+</CodeGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="MCP servers" href="/integrations/mcp-servers">
+    Attach an integration to an agent, approve its tools, and set its namespace.
+  </Card>
+  <Card title="Triggers" href="/integrations/triggers">
+    Bind an inbound Telegram message to a published text agent.
+  </Card>
+  <Card title="Secrets" href="/platform/secrets">
+    Where a credential actually lives once the platform has stored it.
+  </Card>
+</CardGroup>

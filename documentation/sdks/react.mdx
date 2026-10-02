@@ -1,0 +1,616 @@
+---
+title: "React SDK"
+description: "Every export of @talqing/react and @talqing/client: the hooks, helpers and constants that run a web call."
+---
+
+`@talqing/react` is the React layer that joins a voice or video call from a web
+page. `@talqing/client` is the same call protocol without React, over a
+`livekit-client` `Room` you manage yourself. `@talqing/react` re-exports all of
+it, so installing one package is enough.
+
+Everything in both is something only Talqing can write: the token source, the
+userdata RPC methods, the image byte-stream topic and its acknowledgement, the
+frontend-RPC envelope, and the capture settings that decide whether an agent can
+read a shared screen. **Neither package wraps LiveKit to rename it** — see
+[the escape hatch](#the-escape-hatch).
+
+This page is the reference. For the end-to-end integration — minting the token
+on your server, the first working component — read
+[web calls](/channels/web-calls) and
+[web call features](/channels/web-call-features).
+
+## Install
+
+```bash
+npm install @talqing/react
+```
+
+npm 7+ and pnpm install the peers for you: `@talqing/client`, `@talqing/sdk`,
+`livekit-client`, `@livekit/components-react`, `react` and `react-dom`. Yarn
+only warns, so on Yarn name them:
+
+```bash
+yarn add @talqing/react @talqing/client @talqing/sdk livekit-client @livekit/components-react
+```
+
+They are **peer** dependencies rather than dependencies on purpose. The `Room`
+this layer hands you has to be the same class your own imports and `instanceof`
+resolve to, which one copy in the tree is what guarantees.
+
+Not writing React? `npm install @talqing/client livekit-client` gives you the
+same protocol as plain functions over a `Room`.
+
+<Note>
+`@talqing/sdk` is the API client and installs nothing else. It is a peer of
+`@talqing/react` because one auth branch takes a `TalqingClient` — see
+[the three ways to authorize a call](#the-three-ways-to-authorize-a-call).
+</Note>
+
+## The three rules
+
+**One session is one call.** `useTalqingSession` builds one `Room` and one token
+source. Start it when the component mounts and end it on the way out. To place a
+second call, mount a second session — render the call component while a call is
+up and drop it to hang up — and give it a `key` that changes per call.
+
+**A finished session cannot be restarted.** Its token names the room that call
+used, and the API refuses a second call rejoining it. `start()` on a spent
+session does not give you a new call.
+
+**Screen share must start from a click.** `getDisplayMedia` requires a transient
+user activation, so `start()` has to run inside a real user gesture. An agent
+can ask for a screen; it can never take one.
+
+## Joining a call
+
+### The three ways to authorize a call
+
+Exactly one per call. The branches are mutually exclusive **by type** — passing
+two is a compile error, not a runtime precedence rule.
+
+| Branch | When |
+| --- | --- |
+| `{ token }` | Your server already minted, and you forwarded `server_url` and `participant_token`. |
+| `{ fetchToken }` | Your endpoint mints. Called once, when the call starts. |
+| `{ client, agentId, callOptions }` | **Trusted first-party surfaces only.** Mints from the browser with a `TalqingClient` you already hold. |
+
+<Warning>
+`POST /v1/calls/token` needs the **editor** role, and a personal access token is
+a workspace credential: it can read, change and delete every agent, call and
+phone number in the workspace. **Never ship one to a browser.** The first two
+branches exist so you do not have to — your server mints, and the browser
+receives two strings good for one room.
+
+That is not only about the credential. `contact_key` decides whose history the
+call resumes and `userdata` is merged onto that person's record, so `callOptions`
+is on the third branch alone. On the other two those fields never leave your
+backend, and a browser cannot choose whose past conversation to continue.
+
+The third branch is for an app that is same-origin with the API and signed in as
+a real editor — what our own dashboard is. If you are embedding a call widget for
+your customers, it is not your branch.
+</Warning>
+
+### `useTalqingSession`
+
+```tsx
+function useTalqingSession(options: TalqingSessionOptions): TalqingSession;
+
+type TalqingCallCredentials = { server_url: string; participant_token: string };
+
+type TalqingSessionOptions = { roomOptions?: RoomOptions } & (
+  | { token: TalqingCallCredentials }
+  | { fetchToken: () => Promise<TalqingCallCredentials> }
+  | { client: TalqingClient; agentId: string | null; callOptions?: TalqingCallOptions }
+);
+```
+
+Builds the `Room` and the token source, and returns LiveKit's session object —
+`{ room, isConnected, connectionState, start, end, waitUntilConnected, … }` —
+plus `warnings`.
+
+```tsx
+function CallSession() {
+  const session = useTalqingSession({
+    fetchToken: async () => {
+      const response = await fetch("/api/talqing-token", { method: "POST" });
+      return await response.json();
+    },
+  });
+
+  useEffect(() => {
+    void session.start();
+    return () => void session.end();
+  }, []);
+
+  return (
+    <TalqingSessionProvider session={session}>
+      <Call />
+    </TalqingSessionProvider>
+  );
+}
+```
+
+`fetchToken` is called **once** per call, however often LiveKit asks — see
+[`createTalqingTokenSource`](#createtalqingtokensource).
+
+`session.warnings` is what resolving the plan complained about: an unreachable
+team member, a handoff into an agent that records when this one does not. It is
+resolved against state at *call* time, so it is not the list publishing returned,
+and it is stored nowhere — this response is the only place it exists. It fills in
+on the `client` branch, which is the one where the browser is what minted. On the
+two server-minted branches your own server received them in the token response.
+
+`callOptions` is everything `POST /v1/calls/token` accepts except `agent_id`:
+`contact_key`, `userdata`, `vars`, `agent_version`, `agent_override`,
+`agent_team`. Memoize it — the hook rebuilds its token source whenever it changes
+identity, and an object literal is a new identity every render.
+
+`roomOptions` is LiveKit's own `RoomOptions`, spread over the audio capture
+defaults below. Override `audioCaptureDefaults` there if you must.
+
+### `TalqingSessionProvider`
+
+```tsx
+function TalqingSessionProvider(props: {
+  session: TalqingSession;
+  children: React.ReactNode;
+  audio?: boolean; // default true
+}): JSX.Element;
+```
+
+Puts the session in context — which is what every hook below except
+`useTalqingImages` reads — and mounts LiveKit's audio renderer so the agent is
+audible. Pass `audio={false}` only if you are rendering the audio element
+yourself.
+
+### `useTalqingConnection`
+
+```tsx
+function useTalqingConnection(): {
+  isConnected: boolean;
+  connectionState: ConnectionState;
+  room: Room;
+  start: (options?: SessionConnectOptions) => Promise<void>;
+  end: () => Promise<void>;
+};
+```
+
+The call itself, read from context. `room` is what `useTalqingImages` takes, and
+the supported way down to raw `livekit-client`; `end()` hangs up.
+
+<Warning>
+The room's state is not the agent's state. `isConnected` goes true partway
+through the join, while the agent is still starting up. A button keyed off
+`isConnected` alone tells the caller to speak to somebody who is not listening
+yet — wait for `useAgent().state === "listening"`.
+</Warning>
+
+### `createTalqingTokenSource`
+
+```tsx
+function createTalqingTokenSource(
+  fetchToken: () => Promise<TalqingCallCredentials>,
+): TokenSourceFixed;
+```
+
+From `@talqing/client`. What `useTalqingSession` builds internally — reach for it
+only if you are managing your own `Room`.
+
+It mints once per source and caches the in-flight promise, which is load-bearing:
+`POST /v1/calls/token` files the session row the call is later read back from,
+and LiveKit asks its token source three times per call — to warm the connection,
+to connect, and once more as the call ends. Without the cache, the third mint
+filed a session nobody ever joined, which sat in the workspace's call list
+forever. A failed mint is kept out of the cache so the surface can offer the call
+again. Freshness comes from a new source per call, never from re-minting inside
+one.
+
+### `TALQING_AUDIO_CAPTURE_DEFAULTS`
+
+```tsx
+const TALQING_AUDIO_CAPTURE_DEFAULTS = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+};
+```
+
+Applied by `useTalqingSession` unless your `roomOptions` overrides
+`audioCaptureDefaults`. Echo cancellation is what stops the agent hearing its own
+speech through the caller's microphone and interrupting itself — a call without
+it is broken in a way that sounds like a bad model, which is why it is a default
+rather than something each app has to remember.
+
+## The agent, the transcript and the video
+
+These three are LiveKit's own, re-exported from `@talqing/react` under their own
+names so one install and one import cover a whole call. They are not wrapped:
+`useAgent` here is `useAgent` from `@livekit/components-react`, whole.
+
+### `useAgent`
+
+```tsx
+function useAgent(): UseAgentReturn;
+```
+
+A discriminated union over the agent's state, narrowed by `state`:
+`disconnected`, `connecting`, `pre-connect-buffering`, `initializing`, `idle`,
+`listening`, `thinking`, `speaking` or `failed`. It carries the derived booleans
+`isConnected`, `canListen`, `isFinished` and `isPending`, the agent's tracks, and
+`failureReasons` on the `failed` branch.
+
+```tsx
+const agent = useAgent();
+if (agent.state === "failed") console.error(agent.failureReasons);
+```
+
+### `useSessionMessages`
+
+```tsx
+function useSessionMessages(): {
+  messages: ReceivedMessage[];
+  send: (message: string, options?: SendTextOptions) => Promise<ReceivedChatMessage>;
+  isSending: boolean;
+};
+```
+
+The live transcript, and a way to type into a voice call — useful for a
+spelling, an order number, or an accessible path into an audio agent.
+`messages` belongs to the live session only; the stored transcript, with tool
+calls and cost, is on `GET /v1/calls/{session_id}`.
+
+### `VideoTrack`
+
+```tsx
+function VideoTrack(props: {
+  trackRef: TrackReference;
+  className?: string;
+}): JSX.Element;
+```
+
+Renders one track. Pair it with [`useTalqingAvatarTrack`](#usetalqingavatartrack).
+
+### Logging
+
+`setLogLevel("debug")` from `livekit-client` turns up the underlying client's
+logging, and is the first move on a connection problem you cannot see.
+
+## Images
+
+A caller attaches a photo mid-call and the agent sees it. The bytes go over a
+LiveKit byte stream addressed to the agent; the agent acknowledges over RPC, and
+the id `send` returns is the id that acknowledgement carries, so there is nothing
+to correlate by hand.
+
+<Note>
+The agent deliberately does **not** speak when a photo lands. The caller is
+mid-conversation and about to say what it is for, so the image goes into the
+model's view for their next turn.
+</Note>
+
+### `useTalqingImages`
+
+```tsx
+function useTalqingImages(room: Room | null | undefined): {
+  send: (file: File) => Promise<TalqingSentImage>;
+  sent: TalqingSentImage[];
+  clear: () => void;
+};
+```
+
+Takes the `Room` rather than reading context, because a byte stream and an RPC
+handler are room-level things — pass `useTalqingConnection().room`, or the Room
+you built yourself.
+
+`send` validates, downscales, sends, and resolves once the bytes are on their
+way. The outcome arrives on `sent`, which is what a thumbnail should render.
+Each entry is a `TalqingSentImage`:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `streamId` | `string` | The stream id, which the acknowledgement comes back under. |
+| `name` | `string` | The original file name. |
+| `previewUrl` | `string` | An object URL for the downscaled image. Revoked by `clear()` and on unmount. |
+| `sentAt` | `number` | Epoch milliseconds it was handed to the room, so a transcript can place it in sequence. |
+| `status` | `"sending" \| "sent" \| "failed" \| "unknown"` | |
+| `error` | `string` | A sentence to show, set with `failed` or `unknown`. |
+
+`unknown` is the state people forget: the agent going away mid-upload, where no
+acknowledgement is ever coming. It is set after 30 seconds of silence, with
+*"we did not hear back — the agent may not have received it"*.
+
+```tsx
+const { room } = useTalqingConnection();
+const images = useTalqingImages(room);
+
+<input
+  type="file"
+  accept="image/jpeg,image/png,image/webp"
+  onChange={(e) => e.target.files?.[0] && void images.send(e.target.files[0])}
+/>;
+```
+
+Without React, `@talqing/client` exports the same two halves separately:
+`sendTalqingImage(room, file)` and `onTalqingImageResult(room, handler)`, which
+returns its own unregister.
+
+### `talqingImageRejection`
+
+```tsx
+function talqingImageRejection(file: File): string | null;
+```
+
+The sentence to show, or `null` when the file is fine. Refuses anything that is
+not JPEG, PNG or WebP (*"that file is not a JPEG, PNG or WebP"*) and anything
+over 10 MB (*"images are 10 MB or smaller"*). The server re-validates
+regardless — this exists so the common mistakes cost nothing to catch.
+
+### `talqingDownscaleImage`
+
+```tsx
+function talqingDownscaleImage(file: File): Promise<Blob>;
+```
+
+Downscales to 1568 px on the longest edge and re-encodes — PNG stays PNG to keep
+transparency, everything else becomes JPEG at quality 0.85. It is also what
+normalizes whatever the OS handed the file input, so a Safari HEIC becomes a
+JPEG here. Throws if the image cannot be decoded. `useTalqingImages.send` calls
+it for you.
+
+### `talqingImageDataUrl`
+
+```tsx
+function talqingImageDataUrl(file: File): Promise<string>;
+```
+
+Validate and downscale into the `data:` URL a **text** message carries —
+`POST /v1/chats/{id}/messages` takes `images: [{ data_url, filename }]`, and
+this produces the `data_url`. It doubles as a thumbnail `src`, so there is no
+object URL to create and revoke. Throws the sentence to show if the file is
+refused.
+
+### Image constants
+
+| Export | Value |
+| --- | --- |
+| `TALQING_IMAGE_TOPIC` | `"talqing.images"` |
+| `TALQING_IMAGE_MAX_BYTES` | `10485760` (10 MB) |
+| `TALQING_IMAGE_MAX_EDGE_PX` | `1568` |
+| `TALQING_IMAGE_ACK_TIMEOUT_MS` | `30000` — how long `useTalqingImages` waits before an image goes `unknown` |
+
+## Screen share
+
+### `useTalqingScreenShare`
+
+```tsx
+function useTalqingScreenShare(): {
+  enabled: boolean;
+  pending: boolean;
+  start: () => Promise<unknown>;
+  stop: () => Promise<unknown>;
+};
+```
+
+`enabled` is whether a screen is being shared right now; `pending` is true while
+the browser picker is open or the track is publishing. `stop()` ends it, and the
+agent is told it can no longer see on its next turn.
+
+```tsx
+const screen = useTalqingScreenShare();
+
+<button onClick={() => void screen.start()} disabled={screen.pending}>
+  {screen.enabled ? "Stop sharing" : "Share my screen"}
+</button>;
+```
+
+<Warning>
+`start()` must be called from a user gesture. A browser will not open the share
+picker for a page that asks on its own.
+</Warning>
+
+The capture and publish options are fixed, and they are the reason a shared
+screen stays readable:
+
+| Export | Setting | Why |
+| --- | --- | --- |
+| `TALQING_SCREEN_SHARE_CAPTURE` | `contentHint: "text"` | Tells the encoder to preserve spatial detail. No downstream quality setting recovers it once lost. |
+| | `resolution: 1920×1080 at 1 fps` | Set explicitly rather than inherited, where the default is a hint and not a guarantee. |
+| `TALQING_SCREEN_SHARE_PUBLISH` | `videoCodec: "h264"` | What keeps that hint. `livekit-client` forces `contentHint: "motion"` on a screen share published as vp9 or av1 — **publishing on an SVC codec costs you legibility**, and it is the first thing to check if the agent starts misreading identifiers. |
+| | `screenShareEncoding: { maxFramerate: 1, maxBitrate: 1000000 }` | The frame-rate cap that actually binds. Every delivered frame is copied into the agent's process before it can be dropped, so this is the biggest single lever on what a call costs. One frame a second is ample: the agent is handed the newest frame at the end of each turn. |
+
+Both are exported from `@talqing/client` too, for
+`room.localParticipant.setScreenShareEnabled(true, capture, publish)`.
+
+## Userdata
+
+Read and write the live session's userdata from the page, over RPC to the agent.
+See [userdata](/agents/userdata) for what it is.
+
+### `useTalqingUserdata`
+
+```tsx
+function useTalqingUserdata(): {
+  get: (keys?: string[], responseTimeout?: number) => Promise<JsonObject>;
+  set: (patch: JsonObject, responseTimeout?: number) => Promise<{ ok: boolean; error?: string }>;
+};
+```
+
+Bound to the connected room. Both throw `Error("room is not connected")` when
+there is no room.
+
+```tsx
+const userdata = useTalqingUserdata();
+await userdata.set({ cart_total: 4200, tier: "pro" });
+const { tier } = await userdata.get(["tier"]);
+```
+
+### `setTalqingUserdata` and `getTalqingUserdata`
+
+```tsx
+function setTalqingUserdata(
+  room: Room,
+  patch: JsonObject,
+  responseTimeout?: number, // default 3 seconds
+): Promise<{ ok: boolean; error?: string }>;
+
+function getTalqingUserdata(
+  room: Room,
+  keys?: string[],
+  responseTimeout?: number, // default 3 seconds
+): Promise<JsonObject>;
+```
+
+The same calls outside React, against a `Room` you hold. They find the agent
+participant and call `talqing.client.userdata_set` / `talqing.client.userdata_get`
+on it. With no agent connected, `set` resolves
+`{ ok: false, error: "agent participant is not connected" }` while `get`
+**throws** — a write that did not land is a state you can render, a read that
+returned nothing is not.
+
+Omit `keys` on `get` to fetch the whole bag.
+
+## Frontend RPC
+
+A tool's `frontend_rpc` operation calls back into your page mid-call — to
+highlight a product, open a form, or move the user along. See
+[frontend RPC](/tools/frontend-rpc) for the tool side.
+
+### `useTalqingRpcHandlers`
+
+```tsx
+function useTalqingRpcHandlers(
+  handlers: Record<string, (data: TalqingRpcInvocation) => string | Promise<string>>,
+  enabled?: boolean, // default true
+): void;
+```
+
+Registers the `talqing.frontend_rpc` method on the room and dispatches by the
+envelope's `method`. A `"*"` key catches everything unmatched — and when the
+wildcard handles a call, `data.payload` is the whole envelope (`method` and
+`payload`) rather than just the payload, so the handler can tell what it caught.
+An unknown method with no wildcard throws `TalqingRpcError` code `1404` back to
+the agent; anything else your handler throws goes back as code `1500` with its
+message.
+
+Each handler receives a `TalqingRpcInvocation`:
+
+| Field | Type |
+| --- | --- |
+| `payload` | `string` — JSON, which you parse |
+| `responseTimeout` | `number \| undefined` |
+| `callerIdentity` | `string \| undefined` |
+
+and must return a `string` (or a promise of one), which is what the agent
+receives.
+
+```tsx
+useTalqingRpcHandlers({
+  show_product: async ({ payload }) => {
+    const { sku } = JSON.parse(payload) as { sku: string };
+    setHighlighted(sku);
+    return JSON.stringify({ shown: true });
+  },
+});
+```
+
+Registration is skipped until the room is connected, and unregistered on
+unmount. Pass `enabled: false` to hold off. Outside React,
+`registerTalqingRpcHandlers(room, handlers)` does the same and returns its
+unregister.
+
+### `useTalqingFrontendRpcs`
+
+```tsx
+function useTalqingFrontendRpcs(enabled?: boolean): {
+  actions: Record<string, { payload?: JsonValue; at: number }>;
+  clear: () => void;
+};
+```
+
+The declarative alternative: it registers a wildcard handler for you and keeps
+the latest payload per method name, with `at` as the timestamp it arrived.
+Always answers the agent `"ok"`. Use it to render whatever the agent asked for
+without writing a handler per method.
+
+### `TalqingRpcError`
+
+```tsx
+class TalqingRpcError extends Error {
+  readonly code: number;
+  readonly data?: string;
+  constructor(code: number, message: string, data?: string);
+}
+```
+
+Throw it from a handler to send a specific code back to the agent instead of the
+generic `1500`.
+
+## Video
+
+### `useTalqingAvatarTrack`
+
+```tsx
+function useTalqingAvatarTrack(): TrackReference | undefined;
+```
+
+Finds the video track to render for a video agent. It prefers the avatar
+worker's camera track — the worker publishes on the agent's behalf, which is how
+it is identified — and falls back through the worker's screen share and then the
+agent's own tracks. `undefined` until one is published.
+
+```tsx
+const track = useTalqingAvatarTrack();
+return track ? <VideoTrack trackRef={track} className="rounded-xl" /> : null;
+```
+
+## The escape hatch
+
+**This layer only ever adds.** Anything LiveKit can do, you can do — take
+`useTalqingConnection().room` and use `livekit-client` directly:
+
+```tsx
+import { RoomEvent } from "livekit-client";
+
+const { room } = useTalqingConnection();
+useEffect(() => {
+  const onQuality = (quality: ConnectionQuality) => setBars(quality);
+  room.on(RoomEvent.ConnectionQualityChanged, onQuality);
+  return () => void room.off(RoomEvent.ConnectionQualityChanged, onQuality);
+}, [room]);
+```
+
+We never remove a capability to make our own surface look tidier, and we do not
+re-wrap LiveKit to rename it. Everything in
+[the agent, the transcript and the video](#the-agent-the-transcript-and-the-video)
+is re-exported whole, under LiveKit's own names, and every other hook and
+component `@livekit/components-react` ships is one import away — `useLocalParticipant`,
+`StartMediaButton`, `useTrackToggle` and the rest.
+
+That guarantee is why `livekit-client` and `@livekit/components-react` are peers
+rather than dependencies: a `Room` we hand out has to be the same class your own
+`instanceof` and imports resolve to, and two copies in one tree is two React
+contexts and two `Room` classes.
+
+## Exported types
+
+| Type | What it is |
+| --- | --- |
+| `TalqingCallCredentials` | `{ server_url, participant_token }` — the two fields a browser needs to join. |
+| `TalqingSessionOptions` | The argument to `useTalqingSession`: the auth union plus `roomOptions`. |
+| `TalqingCallOptions` | Everything `POST /v1/calls/token` takes except `agent_id`. |
+| `TalqingSession` | LiveKit's `UseSessionReturn` plus `warnings`. |
+| `TalqingSentImage`, `TalqingImageStatus` | An image in flight, and its four states. |
+| `TalqingRpcHandler`, `TalqingRpcHandlers`, `TalqingRpcInvocation` | The frontend-RPC handler shapes. |
+| `TalqingFrontendRpcEnvelope` | What the agent sends: `method` and an optional `payload`. |
+| `JsonObject`, `JsonValue`, `JsonPrimitive` | Free-form JSON, as userdata and RPC payloads carry it. |
+| `ReceivedMessage`, `TrackReference`, `AgentState`, `UseAgentReturn` | LiveKit's, re-exported. |
+
+<CardGroup cols={2}>
+  <Card title="Web calls" href="/channels/web-calls">
+    The token, the join, and a complete integration.
+  </Card>
+  <Card title="Web call features" href="/channels/web-call-features">
+    Images, screen share, userdata and frontend actions in context.
+  </Card>
+</CardGroup>

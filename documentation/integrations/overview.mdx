@@ -1,0 +1,76 @@
+---
+title: "Integrations overview"
+description: "External services in two shapes: tools an agent can call, and channels an agent is deployed to."
+---
+
+An integration is a connection to a service you already run — a calendar, a CRM,
+a search index, a Telegram bot. They come in **two shapes**, and the two behave
+nothing alike. Work out which one you are looking at before anything else.
+
+**Tool integrations** give an agent tools its model can call mid-conversation.
+You attach one in the agent's own config, under `mcps`, in the same place as
+`tools` and `handoffs`. Being part of the config means it is frozen at publish like
+the rest of it: **attaching an integration takes a publish before a call sees
+it.**
+
+**Channel integrations** deploy an agent to a messaging channel. Telegram is the
+only one. It is never attached to an agent config — you bind it with a
+[trigger](/integrations/triggers), which points an inbound event at a published
+text agent.
+
+## Every provider
+
+| Provider | Shape | Category | Connects with | What you get |
+| --- | --- | --- | --- | --- |
+| Google Calendar | Tool | Scheduling | OAuth | Nine calendar tools, run directly against the Calendar API |
+| Cal.com | Tool | Scheduling | OAuth | Cal.com's hosted MCP server |
+| Calendly | Tool | Scheduling | OAuth | Calendly's hosted MCP server |
+| Asana | Tool | Project Management | OAuth | Asana's hosted MCP server |
+| Jira | Tool | Project Management | OAuth | Atlassian's hosted MCP server for Jira |
+| HubSpot | Tool | CRM | OAuth | HubSpot's hosted MCP server |
+| RocketReach | Tool | Enrichment | OAuth | RocketReach's hosted MCP server |
+| Exa | Tool | Search | A key you paste | Exa's hosted MCP server |
+| Tavily | Tool | Search | A key you paste | Tavily's hosted MCP server |
+| Resend | Tool | Email | A key you paste | Resend's hosted MCP server, and the account [email batches](/email/setup) send from |
+| Custom MCP Server | Tool | Developer Tools | A URL you supply | Your own remote MCP server |
+| Telegram | Channel | Messaging | A bot token you paste | A published text agent answering the bot's private chats |
+
+That is the whole list. There is no way to reach a service that is not on it
+except as a [custom MCP server](/integrations/custom-mcp). Full detail — setup
+fields, defaults, provider keys — is in the [catalog](/integrations/catalog).
+
+OAuth providers must be connected from the dashboard, because the flow is a
+browser redirect. The other four take their credentials on create through the
+API. Both paths are in [connecting an integration](/integrations/connecting).
+
+## What is frozen and what is live
+
+The **attachment** is config, so it freezes at publish. The **approval** is not.
+
+Which of a server's tools an agent may call is the integration's
+`allowed_tools`, and that list is read fresh at the start of every call.
+Narrowing it reaches every already-published agent on its next turn — no
+republish, no version bump, nothing to redeploy. So does disabling the
+integration, which drops its tools out of running agents entirely.
+
+<Note>
+The asymmetry is deliberate: adding capability to a live agent should be a
+deliberate publish, and taking it away should be immediate.
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Catalog" href="/integrations/catalog">
+    Every provider, what it needs, and what it gives an agent.
+  </Card>
+  <Card title="Connecting" href="/integrations/connecting">
+    OAuth from the dashboard, API keys through the API, and what each status means.
+  </Card>
+  <Card title="MCP servers" href="/integrations/mcp-servers">
+    Attaching to an agent, approving tools, and the namespace rules.
+  </Card>
+  <Card title="Triggers" href="/integrations/triggers">
+    Binding an inbound Telegram message to a published text agent.
+  </Card>
+</CardGroup>

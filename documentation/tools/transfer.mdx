@@ -1,0 +1,423 @@
+---
+title: "Transfer"
+description: "Hand the caller to a person: cold and warm transfers, ringing timeouts, what happens when nobody answers, and one tool per destination."
+---
+
+`transfer` hands the caller to a **human being** on a phone number. It is the
+escape hatch every voice agent needs: the question the agent cannot answer, the
+caller who has asked three times for a person, the account that has to be opened
+by someone with a login.
+
+```json
+{
+  "kind": "transfer",
+  "config": { "destination": "+14155550101", "mode": "cold" }
+}
+```
+
+<Warning>
+**Phone calls only.** On a web call or a text conversation the operation fails
+with *"transfer is only available on phone calls"*. This is not caught when you
+publish, because the same tool may be attached to a phone agent and a chat agent
+— it fails on the call, and the agent apologises and carries on.
+
+Transferring to another **agent** is not this operation. That is
+[`handoff`](/tools/handoff-operation).
+</Warning>
+
+## The configuration
+
+| Field | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `destination` | string, required | — | A literal phone number in full international format, e.g. `+14155550101`. |
+| `mode` | `cold` \| `warm` | `cold` | What the caller lives through. See below. |
+| `ringing_timeout` | number, 5–120 | `30` | Seconds the destination may ring before the attempt is given up. |
+| `on_failure` | `continue` \| `end_call` | `continue` | What happens when it does not connect. |
+
+## The destination is fixed at publish
+
+`destination` is a literal number, frozen into the published tool version. It is
+never templated and never chosen by the model. `{{args.number}}` is refused at
+save, and so is a number the caller reads out.
+
+```
+transfer: config.destination: destination '{{args.number}}' is not a valid
+phone number — use full international format, e.g. +14155550101
+```
+
+<Warning>
+This is a toll-fraud rule, not an oversight. A destination the model can write is
+a destination a caller can talk it into writing — a premium-rate line, an
+international number, anything. The published tool version is the only place a
+transfer destination is decidable, which makes every transfer on your account a
+deliberate, attributed, reviewable choice.
+
+If you need three destinations, publish three tools. That pattern is
+[below](#one-tool-per-destination), and it is better in every other respect too.
+</Warning>
+
+The number must already be canonical, not merely fixable. A bare `4155550101`
+is refused with the number we think you meant, rather than silently normalised
+against some default country:
+
+```
+transfer: config.destination: destination must be written in full
+international format — write '+14155550101' rather than '4155550101'
+```
+
+## What the caller experiences
+
+How the person is reached is the platform's business. We dial them into the call
+and step out; the caller does not hear a click, a menu, or anything to indicate
+which mechanism ran.
+
+<Note>
+**The person answering sees the workspace's own number, not the caller's.** The
+leg to them is dialled from your workspace's own carrier trunk, and a trunk can
+only present a number it owns. Caller ID for a transfer is trunk-level on every
+carrier and cannot be set per transfer.
+
+Plan for it: if the person answering needs to know who is calling, use `warm`,
+or put the caller's number in the CRM record the same tool writes.
+</Note>
+
+## `mode`: cold or warm
+
+This is the only choice you get about how a transfer runs, and it is about the
+caller's experience rather than about plumbing.
+
+| | `cold` (default) | `warm` |
+| --- | --- | --- |
+| The agent | Finishes its line, then steps out | Puts the caller on hold and rings the person on a separate line |
+| The caller hears | Hold music while the other phone rings, then a person | Hold music throughout; none of the briefing |
+| The person answering gets | The caller, with no introduction | An explanation of who is calling and what they want, and can ask questions |
+| Can the person refuse? | No — they have the caller the moment they answer | Yes. The caller comes back to the agent |
+| Extra cost | None beyond the outbound leg | A second AI conversation, on your own provider keys |
+| Takes | As long as the phone rings | The ring, plus as long as the briefing takes |
+
+**`cold`** is the right default. The agent finishes its line, the caller hears
+hold music for as long as the other phone takes to ring, and a person answers.
+There is no introduction and no "let me hand you over to Sarah".
+
+**`warm`** puts the caller on hold while the agent rings the person, tells them
+who is calling and what they want, answers whatever they ask, and only then puts
+the two together. The caller hears none of it. It suits escalation to a named
+colleague; it does not suit a busy queue, where the briefing is a minute of hold
+music per call for no benefit.
+
+### On `warm`, the person can decline
+
+They can also turn out to be a voicemail greeting rather than a person. In both
+cases the transfer does not happen: the caller comes off hold, the agent is told
+in general terms why, and the conversation carries on exactly where it left off.
+
+The agent is never told — and therefore can never repeat — the words that person
+used. Their own explanation is kept on the call's timeline, not in the caller's
+ear.
+
+### While the caller is on hold
+
+Their microphone and speaker are both switched off and hold music plays. That is
+deliberate: nobody is listening during a ring, so an open microphone would only
+bill speech-to-text for a caller saying "hello?" into it. Hold time sits inside
+the call's duration, its recording and its bill, and the call's timeline marks
+where it started and ended.
+
+## `ringing_timeout`
+
+`ringing_timeout` (5–120 seconds, default 30) bounds **the ringing**, and
+nothing after it. Below five seconds no phone has finished its first ring; past
+120 a caller has had time to hang up twice.
+
+<Warning>
+On `warm`, the briefing has a separate 90-second cap of its own — and both the
+ring and the briefing have to fit inside a **120-second carrier media timeout**
+on the held caller's line. The default 30-second ring plus a 90-second briefing
+lands exactly on 120.
+
+So raising `ringing_timeout` toward its maximum eats that margin, and a
+briefing that then runs long can cost you the held caller altogether. If you
+raise the ring, raise it a little.
+</Warning>
+
+## `on_failure`
+
+Busy line, nobody home, a declined warm transfer — `on_failure` decides what
+happens next.
+
+- **`continue`** (default) — the agent is told plainly why the transfer did not
+  happen and keeps talking to the caller. Almost always what you want: the
+  caller is still on the line and the agent can offer something else.
+- **`end_call`** — the call is ended, exactly as an
+  [`end_call`](/tools/end-call) operation would end it.
+
+What the agent is told is always plain English about the person being called,
+never a technical reason:
+
+| What happened | What the agent is told |
+| --- | --- |
+| Busy line | "the line was busy" |
+| Nobody picked up | "nobody answered" |
+| They declined (warm only) | "they aren't able to take the call right now" |
+| Voicemail (warm only) | "the call went through to their voicemail" |
+| Number unreachable | "that number could not be reached" |
+| Anything else | "the transfer could not be completed" |
+
+That last line deliberately also covers failures on our own side — a trunk that
+is not authorised, a carrier having a bad day. The caller is never told the
+destination refused them when the fault was not theirs. The carrier's own
+verdict is kept on the call record for whoever debugs the trunk.
+
+The agent is also instructed to report the failure and carry on helping, rather
+than restarting the conversation — which is what a model that has just watched a
+tool fail mid-turn otherwise does.
+
+## The line before the transfer
+
+Put a `say` immediately **before** the `transfer` if the caller should hear
+something. There is no `message` field on the operation: a line before a
+transfer is an ordinary `say`, so it templates, it shows as its own node in the
+editor's flowchart, and it reads the same way as a goodbye before an `end_call`.
+
+You do not need `wait_for_playback` on it. The transfer already waits for
+outstanding speech to finish before it dials.
+
+Unlike an `end_call`, **"let me transfer you" is a promise the platform keeps**,
+so say it here. Word it for the mode:
+
+| Mode | Say | Do not say |
+| --- | --- | --- |
+| `cold` | "Putting you through now — one moment." | "Let me speak to them first and bring you in." |
+| `warm` | "Let me speak to them first and bring you in." | — |
+
+Before a `cold` transfer, "let me speak to them first" is simply a lie: nobody
+is briefed and the caller lands on a stranger.
+
+## Tick `disable_interruptions`
+
+Set the tool-level `disable_interruptions` flag on any transfer tool.
+
+The dial runs for up to `ringing_timeout` while the caller hears nothing but
+ringback, which is exactly long enough that saying "hello?" into the gap is the
+normal thing for a caller to do. An interrupted line is dead five seconds later,
+and that line is the only channel left to tell the caller what happened. With
+the flag on, the caller cannot talk over "connecting you now" and turn a waited
+line into an interrupted one.
+
+## Two shapes a transfer tool cannot have
+
+Both are refused when you publish.
+
+**It cannot be `long_running_task`.** A background tool hands the turn back the
+moment it is dispatched, so the handover would happen outside the turn that asked
+for it — mid-sentence, or not at all.
+
+```
+a long-running task cannot contain a transfer — the handover has to happen
+inside the turn that asked for it. Untick 'Long-running task'.
+```
+
+**It cannot be a lifecycle hook.** A hook runs outside a turn, so the agent
+cannot finish speaking before the handover. This one is caught when you publish
+the *agent*, because a hook tool is a perfectly valid tool on its own.
+
+```
+the 'on_enter' hook cannot use tool 'transfer_to_support': it contains a
+transfer, and a hook runs outside a turn, so the agent cannot finish speaking
+before the handover. Attach it as a normal tool the model can call instead.
+```
+
+## One tool per destination
+
+If the caller could go to billing, sales or support, build **three tools** —
+`transfer_to_billing`, `transfer_to_sales`, `transfer_to_support` — each taking
+no arguments, each one `say` and one `transfer`. Do not build one
+`transfer_to_department` that branches on an argument.
+
+Three reasons, in order of how much they matter:
+
+1. **The model picks a tool more reliably than it picks an enum value.** Choosing
+   between three named functions is the thing tool-calling models are best at.
+   Filling in `department: "billing"` correctly is a strictly harder problem you
+   have created for no reason.
+2. **Every destination gets its own description**, which is where the routing
+   policy lives (below). One tool means one description covering three different
+   escalation rules.
+3. **The tool list reads like the org chart.** Anyone opening the agent can see
+   where a call can go. Five nested `if`s inside one tool hide it.
+
+There is no cost to the extra tools — a transfer tool is two operations — and
+nesting them in one tree is worse in every respect.
+
+## The description is the escalation policy
+
+For every other kind of tool a weak description costs you a mis-timed API call.
+Here it decides whether a frustrated caller reaches a person, and how soon.
+
+<Warning>
+"Transfer to a human" invites the model to escalate at the first sign of
+difficulty. It is not a description, it is an invitation.
+</Warning>
+
+Write the policy instead:
+
+> Use only after you have tried to answer the question yourself and the caller
+> has explicitly asked for a person, or is clearly distressed. Do not use it for
+> questions about order status, delivery dates or returns — you can answer those.
+
+Decide *when* escalation should happen before you write it, and put the answer
+in the description. That is the entire routing logic of the tool.
+
+## A complete transfer tool
+
+`transfer_to_billing`: argument-free, one line, one transfer, interruptions off.
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/tools \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "transfer_to_billing",
+    "description": "Put the caller through to a person on the billing team. Use only after you have tried to answer their question yourself and either they have asked to speak to a person, or the question is about a charge you cannot see in their account. Do not use it for delivery or returns questions.",
+    "json_schema": {},
+    "disable_interruptions": true,
+    "operations": [
+      {
+        "kind": "say",
+        "config": { "text": "Putting you through to billing now — one moment." }
+      },
+      {
+        "kind": "transfer",
+        "config": {
+          "destination": "+14155550101",
+          "mode": "cold",
+          "ringing_timeout": 30,
+          "on_failure": "continue"
+        }
+      }
+    ]
+  }'
+```
+
+```typescript TypeScript
+const tool = await talqing.tools.create({
+  createToolRequest: {
+    name: "transfer_to_billing",
+    description:
+      "Put the caller through to a person on the billing team. Use only after you have tried to answer their question yourself and either they have asked to speak to a person, or the question is about a charge you cannot see in their account. Do not use it for delivery or returns questions.",
+    json_schema: {},
+    disable_interruptions: true,
+    operations: [
+      {
+        kind: "say",
+        config: { text: "Putting you through to billing now — one moment." },
+      },
+      {
+        kind: "transfer",
+        config: {
+          destination: "+14155550101",
+          mode: "cold",
+          ringing_timeout: 30,
+          on_failure: "continue",
+        },
+      },
+    ],
+  },
+});
+
+await talqing.tools.publish({
+  tool_id: tool.id,
+  publishToolRequest: { changelog: "Billing escalation" },
+});
+```
+
+```python Python
+tool = talqing.tools.create(
+    name="transfer_to_billing",
+    description=(
+        "Put the caller through to a person on the billing team. Use only after "
+        "you have tried to answer their question yourself and either they have "
+        "asked to speak to a person, or the question is about a charge you cannot "
+        "see in their account. Do not use it for delivery or returns questions."
+    ),
+    json_schema={},
+    disable_interruptions=True,
+    operations=[
+        {
+            "kind": "say",
+            "config": {"text": "Putting you through to billing now — one moment."},
+        },
+        {
+            "kind": "transfer",
+            "config": {
+                "destination": "+14155550101",
+                "mode": "cold",
+                "ringing_timeout": 30,
+                "on_failure": "continue",
+            },
+        },
+    ],
+)
+
+talqing.tools.publish(tool["id"], changelog="Billing escalation")
+```
+</CodeGroup>
+
+The warm equivalent changes two lines — the mode, and the line the caller hears:
+
+```json
+[
+  {
+    "kind": "say",
+    "config": {
+      "text": "Let me speak to my colleague first and bring you in — one moment."
+    }
+  },
+  {
+    "kind": "transfer",
+    "config": { "destination": "+14155550101", "mode": "warm" }
+  }
+]
+```
+
+## After the transfer
+
+Once the transfer connects, this call is over as far as the platform is
+concerned. The agent says nothing more, and the call's duration and recording
+cover only the part the agent was on.
+
+| Where | What you see |
+| --- | --- |
+| Close reason | `transferred` — "The caller was handed to a human". Its own bucket, not a failure: the call is billed the platform fee and is eligible for [post-call analysis](/observability/call-analysis). |
+| Call record | The transfer itself: mode, destination, whether it connected, the plain-English reason if it did not, and what `on_failure` did. |
+| Timeline | Hold started and ended, and on `warm` a `transfer.briefing` entry holding everything the agent told the person about this caller. |
+| Transcript | Nothing from the briefing. It is a different conversation, on a different line, and replaying it into the transcript would have the agent reading its own briefing back as if the caller had said it. |
+
+The `transfer.briefing` entry is the only record of what your AI said about a
+customer to a third party, so it is kept as a compliance record rather than as
+telemetry. It is also where a declined transfer's real reason lives.
+
+<Note>
+A transferred call stays on your carrier's clock until one of the two people
+hangs up. Two humans who both walk away from the phone will run to the
+three-hour call cap. See [transfers](/telephony/transfers) for the operator's
+view of a transferred call.
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Transfers in operation" href="/telephony/transfers">
+    Reading a transferred call, and what it costs.
+  </Card>
+  <Card title="Handoff operation" href="/tools/handoff-operation">
+    Moving the call to another agent instead of a person.
+  </Card>
+  <Card title="Schema and description" href="/tools/schema-and-description">
+    Writing a description the model can act on.
+  </Card>
+  <Card title="Patterns" href="/tools/patterns">
+    The escalation recipe, and five more complete tools.
+  </Card>
+</CardGroup>

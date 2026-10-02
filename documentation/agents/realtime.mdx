@@ -1,0 +1,288 @@
+---
+title: "Realtime models"
+description: "One speech-to-speech model instead of three: what it buys, what it gives up, and everything it refuses."
+---
+
+A voice or video agent runs one of two pipelines.
+
+The **cascade** is three models you pick and control: speech-to-text hears the caller, a language model decides what to say, text-to-speech says it. Each stage is yours to choose, price, fail over and instrument.
+
+A **realtime speech-to-speech model** is one model that hears audio and speaks audio. There is no transcript in the middle of it, no separate voice, and no stage you can swap. It is faster to the first syllable and coarser everywhere else.
+
+`config.realtime` is what discriminates the two. Set it and it is the whole pipeline; leave it `null` and the cascade runs.
+
+| | Cascade | Realtime |
+| --- | --- | --- |
+| What you get | Exact wording, any voice from any provider, per-stage failover, provider builtin tools, a screen the agent can watch, a hook on every user turn | The shortest path from the caller's last word to the first sound of the reply |
+| What it costs | Three network hops per turn | Everything in the rest of this page |
+
+**Take the cascade unless latency is the product.** Take a realtime model when the conversation itself is the product — a demo, a companion, a practice partner, an interview — and you can live with an opening line that is approximate and a call with no failover.
+
+## Setting one
+
+<CodeGroup>
+```bash cURL
+curl -sS -X POST https://api.in.talqing.com/v1/agents \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "name": "Northwind practice line",
+      "channel": "voice",
+      "prompt": "You are a friendly practice partner for sales reps at Northwind Tools. Ask one question at a time. Keep every reply under three sentences.",
+      "greeting": "Hi, this is the Northwind practice line. What are we working on today?",
+      "language": "en",
+      "realtime": {
+        "provider": "openai",
+        "model": "gpt-realtime-2.1",
+        "voice": "marin",
+        "speed": 1.0
+      }
+    }
+  }'
+```
+
+```typescript TypeScript
+const agent = await talqing.agents.create({
+  createAgentRequest: {
+    config: {
+      name: "Northwind practice line",
+      channel: "voice",
+      prompt: [
+        "You are a friendly practice partner for sales reps at Northwind Tools.",
+        "Ask one question at a time.",
+        "Keep every reply under three sentences.",
+      ].join(" "),
+      greeting: "Hi, this is the Northwind practice line. What are we working on today?",
+      language: "en",
+      realtime: {
+        provider: "openai",
+        model: "gpt-realtime-2.1",
+        voice: "marin",
+        speed: 1.0,
+      },
+    },
+  },
+});
+
+// Read it back: `stt`, `llm` and `tts` come back as null.
+console.log(agent.config.stt, agent.config.llm, agent.config.tts);
+
+await talqing.agents.publish({ agent_id: agent.id });
+```
+
+```python Python
+agent = talqing.agents.create(
+    config={
+        "name": "Northwind practice line",
+        "channel": "voice",
+        "prompt": (
+            "You are a friendly practice partner for sales reps at Northwind Tools. "
+            "Ask one question at a time. Keep every reply under three sentences."
+        ),
+        "greeting": "Hi, this is the Northwind practice line. What are we working on today?",
+        "language": "en",
+        "realtime": {
+            "provider": "openai",
+            "model": "gpt-realtime-2.1",
+            "voice": "marin",
+            "speed": 1.0,
+        },
+    }
+)
+
+# Read it back: `stt`, `llm` and `tts` come back as null.
+print(agent["config"]["stt"], agent["config"]["llm"], agent["config"]["tts"])
+
+talqing.agents.publish(agent["id"])
+```
+</CodeGroup>
+
+<Note>
+**`realtime` replaces the cascade rather than sitting beside it.** Saving a config with `realtime` set clears `stt`, `llm` and `tts` to `null` — whatever you sent in them is dropped, not refused. Going back to the cascade means sending `realtime: null` and the three slots together. Read the response rather than assuming your input survived; see [channels](/agents/channels).
+</Note>
+
+**Voice and video only.** A `text` agent has no audio, so `realtime` is cleared there the same way `stt` and `tts` are. On `video` the pipeline is unchanged in every other respect: the Anam avatar renders from whatever audio the agent publishes, and a realtime model publishes audio exactly as a text-to-speech model does.
+
+### The fields
+
+| Field | Meaning |
+| --- | --- |
+| `provider` | Catalog provider. Default `openai`. |
+| `model` | Catalog model id. Default `gpt-realtime-2.1`. |
+| `voice` | A voice from **this model's own roster**, not from the text-to-speech catalog. `null` uses the entry's default. |
+| `speed` | 0.5 to 2.0, checked against the model's own range. A model with no speed control refuses anything but `1.0`. |
+| `voice_name` | A display label for the dashboard. Ignored when the agent is compiled. |
+
+There is no `fallback` here, and no `reasoning_effort`, `priority` or `builtin_tools` — those live on `llm`, which a realtime agent does not have.
+
+## The five models
+
+| Provider | Model | Label | Reads images | Voices | Pricing shape |
+| --- | --- | --- | --- | --- | --- |
+| openai | `gpt-realtime-2.1` | GPT Realtime 2.1 (OpenAI) | yes | 10, default `marin` | per-token, six rates |
+| openai | `gpt-realtime-2.1-mini` | GPT Realtime 2.1 mini (OpenAI) | yes | 10, default `marin` | per-token, six rates |
+| gemini | `gemini-2.5-flash-native-audio-preview-12-2025` | Gemini 2.5 Flash Native Audio (Live) | yes | 30, default `Puck` | per-token, four rates |
+| xai | `grok-voice-think-fast-2.0` | Grok Voice Think Fast 2.0 (xAI) | **no** | fetched live, default `ara` | $0.08 per session minute |
+| xai | `grok-voice-think-fast-1.0` | Grok Voice Think Fast 1.0 (xAI) | **no** | fetched live, default `ara` | $0.05 per session minute |
+
+`GET /v1/catalog` is authoritative; the exact rates are in the table on [models](/agents/models).
+
+**The pricing shape is different from every other model kind.** A realtime entry carries a seven-way split — text in, cached text in, audio in, cached audio in, text out, audio out, and a per-session minute — because audio and text are priced apart and audio costs several times more: on `gpt-realtime-2.1`, audio input is eight times text input. A single input rate would be wrong by a large multiple. The two xAI entries use the other half of that shape: they bill by the minute of audio and their token rates are a real zero, not a missing figure.
+
+Two provider charges on this pipeline never reach Talqing's cost figures. The OpenAI entries run a separate transcription model so the call has a transcript at all — OpenAI bills it apart from the audio tokens and reports no quantity anyone can meter. xAI charges per client text event, which nothing on the wire counts. Both land on your provider bill.
+
+<Warning>
+**The two `grok-voice-*` entries silently drop images.** They accept an image, echo the item back with the picture removed, and then answer confidently about a photo they never saw. Publishing an agent on one of them raises a warning saying nobody on this agent can attach an image. This is measured behaviour, not a missing capability flag — the same vendor's non-realtime models read images perfectly. See [vision and images](/agents/vision-and-images).
+</Warning>
+
+## Scripted speech is not scripted
+
+This is the consequence that surprises people most, and it follows from the pipeline having no text-to-speech stage at all.
+
+On the cascade, a fixed line is handed to the voice as text and spoken exactly. On a realtime model there is nothing to hand it to, so the line is delivered as an instruction: *say the following to the user, word for word, and say nothing else*. The model usually complies, in roughly those words. It may also reword, reorder, trim, or add a syllable of its own.
+
+Everything the agent says from a script goes through that same path:
+
+| What | On the cascade | On a realtime model |
+| --- | --- | --- |
+| `greeting` | Spoken exactly, after `{{userdata.*}}` substitution | An instruction to say it |
+| The `say` operation in a tool | Spoken exactly | An instruction to say it |
+| A handoff `message` — "connecting you to billing" | Spoken exactly | An instruction to say it |
+
+The practical consequences:
+
+- **A quoted price, a reference number or a legal line is not safe here.** If the exact words matter, they belong on the cascade.
+- **A recording consent notice is refused outright.** See below.
+- **A greeting is a strong suggestion.** It still personalizes — `{{userdata.first_name}}` resolves before the instruction is built — but the model owns the delivery.
+- **The caller can always interrupt it.** The model's own server detects interruptions, so `greeting_interruptible: false` is refused.
+- Substitution still happens first, so a template that resolves to nothing still reads correctly.
+
+There is no setting that makes this exact, and no way to pre-render audio. When wording has to be guaranteed, use the cascade and pick the voice you want.
+
+### Recording consent is refused
+
+Recording works normally on this pipeline — the audio the agent publishes is recorded like any other. What is refused is `recording.consent: "disclosure"`, the mode that makes the agent speak a notice:
+
+```text
+recording consent needs a cascade pipeline (STT + LLM + TTS): a realtime model
+rephrases what it is asked to say, and a recording notice has to be spoken word
+for word
+```
+
+That is an error every time the config is saved, not a warning at publish. A disclosure is the one sentence in a call that has to be said as written, and this pipeline cannot promise it. An agent that must disclose runs on the cascade. See [recording](/telephony/recording).
+
+## `on_user_turn_completed` never fires
+
+A realtime model detects the end of a turn inside the provider's own socket, so LiveKit never reaches the point where it would run the per-turn hook. Rather than let a hook sit in a config and quietly do nothing, the combination is rejected when you save:
+
+```text
+realtime models detect the end of a turn themselves, so the 'after each user turn'
+hook would never run - remove the hook, or use a speech-to-text / LLM /
+text-to-speech pipeline
+```
+
+`on_enter` and `on_exit` are unaffected and run normally. See [lifecycle hooks](/agents/lifecycle-hooks).
+
+## Turn detection moves inside the provider
+
+On the cascade, the end of a turn is our decision, made from the speech-to-text model, a voice activity detector and — on a batch model in one of the turn detector's languages — a judgement about whether the sentence sounds finished.
+
+On a realtime model the provider's own server-side voice detection commits the turn, before any transcript exists. What that changes:
+
+| Setting | On a realtime model |
+| --- | --- |
+| `endpointing.min_silence_duration` | Still yours. It is passed to the provider as its silence window, so it keeps meaning. |
+| `endpointing.max_silence_duration` | Ignored. It only ever applied to the turn detector's mid-thought judgement, which is not in this pipeline. |
+| `interruption.enabled`, `min_speech_duration`, `resume_false_interruption`, `false_interruption_timeout` | Still work. A voice detector is still in the session for exactly these. On `video`, `resume_false_interruption` is pinned off by the avatar, the same as on the cascade. |
+| `interruption.min_words` | Does nothing. Counting words needs interim transcripts, and there are none here. |
+| `preemptive_generation` | **Pinned off**, both flags, whatever you send. It speculates ahead of a turn we would confirm, and here the model has already answered by then. |
+
+Anything else built on interim transcripts is in the same position: the transcript arrives as a finished item, after the model has already started replying. The call's transcript itself is complete — the OpenAI entries run a transcription model for it, Gemini transcribes both directions inside the Live session, and the xAI plugin sets its own — but nothing consumes it mid-turn.
+
+See [turn handling](/agents/turn-handling) and [speech-to-text and turn detection](/agents/speech-to-text-and-turn-detection).
+
+## Screen share is refused
+
+```text
+a realtime agent cannot watch a screen share - a speech-to-speech model detects
+turns itself, so there is no moment to hand it the newest frame. Switch to the
+speech-to-text -> LLM -> text-to-speech cascade.
+```
+
+`vision_input.screenshare.enabled` with `realtime` set is refused when you save the config, not at publish. The reason is the turn hook again: the newest frame is injected on each user turn, and that moment does not exist here. The catalog's `vision` flag does not rescue it — three of the five entries can read an image, so a capability check would wave through exactly the models where the frame goes nowhere.
+
+Images people **send** still work, on the three entries that read them. It is the live screen that has nowhere to go. See [vision and images](/agents/vision-and-images).
+
+## There is no failover
+
+The cascade lets you name a second model per stage. A realtime agent cannot: there is no `fallback` field, and the framework's realtime fallback adapter is deliberately not used, because it merges both models' capabilities conservatively for the whole call — pairing anything with one of these would cost the primary model abilities it has, on every call, for a failover that may never happen.
+
+So when the provider fails mid-call:
+
+- The failure is recorded on the call as a `session.error` event carrying what the provider actually said and whether it was recoverable.
+- An error the provider marks recoverable does not end the call; the session carries on.
+- **An unrecoverable one ends the call.** The cascade tolerates up to three consecutive unrecoverable errors from a stage before closing; a realtime model gets no such grace, because there is nothing left running. The call's close reason reads `error` — "The call ended on an error". See [close reasons](/observability/close-reasons).
+
+A caller hears the line go quiet and then end. If that is unacceptable for the calls you take, take the cascade and give the language model a fallback. See [model fallbacks](/agents/model-fallbacks).
+
+## Post-call analysis
+
+Analysis is on by default and works here, with one substitution you should know about.
+
+It normally runs on the agent's **own** language model, so turning it on never demands a provider key the agent did not already need. A realtime agent has no language model of its own, and a speech-to-speech model cannot read a transcript over a chat API — so analysis falls back to **the first language model in the catalog from the same provider**. The key property survives: same provider, same key.
+
+Naming `analysis.model` explicitly overrides that, and then that provider needs a key too. See [call analysis](/observability/call-analysis).
+
+## Everything a realtime agent is refused
+
+Every rule below is enforced when you save or publish, with the message quoted here or in the section above.
+
+| Rule | When | Result |
+| --- | --- | --- |
+| `channel: "text"` | On save | `realtime` is cleared to `null` along with `stt` and `tts`. Not an error. |
+| `stt`, `llm`, `tts` sent alongside `realtime` | On save | All three are cleared to `null`. Not an error. |
+| `vision_input.screenshare.enabled` | On save | Refused. |
+| `preemptive_generation` | On save | Pinned off, both flags. |
+| `on_user_turn_completed` set | On save and publish | Error. |
+| `recording.consent: "disclosure"` | On save and publish | Error. |
+| An unknown `provider`/`model` pair | On save and publish | Error listing the valid pairs. |
+| A model that does not support the channel | On save and publish | Error. |
+| `speed` other than `1.0` on a model with no speed control | On save and publish | `realtime model '<provider>/<model>' does not support speed`. Only the two OpenAI entries have one. |
+| `speed` outside the model's range | On save and publish | Error naming the range. |
+| An agent `language` the model does not publish | On save and publish | Error. Entries that publish no languages at all — both xAI ones — are exempt: steer the language from the prompt instead. |
+| A handoff between a realtime agent and a cascade agent, either direction | On save and publish | `a handoff target must use the same pipeline as its source`. The whole media graph would have to be rebuilt mid-call. |
+| No avatar on `channel: "video"` | On save and publish | Error. The same rule as the cascade. |
+| No provider key for the realtime model's provider | On publish | Error. Strict BYOK — one key, for the one model. |
+| A model with `vision: false` | On publish | **Warning**, not an error: nobody on this agent can attach an image. |
+
+See [validation](/agents/validation) for how errors and warnings come back.
+
+## What still works
+
+Everything that is not about the three stages: tools and the whole operation tree, MCP servers, handoffs to other realtime agents, `vars` and `userdata`, conversation memory, background audio, noise cancellation, recording, post-call analysis, webhooks, batch calling, phone numbers, and the video avatar.
+
+## When to take the cascade instead
+
+Six answers, and any one of them is enough:
+
+- **A specific voice.** The realtime rosters are the provider's own; the text-to-speech catalog is far larger, and expressive delivery exists only there.
+- **Exact scripted lines** — a disclosure, a quoted price, a compliance sentence.
+- **A batch speech-to-text price.** Transcribing each utterance in one request is the cheapest way to hear a caller, and it is a cascade-only option.
+- **A fallback**, on any stage.
+- **A screen share** the agent watches while you talk about it.
+- **A hook on every user turn** — checking a policy, writing to your own system, injecting context per turn.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Models" href="/agents/models">
+    The catalog, both pipelines side by side, and every rate.
+  </Card>
+  <Card title="Voices" href="/agents/voices">
+    Rosters, defaults and speed.
+  </Card>
+  <Card title="Validation" href="/agents/validation">
+    How these refusals come back, and how to fix them.
+  </Card>
+</CardGroup>

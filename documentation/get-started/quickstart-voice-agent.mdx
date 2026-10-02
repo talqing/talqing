@@ -1,0 +1,163 @@
+---
+title: "Build a voice agent"
+description: "From signing in to hearing your agent speak, in the dashboard, with no code."
+---
+
+This is the shortest path to a working voice agent: sign in, add the provider keys it will run on, write a prompt, publish, and talk to it in your browser. Fifteen minutes, no phone number and no code.
+
+At the end you will read the call back — the transcript, where the time went, and what it cost.
+
+<Steps>
+
+<Step title="Sign in">
+Go to `https://app.talqing.com` and sign in with Google. That is the only way in — there is no password to set.
+
+Your first sign-in creates a workspace for you and grants it **$10 of credit in every region**. That is the [platform fee](/get-started/pricing-and-credits) for roughly 2,800 minutes of voice, so the Talqing side of everything below costs you nothing today.
+
+The dashboard opens on one region. It does not matter which for a browser test; if you are in India, `in` is closer and the agent will feel faster. See [regions](/get-started/regions).
+</Step>
+
+<Step title="Add your provider keys">
+**Nothing runs until you do this.** Talqing holds no provider credentials of its own — every model your agent uses is called with *your* key, on *your* account, and those providers bill you directly. An agent whose provider has no key is refused at publish, naming the provider.
+
+You need a key for three things: a **language model**, **speech-to-text** and **text-to-speech**. Go to **Build → BYOK** in the sidebar and add:
+
+| Slot | Provider | Where the key comes from |
+| --- | --- | --- |
+| Language model | OpenAI | `platform.openai.com` |
+| Speech-to-text and text-to-speech | Deepgram | `console.deepgram.com` |
+
+Two keys cover all three slots, which is why this pairing is a good place to start. Any combination from the [ten supported providers](/get-started/provider-keys) works; you can change your mind later.
+
+Each key is proved against the provider before it is stored. A key the provider rejects is a `400` and nothing is written; a provider that does not answer is a `502` and nothing is written either. So a bad paste cannot break a workspace that was working.
+
+Only an **ADMIN** can add keys. If you created this workspace, that is you.
+</Step>
+
+<Step title="Create the agent">
+**Build → Agents → New agent.** Give it a name — it has to be unique in the workspace — and it opens in the editor.
+
+A new agent is a **draft**. Drafts run nothing and reach nobody. The editor is one long scroll with a sticky section nav down the side, and a toolbar at the top showing `draft`, `unsaved` when the editor is ahead of the server, and later `v1 live`.
+</Step>
+
+<Step title="Choose the voice channel">
+The **Channel** section at the top offers voice, video and text. Leave it on **voice**.
+
+The channel decides which model slots exist. Voice gets speech-to-text, a language model and text-to-speech; text gets only a language model; video adds an [avatar](/agents/video-avatars). See [channels](/agents/channels).
+</Step>
+
+<Step title="Write the prompt and the greeting">
+In **Prompt & voice**, paste this into the system prompt. It is a real starting point, not a placeholder — change the name and the facts and it will run.
+
+```text
+You are Ava, the front desk for Northwind Dental in Bangalore.
+
+You do three things and nothing else:
+- Tell callers our hours: Monday to Saturday, 9am to 7pm. Closed Sunday.
+- Tell them where we are: 12 Residency Road, opposite the school gate.
+- Take a message when someone wants a callback about an appointment.
+
+How to speak:
+- One or two sentences per turn. This is a phone call, not an email.
+- Say numbers, times and addresses the way a person would say them out loud:
+  "nine to seven", not "09:00-19:00".
+- If you do not know something, say so and offer to take a message. Never guess
+  a price, a dentist's availability or anything clinical.
+- If the caller asks something clinical, say a dentist will call them back, then
+  take their name and number.
+
+When the caller is done, say goodbye and stop talking.
+```
+
+Then the **greeting** — the first line spoken the moment the call connects, before the model has done anything:
+
+```text
+Northwind Dental, this is Ava. How can I help?
+```
+
+Three things about that prompt are doing real work, and they are the difference between an agent that sounds like a phone call and one that sounds like a chatbot reading aloud:
+
+- **A length instruction.** Without one, a language model writes paragraphs, and a paragraph read at speaking speed is fifteen seconds the caller cannot interrupt gracefully.
+- **A speech instruction.** `09:00-19:00` is a string a text-to-speech engine will read as digits and punctuation.
+- **A refusal instruction.** "Never guess" is the single highest-value sentence in a voice prompt. A model that invents a price on a recorded line is a problem you find out about later.
+
+Voice-specific prompt craft has a page of its own: [prompting](/agents/prompting).
+
+Leave the rest of this section alone for now. **Save draft.**
+</Step>
+
+<Step title="Pick the models">
+Scroll to **Models**. Leave the pipeline on **cascade** — speech-to-text, then a language model, then text-to-speech, three swappable parts. ([Realtime](/agents/realtime) is one speech-to-speech model instead, and gives up some control in exchange for latency.)
+
+Set the three stages to models your keys cover:
+
+| Stage | Choose | Why this one |
+| --- | --- | --- |
+| Speech-to-text | Deepgram **Nova-3 Multilingual (Streaming)** — `nova-3-general` | Streaming, so words arrive while the caller is still talking rather than after they stop. It detects and code-switches between languages instead of being pinned to one, which matters the first time somebody answers in Hindi |
+| Language model | OpenAI **GPT-5.4 mini** — `gpt-5.4-mini` | Fast enough that the caller does not hear the gap, and cheap enough — $0.75 per million input tokens — that you will not think twice about testing. Reach for a larger model when the agent is doing something a mini model gets wrong, not before |
+| Text-to-speech | **Deepgram Aura-2** — `aura-2` | Low latency, a decent voice, and it runs on the Deepgram key you already added. Swap in [ElevenLabs](/agents/voices) later if the voice is the thing you want to spend money on |
+
+Every model in the picker comes from the [catalog](/agents/models), and each entry compiles to that provider's own API — nothing is routed through a broker.
+
+The right-hand rail shows a **per-minute cost estimate** for the draft as you change it, split into speech-to-text, language model, text-to-speech and the platform fee. For this stack it lands near four cents a minute, of which $0.0035 is Talqing's. Use it to compare two stacks before you commit; see [pricing](/get-started/pricing-and-credits).
+
+**Save draft.**
+</Step>
+
+<Step title="Publish">
+Press **Publish**. This freezes the draft as **v1** and makes it the version that runs.
+
+Publishing is also the gate that checks everything: a model that does not exist, a template that reads a variable nothing supplies, and — the one that catches most people — a provider with no key:
+
+```
+no Deepgram API key for this workspace - add one under BYOK
+```
+
+That check runs at publish and never on a draft save, so a draft that saves cleanly is not proof it can be published. Errors block a publish; warnings do not and come back on the response. See [validation](/agents/validation).
+
+From here on, editing the agent changes the **draft**. The toolbar tells you whether the draft `differs from v1`, and nothing you type reaches a caller until you publish again. See [versions](/agents/versions).
+</Step>
+
+<Step title="Talk to it">
+Scroll to the bottom, to **Test call**. It is disabled until something is published, because **the test panel runs the published version** — not the draft in front of you. That is the point: it is the same code path a real caller gets.
+
+Press **Start call**, allow the microphone, and say something. Your browser's mic connects straight to the agent; no phone number is dialled and no carrier is involved.
+
+Things to try in the first thirty seconds:
+
+- Interrupt the greeting. The agent should stop talking and listen. See [turn handling](/agents/turn-handling).
+- Ask for the hours, then ask something it cannot know — "how much is a root canal?" — and check that it offers a message instead of inventing a number.
+- Stop talking mid-sentence and wait. That silence is [endpointing](/agents/speech-to-text-and-turn-detection) deciding your turn is over.
+
+Then hang up. **A web test call is a real call**: it is metered, it is charged the platform fee, it spends your own provider keys, and it is recorded by default. It shows up in the call list like any other.
+</Step>
+
+<Step title="Read the call back">
+Go to **Monitor → Calls** and open the call you just had. This is the page you will live in when an agent misbehaves.
+
+- **The transcript**, both sides, in order, with every tool call and everything those tools returned.
+- **Latency, by stage** — how long the speech-to-text took to settle, how long the model took to answer, how long the voice took to start speaking. A slow agent is almost always one of those three, and this tells you which before you start guessing.
+- **Cost**, split into your provider spend — per provider, per model, from the real tokens, characters and seconds each one metered — and Talqing's platform fee, which is the only part debited from your credit.
+- **The recording**, one stereo file with you on one channel and the agent on the other.
+- **The exact agent configuration this call ran**, frozen. Not the draft you have since edited — which is what makes a week-old call still explainable.
+
+See [calls](/observability/calls) and [costs](/observability/costs).
+</Step>
+
+</Steps>
+
+## What to do next
+
+Your agent can talk but it cannot yet *do* anything — it has no tools and no phone number. Three directions from here, in the order most people take them:
+
+<CardGroup cols={2}>
+<Card title="Take a real phone call" href="/get-started/quickstart-phone-number">
+  Connect your carrier, import a number, point this agent at it, and ring it from your own phone.
+</Card>
+<Card title="Write a better prompt" href="/agents/prompting">
+  The prompt is the agent. Voice-specific craft, and how to write tool instructions a model actually follows.
+</Card>
+<Card title="Give it a tool" href="/tools/overview">
+  Look something up, book a slot, transfer to a human, end the call.
+</Card>
+</CardGroup>

@@ -1,0 +1,175 @@
+---
+title: "Catalog"
+description: "Every integration provider Talqing supports, what each one needs to connect, and what it gives an agent."
+---
+
+Twelve providers, and this is all of them. If a service you need is not listed
+here, the only way to reach it is as a [custom MCP
+server](/integrations/custom-mcp) — there is no other extension point, and
+nothing on this page is a subset of a longer list somewhere else.
+
+The same data is available live, and it is the authoritative version:
+
+<CodeGroup>
+```bash cURL
+curl https://api.in.talqing.com/v1/integrations/catalog \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const catalog = await talqing.integrations.catalog();
+catalog.items.forEach((item) => {
+  console.log(item.provider, item.auth_type, item.capabilities.attachable_as_mcp);
+});
+```
+
+```python Python
+catalog = talqing.integrations.catalog()
+for item in catalog["items"]:
+    print(item["provider"], item["auth_type"], item["capabilities"]["attachable_as_mcp"])
+```
+</CodeGroup>
+
+Each entry carries `provider`, `name`, `description`, `category`, `auth_type`,
+`enabled`, `capabilities` and `setup_fields`. `setup_fields` is the exact list of
+what a provider needs — read it rather than guessing.
+
+`enabled` is `false` when a provider's OAuth application is not configured in the
+region you are talking to. A disabled provider cannot be connected; every other
+field still reads normally.
+
+## Reading the columns
+
+**Connects with** is `auth_type` — `oauth` means a browser redirect started from
+the dashboard, `manual` means a value you paste, through the dashboard or the
+API.
+
+**Default namespace** is the prefix this integration's tools are presented to the
+model under, as `<namespace>_<tool>`. It is the provider key everywhere except a
+custom server, which gets no prefix. You can change it; see
+[namespacing](/integrations/mcp-servers#namespacing).
+
+**Tools come from** says whether we connect to a server the vendor hosts, run the
+tools ourselves against the vendor's API, or neither — a channel provider lends
+an agent no tools at all.
+
+## Search
+
+| Provider key | Name | Connects with | Default namespace | Tools come from |
+| --- | --- | --- | --- | --- |
+| `exa` | Exa | Manual (API key) | `exa` | `https://mcp.exa.ai/mcp` |
+| `tavily` | Tavily | Manual (API key) | `tavily` | `https://mcp.tavily.com/mcp/` |
+
+Exa's server answers web-search calls; Tavily's answers web search and page
+extraction.
+
+<Warning>
+Exa publishes a keyless tier, and we require a key anyway. That tier is a
+**shared anonymous pool**, so its rate limit is exhausted by strangers: an agent
+built on it works in testing and then fails in the middle of a real call with
+Exa's free-tier rate-limit error. Create a key at `dashboard.exa.ai/api-keys`.
+Tavily's MCP server has no keyless mode at all — it answers an unauthenticated
+request with a 401.
+</Warning>
+
+## Scheduling
+
+| Provider key | Name | Connects with | Default namespace | Tools come from |
+| --- | --- | --- | --- | --- |
+| `google_calendar` | Google Calendar | OAuth | `google_calendar` | Native — the Calendar API directly |
+| `cal_com` | Cal.com | OAuth | `cal_com` | `https://mcp.cal.com/mcp` |
+| `calendly` | Calendly | OAuth | `calendly` | `https://mcp.calendly.com` |
+
+Google Calendar is the one **native** provider: nine tools we implement against
+the Calendar REST API rather than proxying a server Google hosts. From your side
+it is identical to any other integration — same approval, same namespacing, same
+listing endpoint. See [Google Calendar](/integrations/google-calendar).
+
+## Project management
+
+| Provider key | Name | Connects with | Default namespace | Tools come from |
+| --- | --- | --- | --- | --- |
+| `asana` | Asana | OAuth | `asana` | `https://mcp.asana.com/v2/mcp` |
+| `jira` | Jira | OAuth | `jira` | `https://mcp.atlassian.com/v1/mcp/authv2` |
+
+## CRM
+
+| Provider key | Name | Connects with | Default namespace | Tools come from |
+| --- | --- | --- | --- | --- |
+| `hubspot` | HubSpot | OAuth | `hubspot` | `https://mcp.hubspot.com/` |
+
+A HubSpot connection is identified by its portal, so one workspace can hold one
+integration per portal.
+
+## Enrichment
+
+| Provider key | Name | Connects with | Default namespace | Tools come from |
+| --- | --- | --- | --- | --- |
+| `rocketreach` | RocketReach | OAuth | `rocketreach` | `https://mcp.rocketreach.co/mcp` |
+
+Finds a person's work email, phone number and profile from a name, a company or
+a domain.
+
+<Warning>
+Searching is free; **every lookup or export spends credits from your RocketReach
+plan, and nothing on our side caps that.** An agent task run once per row of a
+five-thousand-row list spends five thousand credits. Cap it in RocketReach, or
+size the batch to the plan.
+</Warning>
+
+## Email
+
+| Provider key | Name | Connects with | Default namespace | Tools come from |
+| --- | --- | --- | --- | --- |
+| `resend` | Resend | Manual (API key) | `resend` | `https://mcp.resend.com/mcp` |
+
+One Resend integration serves two unrelated purposes: an agent can call Resend's
+MCP tools, and [email batches](/email/setup) send through the same key. Neither
+knows about the other. The key is what scopes the tools to your account, so
+there is no keyless mode.
+
+## Messaging
+
+| Provider key | Name | Connects with | Default namespace | Tools come from |
+| --- | --- | --- | --- | --- |
+| `telegram` | Telegram | Manual (bot token) | — | Nothing — this is a channel |
+
+Telegram lends an agent no tools and cannot be attached under `mcps`. It routes
+private Telegram bot messages to a published text agent through a
+[trigger](/integrations/triggers). The end-to-end walkthrough is
+[Telegram](/channels/telegram).
+
+## Developer tools
+
+| Provider key | Name | Connects with | Default namespace | Tools come from |
+| --- | --- | --- | --- | --- |
+| `custom_mcp` | Custom MCP Server | Manual (URL) | *(none)* | The URL you give it |
+
+Every tool the server exposes is available to attached agents. A custom server
+gets **no** namespace by default — there is no provider name to derive one from —
+so its tool names reach the model exactly as the server writes them. See [custom
+MCP servers](/integrations/custom-mcp).
+
+## Setup fields
+
+What each provider asks for on create. OAuth providers have no setup fields: the
+redirect supplies everything.
+
+| Provider | Field | Type | Required | Stored on | What it is |
+| --- | --- | --- | --- | --- | --- |
+| `custom_mcp` | `url` | text | Yes | `mcp_config` | The MCP server URL, for example `https://mcp.example.com/api/mcp` |
+| `custom_mcp` | `headers` | headers | No | `mcp_config` | Request headers. Use `{{secrets.NAME}}` for credentials |
+| `exa` | `credentials_ref` | secret | Yes | `credentials_ref` | Exa API key (`exa-…`) |
+| `tavily` | `credentials_ref` | secret | Yes | `credentials_ref` | Tavily API key (`tvly-…`) |
+| `resend` | `credentials_ref` | secret | Yes | `credentials_ref` | Resend API key (`re_…`) |
+| `telegram` | `credentials_ref` | secret | Yes | `credentials_ref` | Bot token from BotFather (`123456789:AAH…`) |
+| `telegram` | `secret_token` | secret | Yes | `webhook_config` | Any string Telegram sends back in `X-Telegram-Bot-Api-Secret-Token`. 1–256 characters: letters, digits, underscore, hyphen |
+
+A field of type **secret** takes either a plaintext value — which the platform
+stores as a [workspace secret](/platform/secrets) and replaces with a reference —
+or an existing `{{secrets.NAME}}` reference. `headers` is the exception: header
+values are stored exactly as you send them and are never turned into secrets for
+you.
+
+Reads never return a secret value. `credentials_ref` and any secret-bearing
+`webhook_config` field come back as `{{secrets.NAME}}`.

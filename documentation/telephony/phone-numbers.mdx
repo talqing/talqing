@@ -1,0 +1,323 @@
+---
+title: "Phone numbers"
+description: "Import a number you own at your carrier, provision it, and point a published voice agent at it."
+---
+
+A phone number in Talqing is a number you already own at your carrier, imported
+onto a connected [carrier account](/telephony/carrier-accounts) and wired up so
+it can carry calls. You do not buy numbers here — buy them in the carrier's
+console, then import.
+
+Numbers are regional: a number imported against `https://api.in.talqing.com`
+exists only there.
+
+## See what the account owns
+
+`GET /v1/telephony/accounts/{account_id}/remote-numbers` reads the carrier
+live, so it doubles as a check that the credential still works.
+`already_imported` marks the ones Talqing already has.
+
+<CodeGroup>
+```bash cURL
+curl -sS "https://api.in.talqing.com/v1/telephony/accounts/3f9a1c72-5d84-4e0b-9a13-6c2e8b7f4d51/remote-numbers" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const remote = await talqing.telephony.accounts.remoteNumbers({
+  account_id: "3f9a1c72-5d84-4e0b-9a13-6c2e8b7f4d51",
+});
+const available = remote.items.filter((n) => !n.already_imported);
+```
+
+```python Python
+remote = talqing.telephony.accounts.remote_numbers(
+    "3f9a1c72-5d84-4e0b-9a13-6c2e8b7f4d51"
+)
+available = [n for n in remote["items"] if not n["already_imported"]]
+```
+</CodeGroup>
+
+## Import the ones you want
+
+`POST /v1/telephony/phone-numbers/import` takes a list of E.164 numbers and
+brings each one in. `provision` defaults to `true`, which is what makes a number
+usable — leave it alone unless you have a reason.
+
+<Warning>
+Import is **per number, not all-or-nothing**. A `200` means the request was
+processed, not that every number landed. Read the `ok` on every item in
+`items`; a failed one carries `error`, and often a `phone_number` too (in
+`error` status) so you can retry it.
+</Warning>
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/telephony/phone-numbers/import \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "telephony_account_id": "3f9a1c72-5d84-4e0b-9a13-6c2e8b7f4d51",
+    "e164s": ["+912248900123", "+912248900124"]
+  }'
+```
+
+```typescript TypeScript
+const result = await talqing.telephony.phoneNumbers.import({
+  importPhoneNumbersRequest: {
+    telephony_account_id: "3f9a1c72-5d84-4e0b-9a13-6c2e8b7f4d51",
+    e164s: ["+912248900123", "+912248900124"],
+  },
+});
+for (const item of result.items) {
+  if (!item.ok) console.error(item.e164, item.error);
+}
+```
+
+```python Python
+result = talqing.telephony.phone_numbers.import_(
+    telephony_account_id="3f9a1c72-5d84-4e0b-9a13-6c2e8b7f4d51",
+    e164s=["+912248900123", "+912248900124"],
+)
+for item in result["items"]:
+    if not item["ok"]:
+        print(item["e164"], item["error"])
+```
+</CodeGroup>
+
+Two failures you will meet:
+
+| `error` | Cause |
+| --- | --- |
+| `not found on this <carrier> account` | The number is not on that carrier account. Check the carrier console, or import it onto the account that owns it. |
+| `already registered on this platform` | The number is already live on Talqing. Disable the existing row first if you are moving it. |
+
+If the carrier account is still `connected` rather than `ready`, importing with
+`provision: true` provisions the account once up front — so a bad credential is
+reported once rather than repeated per number.
+
+## Provisioning
+
+`POST /v1/telephony/phone-numbers/{number_id}/provision` wires a number up at
+the carrier and inside Talqing so it can carry calls. Importing already does
+this. Call it yourself to:
+
+- retry a number left in `error`,
+- finish a number imported with `provision: false`,
+- bring a number back after re-enabling it.
+
+A number moves `pending` → `provisioning` → `active`. On failure it lands in
+`error` with the reason on `status_message`.
+
+## Assign an agent so it answers
+
+<Note>
+**Only `voice` agents can answer a phone number.** A `video` or `text` agent is
+refused. The agent must also be **published** — a draft cannot answer a call
+that nobody is there to configure.
+</Note>
+
+The number must be `active`, inbound-capable, and on a carrier account that is
+`ready`. Each of those is refused with the reason.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/telephony/phone-numbers/8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2/assign \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704" }'
+```
+
+```typescript TypeScript
+const number = await talqing.telephony.phoneNumbers.assign({
+  number_id: "8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+  assignPhoneNumberRequest: { agent_id: "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704" },
+});
+console.log(number.readiness); // "live"
+```
+
+```python Python
+number = talqing.telephony.phone_numbers.assign(
+    "8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+    agent_id="9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+)
+print(number["readiness"])  # "live"
+```
+</CodeGroup>
+
+One agent per number. Assigning again replaces the previous one.
+`POST .../unassign` takes the agent off: the number stays provisioned and can
+still place outbound calls, and its `readiness` drops to `needs_agent`.
+
+### Republishing needs no reassignment
+
+**Republishing an assigned agent updates live routing automatically.** The next
+call runs the new published version. You never reassign the number, and there is
+nothing to redeploy. See [versions](/agents/versions).
+
+A publish or rollback that would make the agent `video` or `text` is refused
+while it answers a number:
+
+```
+inbound calls on +911234567890 need a voice agent and this agent is text -
+switch the channel back to voice, or unassign the number
+```
+
+### Required variables with no default are refused
+
+An inbound call carries no request of ours, so a variable the agent declares as
+`required` with no `default` could never be supplied on one. Assigning is
+refused with:
+
+```
+'account_tier' is required and has no default, and an inbound call carries no
+request to supply it - give the variable a default, make it optional, or leave
+this number unassigned
+```
+
+The same state is refused from the other two directions: **publishing** a config
+like that under an already-assigned number, and **rolling back** to a version
+that predates the default. Give the variable a default, make it optional, or
+unassign the number. See [variables](/agents/variables).
+
+## Per-number settings
+
+`PATCH /v1/telephony/phone-numbers/{number_id}`.
+
+<ParamField path="label" type="string">
+Your own name for the number, shown beside it in the dashboard.
+</ParamField>
+
+<ParamField path="can_outbound" type="boolean">
+Whether this number may place outbound calls. Refusing here is what a `this
+number is not enabled for outbound` on a dial means.
+</ParamField>
+
+<ParamField path="can_inbound" type="boolean">
+Whether this number may take incoming calls. On Exotel this is managed for you
+by the account's console-setup confirmation; setting it by hand there will be
+overwritten the next time that confirmation changes.
+</ParamField>
+
+<ParamField path="status" type="string">
+Accepts `disabled` and `pending` only. See below.
+</ParamField>
+
+## Readiness
+
+`readiness` is the field to show a person. It collapses status, capability and
+routing into the one answer they want, and it is computed on every read rather
+than stored.
+
+| `readiness` | What it means | What to do |
+| --- | --- | --- |
+| `live` | Active, inbound-capable, an agent assigned and routing in place. It is answering calls. | Nothing. |
+| `needs_agent` | Provisioned, but nothing is assigned to answer it. | Assign a published voice agent. |
+| `needs_carrier_setup` | Outbound works; inbound is blocked because carrier-console work is outstanding. | Finish the carrier's setup step and confirm it on the account. |
+| `setting_up` | Status is `pending` or `provisioning`. | Wait; it resolves itself. |
+| `error` | Provisioning failed. `status_message` says why. | Fix the cause and provision again. |
+| `disabled` | Out of service by someone's decision. | Re-enable it — two calls, below. |
+
+The underlying `status` is one of `pending`, `provisioning`, `active`, `error`
+or `disabled`. Prefer `readiness`: an `active` number is dead for inbound
+without an agent, and `status` alone cannot say that.
+
+## Disabling a number
+
+`PATCH` with `{"status": "disabled"}` takes a number out of service.
+
+Routing is torn down **immediately, before the row flips**, so calls cannot keep
+arriving at a number the dashboard already shows as off.
+
+<Warning>
+The carrier-side unmapping is best effort. If your carrier's API refuses it, the
+number is still disabled here — Talqing will not answer it — but the row comes
+back with a `status_message` saying the carrier may still be routing that number
+to us, and naming the console to unmap it in. Read `status_message` after a
+disable rather than assuming a clean release.
+</Warning>
+
+Disabling keeps `inbound_agent_id`, so re-enabling puts the same agent back on
+the line. What is dropped is the routing, which is what actually dispatches a
+call — a disabled number cannot answer regardless.
+
+## Re-enabling takes two calls
+
+A disabled number does not re-provision itself.
+
+<Steps>
+  <Step title="Re-open it">
+    `PATCH /v1/telephony/phone-numbers/{number_id}` with
+    `{"status": "pending"}`. Only a `disabled`, `error` or `pending` number
+    accepts this. A `409` here means another live row in your workspace already
+    holds that E.164.
+  </Step>
+  <Step title="Provision it again">
+    `POST /v1/telephony/phone-numbers/{number_id}/provision`. This rebuilds the
+    routing, including the assignment it kept.
+  </Step>
+</Steps>
+
+<CodeGroup>
+```bash cURL
+curl -sS -X PATCH https://api.in.talqing.com/v1/telephony/phone-numbers/8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "status": "pending" }'
+
+curl -sS -X POST https://api.in.talqing.com/v1/telephony/phone-numbers/8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2/provision \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const number_id = "8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2";
+await talqing.telephony.phoneNumbers.update({
+  number_id,
+  patchPhoneNumberRequest: { status: "pending" },
+});
+const back = await talqing.telephony.phoneNumbers.provision({ number_id });
+console.log(back.readiness);
+```
+
+```python Python
+number_id = "8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2"
+talqing.telephony.phone_numbers.update(number_id, status="pending")
+back = talqing.telephony.phone_numbers.provision(number_id)
+print(back["readiness"])
+```
+</CodeGroup>
+
+The same two steps bring back every number on a carrier account you re-enable:
+enabling the account restores the credential, not the per-number routing.
+
+## Listing numbers
+
+`GET /v1/telephony/phone-numbers`, optionally filtered by `account_id`.
+
+<CodeGroup>
+```bash cURL
+curl -sS "https://api.in.talqing.com/v1/telephony/phone-numbers?limit=50" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const numbers = await talqing.telephony.phoneNumbers.list({ limit: 50 });
+const attention = numbers.items.filter((n) => n.readiness !== "live");
+```
+
+```python Python
+numbers = talqing.telephony.phone_numbers.list(limit=50)
+attention = [n for n in numbers["items"] if n["readiness"] != "live"]
+```
+</CodeGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Inbound calls" href="/telephony/inbound-calls">
+    What the agent knows when the phone rings, and what is refused at the door.
+  </Card>
+  <Card title="Outbound calls" href="/telephony/outbound-calls">
+    Dial out of a number you have just imported.
+  </Card>
+</CardGroup>

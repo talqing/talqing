@@ -1,0 +1,23 @@
+# Build context for backend/Dockerfile. Docker reads .dockerignore from the
+# context root, so this file — not the repo root — decides what `COPY . .` ships.
+
+# secrets: supplied at runtime (env_file + mounted config), never baked into a layer
+.env
+configs/*.config.yaml
+# ...except the credential-free template, so the image documents its own config
+!configs/example.config.yaml
+
+# uv builds the real environment at /opt/venv (UV_PROJECT_ENVIRONMENT), so a
+# copied .venv is ~580MB of dead weight that also busts the COPY layer cache
+.venv/
+
+# python / tooling caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# os
+.DS_Store

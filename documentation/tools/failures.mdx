@@ -1,0 +1,416 @@
+---
+title: "When a tool fails"
+description: "What the caller hears when an operation fails, what on_error changes, every way a tool can break, and where to find out."
+---
+
+Something in a tool's tree went wrong on a real call. Two questions follow, and
+this page answers both: what did the caller experience, and where do you go to
+find out what happened.
+
+The mechanics of each operation are elsewhere — [the operation
+tree](/tools/operation-tree), [http](/tools/http), [code](/tools/code). This
+page is about the failure path through them.
+
+## What the caller hears
+
+When an operation fails and `on_error` is `abort`, the tool stops and the model
+is handed one line as the tool's result, marked as an error:
+
+```text
+Sorry, I wasn't able to complete that just now.
+```
+
+That string never reaches the caller. It reaches the **model**, as the tool's
+output, and the model then writes the next thing the agent says. So what the
+caller actually hears is decided by the agent's prompt, not by us — and a model
+with no instruction for this case improvises.
+
+That is the whole problem. A model improvising about a failed booking is how a
+caller gets told something untrue: "You're all set, I've got you down for
+Thursday" is a plausible next sentence after a tool call the model was told
+almost nothing about.
+
+**Write the failure case into the prompt.** One or two lines per tool that
+matters:
+
+```text
+- If book_appointment does not confirm, tell the caller the booking did not go
+  through, say you will not have them down for a slot, and offer to put them
+  through to the desk. Never confirm a booking you did not get a reference for.
+- If lookup_order fails, say you cannot reach the order system right now and
+  ask them to hold or call back. Do not guess a status or a delivery date.
+```
+
+Two things make those lines work: they say what the agent must *not* claim, and
+they give it somewhere to go. See [prompting](/agents/prompting) for the rest of
+the structure.
+
+Two different strings can arrive as a tool's error output, and on a
+transcript they mean different things:
+
+| What the model was told | What went wrong |
+| --- | --- |
+| `Sorry, I wasn't able to complete that just now.` | An operation in the tree failed with `on_error: "abort"`. |
+| `Tool arguments are invalid at <field>: <reason>` | The model's own tool call did not match the tool's `json_schema`. The tree never ran. |
+
+<Note>
+A tool that hangs up or hands off tells the model nothing at all, whether it
+failed or not: there is nobody left to narrate to. See
+[derived silence](/tools/operation-tree#derived-silence).
+</Note>
+
+## `on_error` in practice
+
+`on_error` sits on every operation, and it has two values.
+
+| Value | What happens | The rest of the tree |
+| --- | --- | --- |
+| `abort` (default) | The tool stops. The model gets the line above and apologises in its own words. | Nothing after the failing operation runs. |
+| `continue` | The failure is logged and the walk moves to the next operation **in the same chain**. | Everything after it runs, minus whatever the failed operation would have published. |
+
+Reach for `continue` when the operation is not the point of the call, and leave
+it at `abort` when it is. The test is simple: if the caller would rather have a
+partial answer than an apology, `continue`; if a wrong answer is worse than no
+answer, `abort`.
+
+### A guard that tolerates a failure, and one that must not
+
+Both are in this tree. The enrichment lookup is a nice-to-have — if the CRM is
+down the caller still gets booked. The booking itself is the point, so it keeps
+the default.
+
+```json
+[
+  {
+    "kind": "http",
+    "config": {
+      "method": "GET",
+      "url": "https://api.example.com/v1/customers/lookup",
+      "query": { "phone": "{{system_vars.human_phone_number}}" },
+      "headers": { "Authorization": "Bearer {{secrets.CRM_API_KEY}}" },
+      "timeout": 5
+    },
+    "on_error": "continue",
+    "silent": true,
+    "publish_fields": [
+      { "path": "customer.plan.tier", "key": "tier", "store": "userdata" }
+    ]
+  },
+  {
+    "kind": "http",
+    "config": {
+      "method": "POST",
+      "url": "https://api.example.com/v2/bookings",
+      "headers": {
+        "Authorization": "Bearer {{secrets.CLINIC_API_KEY}}",
+        "Idempotency-Key": "{{args.slot_id}}"
+      },
+      "body": { "slot_id": "{{args.slot_id}}", "reason": "{{args.reason}}" },
+      "timeout": 15
+    },
+    "silent": true,
+    "publish_fields": [
+      { "path": "booking.reference", "key": "booking_reference", "store": "userdata" }
+    ]
+  },
+  {
+    "kind": "say",
+    "config": { "text": "You are booked in. Your reference is {{userdata.booking_reference}}." }
+  }
+]
+```
+
+If the lookup fails, `userdata.tier` is never written and the tree carries on. If
+the booking fails, the `say` never runs, the model gets the apology line, and
+the prompt decides what the caller hears.
+
+<Warning>
+**A `continue`d failure leaves no record on a live call.** It is logged on our
+side and nowhere yours: no timeline event, no `tool.failed` webhook, and the
+tool call is recorded as having succeeded, because from the model's point of
+view it did. A [test run](/tools/testing-and-publishing#reading-the-trace) is
+the only place you can see one, where the step goes red and the rest of the
+trace continues past it. Use `continue` deliberately, on operations you have
+decided you do not need to hear about.
+</Warning>
+
+### `continue` on an `if` ends the tree
+
+An `if` is terminal in its chain, so there is no next operation to carry on to.
+`on_error: "continue"` on one means **neither branch runs and the tree ends
+there** — which is a real outcome, and sometimes the one you want.
+
+It matters most where the condition can genuinely fail to evaluate. `gt` and
+`lt` need two numbers, and an upstream operation that was allowed to `continue`
+publishes nothing, so the left side resolves to empty and the comparison raises
+rather than quietly taking `else`:
+
+```json
+[
+  {
+    "kind": "http",
+    "config": {
+      "method": "GET",
+      "url": "https://api.example.com/v1/accounts/{{args.account_number}}/balance",
+      "headers": { "Authorization": "Bearer {{secrets.CRM_API_KEY}}" },
+      "timeout": 6
+    },
+    "on_error": "continue",
+    "silent": true,
+    "publish_fields": [
+      { "path": "balance_due", "store": "tooldata" }
+    ]
+  },
+  {
+    "kind": "if",
+    "config": { "left": "{{tooldata.balance_due}}", "op": "gt", "right": 0 },
+    "on_error": "continue",
+    "then": [
+      {
+        "kind": "say",
+        "config": { "text": "There is {{tooldata.balance_due}} outstanding on the account." }
+      }
+    ],
+    "else": [
+      { "kind": "say", "config": { "text": "The account is fully paid up." } }
+    ]
+  }
+]
+```
+
+If the balance lookup fails, the `if` cannot compare an empty value against `0`,
+and the tool ends there — rather than taking `else` and telling somebody their
+account is paid up when nobody knows. That is the trade this pattern makes, and
+it is worth making deliberately, because the cost is real: every operation in
+this tree either speaks for itself or is marked `silent`, so the tool is
+[silent by derivation](/tools/operation-tree#derived-silence), and a run where
+neither `say` fired ends the turn having said nothing at all. The caller hears
+a pause.
+
+Change that `on_error` to `abort` and the caller gets the apology instead. Both
+are defensible; the wrong answer is not. See
+[conditionals](/tools/conditionals) for how the comparisons work.
+
+## Every way an operation fails
+
+### A status of 400 or above
+
+The most common one. The operation fails with `HTTP request failed with status 500`,
+and the response body your server sent is kept beside it in a test run's trace,
+because "your server said 500" is half an answer.
+
+Nothing is retried. One request, one outcome — if a flaky endpoint should not
+take the call down with it, that is what `on_error: "continue"` is for.
+
+### A redirect
+
+**A `3xx` is not a failure, and it is not followed.** The tree gets whatever
+body the redirect carried, which is usually nothing — so the operation succeeds
+and its result is `{}`.
+
+This is the confusing one, because it breaks one step later and blames the wrong
+thing: any `publish_fields` on that operation then fails with
+`publish field path '…' was not found in operation output`, which reads like a
+wrong path. If a path you are certain about stops resolving, check whether the
+URL redirects — a host that 301s to its canonical form (a missing trailing
+slash, `http` to `https`, an apex to `www`) does exactly this. Point the URL at
+the endpoint itself.
+
+A redirect that does carry a body, such as the HTML stub some servers send,
+fails as a non-JSON response instead. Same cause, different message.
+
+### A body that is not JSON
+
+`HTTP operation returned a non-JSON response`. Usually an HTML error page from a
+proxy, or a login page from an endpoint that did not recognise the credential
+and answered `200` anyway. The decoded body is in the trace.
+
+An **empty** body is not this: it succeeds and the result is `{}`, with the same
+downstream consequence as a redirect. A body over a megabyte fails with
+`HTTP response exceeds 1048576 bytes`.
+
+### A timeout
+
+The operation's own `timeout` elapsed — 20 seconds by default on an `http`, 10
+on a `code`, 5 on a `frontend_rpc`. All of them are in **seconds**, and all of
+them are a caller sitting in silence, so the fix is rarely a longer timeout. If
+the endpoint is genuinely slow, use the tool-level `long_running_task` flag and
+read the trap below.
+
+A test run has a second, harder ceiling: the whole run is capped at 60 seconds
+and fails with `the run exceeded the 60s limit for a test`.
+
+### A `publish_fields` path that does not resolve
+
+`publish field path 'booking.reference' was not found in operation output`. The
+operation itself worked; reading a value out of it did not. Usually a path one
+level too deep or one level too shallow — the `published` list on each step of a
+test run is the fastest way to see what actually landed.
+
+A `null` is not missing. A path whose value is `null`, or that runs through
+one — `booking.reference` against `{"booking": null}` — publishes `null`, which
+a template reads as nothing and an [`exists`](/tools/conditionals) check reads
+as absent.
+
+### A `code` operation that throws
+
+Anything the TypeScript throws, plus running out of time or memory, fails the
+operation as `code operation failed: <the message>`. When the script logged
+anything, the last ten console lines are appended: `(console: …)`. A timeout
+reads `execution exceeded 10000ms` — the number is the operation's `timeout` in
+milliseconds, which is the one place milliseconds appear.
+
+A script that will not compile never gets this far. TypeScript is compiled at
+publish, so a compile error is a publish error naming the line.
+
+### A blocked URL
+
+Every address a host resolves to must be public. A private, loopback,
+link-local, carrier-grade-NAT, unique-local, multicast or reserved address is
+refused before the request goes out, with
+`destination 169.254.169.254 is not allowed (private/internal)`. A host that
+does not resolve fails with `could not resolve host 'api.example.com'`, and a
+scheme that is not `http` or `https` with
+`HTTP operation URL must be http(s) with a host`.
+
+None of these are transient, and none of them will start working on their own.
+The full rules are in [the HTTP operation](/tools/http#network-rules); the
+practical consequence is that an endpoint on your private network is not
+reachable from a tool.
+
+### A missing secret
+
+`secret 'CRM_API_KEY' does not exist`, or `secrets do not exist: A, B` when more
+than one is gone. This one fails **before any operation runs**: the secrets a
+tree references are gathered up front, so a tree missing one never opens a
+socket.
+
+It is hard to reach. Publish refuses a tree naming a secret the workspace does
+not have, and deleting a secret that a live tool references is refused — see
+[secrets](/platform/secrets#deleting-one). What is left is an agent rolled back
+onto a version whose tools name a secret deleted since.
+
+On a live call it behaves like an aborted operation: the model gets the apology
+line and `tool.failed` fires. `on_error` has no say in it — no operation has
+run for the setting to sit on — so the whole tool aborts. A test run names it
+precisely, as `error_type: tool_auth`.
+
+## When a background tool fails
+
+A `long_running_task` tool that has run for more than a second hands the turn
+back, so its failure arrives after the agent has already told the caller the work
+is under way. **It is still delivered.** The error becomes the tool's result, the
+model is asked to share it, and the agent tells the caller in its own words — the
+same apology it would give on an ordinary failure, one turn later. A tool that
+fails inside that first second never released the turn at all, so it reports in
+the same turn, exactly like an ordinary tool.
+
+It is recorded the same way too: the tool's card on the call detail turns red
+with the error, `tool.ended` carries `status: "error"` and a `duration_ms` that
+measures the work rather than the dispatch, and the `tool.failed` webhook fires.
+`tool.reply` on the timeline then says what became of the spoken hand-back —
+`completed`, `interrupted` if the caller talked over it, or `skipped` if the
+model judged it had already covered the result.
+
+<Warning>
+**A background tool is abandoned if the call ends or the agent hands off.** The
+work belongs to the agent that started it, and it is cancelled when that agent's
+turn on the call is over — so a tool halfway through a three-step tree stops
+halfway, with its side effects half applied. The caller hanging up is the common
+way this happens, and nothing warns you.
+
+If the work must complete whatever the caller does, do not put it behind this
+flag. Put it behind a [webhook](/observability/webhooks) and your own queue: the
+tool starts the job, your system finishes it.
+</Warning>
+
+## Where to look, in order
+
+<Steps>
+  <Step title="The call detail's transcript">
+    Every tool call is in there beside the speech, with the arguments the model
+    chose and what came back. A failed call is marked failed and shows the
+    failure text; when the model was told something different from what
+    happened, the card shows both — "The model was told" is the line that
+    explains why the agent then said something odd. A required argument the
+    model left empty gets its own badge, which is worth checking first: a tool
+    that "ran fine" on an empty required field is the most common reason a call
+    reads as a failure. See [calls](/observability/calls).
+  </Step>
+  <Step title="The timeline events">
+    `events` beside the transcript is the durable runtime trace. `tool.started`
+    and `tool.ended` carry each call's timing and outcome — and on a background
+    tool, `tool.ended` also carries `background: true`, which says its
+    `duration_ms` measured the work and not how long the caller waited, while
+    `tool.reply` says whether the agent ever voiced the result.
+    `tool.step_limit_reached` says the agent wanted more tools in one turn than
+    it was allowed and was made to answer without any — which reads as an
+    ordinary turn everywhere else. The dashboard filters the list to `tool.`
+    events in one click.
+  </Step>
+  <Step title="The tool test panel">
+    Once you know which operation broke, reproduce it. `POST /v1/tools/{tool_id}/run`
+    runs the **draft** against your real endpoints and reports every step: the
+    resolved request, the response, what each operation published, and where it
+    stopped. `error_type` names whose problem it is — `tool_config`,
+    `tool_auth`, `endpoint_error`, `endpoint_unreachable`, `timeout`,
+    `code_error`, `platform` or `unknown` — and the classification is structural
+    rather than string matching, so an HTTP step that recorded no request had a
+    bad config, one with a request and no response never reached you, and one
+    with a response means you answered. The full table, with what each one sends
+    you to fix, is in [testing and publishing](/tools/testing-and-publishing#error-types).
+
+    A test run executes for real. A tool that books a slot books a slot.
+  </Step>
+  <Step title="The webhooks">
+    `tool.invoked` fires when the model calls a tool, carrying the tool name and
+    the arguments; `tool.failed` fires when an operation aborts the tool or the
+    model's arguments did not match the schema, carrying the error. Together
+    they are how a failure reaches you without anyone watching a dashboard.
+
+    One gap worth knowing: a failure handled by `on_error: "continue"` does
+    not fire `tool.failed`.
+    See [webhooks](/observability/webhooks).
+  </Step>
+</Steps>
+
+<Note>
+**A `code` operation's `console` output is not visible on a live call.** The
+lines are captured and sent to the platform's own logs, and no page in the
+dashboard carries them. The one exception is a failure: the last ten lines are
+appended to the error text, so they reach the trace and the `tool.failed`
+webhook that way.
+
+On a [test run](/tools/code#where-console-output-goes) they are shown in full
+beside the operation's return value. Debug a script there.
+</Note>
+
+## Symptom to cause
+
+| What you see | What it usually is | Where to confirm |
+| --- | --- | --- |
+| The agent apologised and moved on | An operation failed with `on_error: "abort"` | The tool card on the call detail |
+| The agent confirmed something that never happened | A failed tool with no prompt rule for it, or a background tool the call ended underneath | The tool card on the call detail; the `tool.failed` webhook |
+| `publish field path '…' was not found` on a path you know exists | The API left the key out of this response, or the URL redirected and the body was empty | The step's `detail.response` in a test run |
+| A tool silently did half its work | An earlier operation failed with `on_error: "continue"` | A test run — a live call keeps no record |
+| Everything worked yesterday, nothing works today | An endpoint that started redirecting, or an agent rolled back onto a version whose secret is gone | `error_type` on a test run: `tool_config` versus `tool_auth` |
+| A fix to the tool changed nothing on live calls | The agent still pins the old tool version | [The pin rule](/tools/testing-and-publishing#the-pin-rule-from-the-tools-side) |
+| The tool ran with a required field sent as an empty string | The model called it before it had the value. The key was there, so the schema check passed | The "required fields empty" badge on the call detail. Fix it in the [tool's description](/tools/schema-and-description), not in the tree |
+| `error_type: platform` | Ours — the code-execution service could not be reached | Retry, then tell us at hello@talqing.com |
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Debugging agents" href="/observability/debugging-agents">
+    The wider playbook: slow, odd, hung up, never answered.
+  </Card>
+  <Card title="Testing and publishing" href="/tools/testing-and-publishing">
+    Reproduce the failure against the draft and read every step.
+  </Card>
+  <Card title="Calls" href="/observability/calls">
+    The call record, the transcript and the timeline in full.
+  </Card>
+  <Card title="Patterns" href="/tools/patterns">
+    Guard-and-continue and escalation, as complete trees.
+  </Card>
+</CardGroup>

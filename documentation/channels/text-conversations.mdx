@@ -1,0 +1,498 @@
+---
+title: "Chats"
+description: "Run a text agent over plain REST: start a chat, send messages and get the reply on the same request, end it, and hand a browser a token."
+---
+
+A **chat** is one text session with an agent — to text what a call is to voice.
+You start it, send it messages, and end it, all over ordinary HTTP. **The reply
+comes back on the request that sent the message**, as one JSON body or as a
+stream, so there is nothing to poll and no webhook to wait for. `curl` is enough.
+
+The prompt, the tools and the handoffs behave the same here
+as they do on a call, so a `text` agent is also the quickest way to get a script
+working before you put a voice in front of it.
+
+## The model
+
+| | What it is | Addressed by |
+| --- | --- | --- |
+| **Contact** | The person. | Your own `contact_key` |
+| **Conversation** | A thread with that person: every item, in order. | `conversation_id` |
+| **Chat** | One text session inside a conversation. Where status, cost and analysis live. | `id` — a session id, exactly as a call's is |
+
+A chat starts when you call `POST /v1/chats`, or when a message arrives on
+[Telegram](/channels/telegram) or [WhatsApp](/channels/whatsapp) from someone
+with no open chat.
+
+**A chat ends only when something ends it**: the agent's
+[`end_call`](/tools/end-call) tool, or `POST /v1/chats/{id}/end`. There is no
+inactivity timeout. A chat nobody ends stays open — and gets no
+[analysis](#when-a-chat-ends) and no `session.completed` webhook until something
+does. If your users simply close the tab, end the chat yourself.
+
+## Start a chat
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/chats \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    "contact_key": "user-42",
+    "userdata": { "name": "Priya", "plan": "gold" },
+    "vars": { "support_region": "in" }
+  }'
+```
+
+```typescript TypeScript
+const chat = await talqing.chats.create({
+  createChatRequest: {
+    agent_id: "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    contact_key: "user-42",
+    userdata: { name: "Priya", plan: "gold" },
+    vars: { support_region: "in" },
+  },
+});
+
+console.log(chat.id);
+```
+
+```python Python
+chat = talqing.chats.create(
+    agent_id="9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    contact_key="user-42",
+    userdata={"name": "Priya", "plan": "gold"},
+    vars={"support_region": "in"},
+)
+
+print(chat["id"])
+```
+</CodeGroup>
+
+<ParamField path="agent_id" type="uuid">
+  The published text agent that answers. `agent`, `agent_version`,
+  `agent_override` and `agent_team` are accepted too, exactly as they are on
+  `POST /v1/calls/token` — see
+  [per-call configuration](/agents/per-call-configuration). An agent whose
+  channel is not `text` is refused.
+</ParamField>
+
+<ParamField path="contact_key" type="string">
+  **Your own stable id for the person** — a user id, an account number. 1–256
+  characters, and it must not start with a reserved prefix (`telegram:`,
+  `whatsapp:`, `sip:`, `stream:`, or a CoPilot's). It is what lets an agent
+  [remember someone](#memory-between-chats) and what lists their history back.
+  Omit it and the chat gets a single-use key, with no past and no future.
+</ParamField>
+
+<ParamField path="userdata" type="object">
+  What the agent already knows about the person, read as `{{userdata.field}}`
+  from the prompt and every tool. It is merged onto the **contact's** record, so
+  it survives into their next chat. See [userdata](/agents/userdata).
+</ParamField>
+
+<ParamField path="vars" type="object">
+  Values for the `{{vars.*}}` the agents declare. Fixed for the life of the
+  chat, and gone with it. Strings only. See [variables](/agents/variables).
+</ParamField>
+
+The response is `201` with the chat:
+
+```json
+{
+  "id": "5d0e7c1a-8a53-4f0e-9d0b-3c8a1f2b6e44",
+  "conversation_id": "0b7f2c9e-1d34-4a6b-8e21-9f5c3a7d6b10",
+  "contact_key": "user-42",
+  "agent": { "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704", "name": "Support", "channel": "text" },
+  "status": "open",
+  "close_reason": null,
+  "created_at": "2026-10-01T09:14:02Z",
+  "started_at": null,
+  "ended_at": null,
+  "cost": null,
+  "analysis": null,
+  "userdata": { "name": "Priya", "plan": "gold" }
+}
+```
+
+`started_at` is null until the first message arrives. Nothing has run yet, and
+nothing is charged for a chat that never receives one.
+
+**Starting a chat ends the contact's open chat with the same agent**, with
+`close_reason: "replaced"`. One person has at most one open chat per agent; they
+can hold open chats with different agents at the same time.
+
+A workspace with no credit is refused with `402`. See
+[what it costs](#what-it-costs).
+
+## Send a message
+
+<CodeGroup>
+```bash cURL
+curl -X POST "https://api.in.talqing.com/v1/chats/$CHAT_ID/messages" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"client_message_id\": \"$(uuidgen | tr 'A-Z' 'a-z')\",
+    \"message\": \"My order 10432 never arrived. What happens now?\"
+  }"
+```
+
+```typescript TypeScript
+import { randomUUID } from "node:crypto";
+
+const turn = await talqing.chats.messages.create({
+  chat_id: chat.id,
+  chatMessageRequest: {
+    client_message_id: randomUUID(),
+    message: "My order 10432 never arrived. What happens now?",
+  },
+});
+
+for (const item of turn.items) {
+  if (item.type === "message") console.log(item.text);
+}
+```
+
+```python Python
+from uuid import uuid4
+
+turn = talqing.chats.messages.create(
+    chat["id"],
+    client_message_id=str(uuid4()),
+    message="My order 10432 never arrived. What happens now?",
+)
+
+for item in turn["items"]:
+    if item["type"] == "message":
+        print(item["text"])
+```
+</CodeGroup>
+
+<ParamField path="client_message_id" type="uuid" required>
+  A UUID you generate. Re-sending with the same one returns the same turn rather
+  than posting a second message, which is what makes a retry after a timeout or
+  a `503` safe.
+</ParamField>
+
+<ParamField path="message" type="string">
+  Up to 100,000 characters. May be empty **only** when `images` is not — a
+  request with neither is refused with *a message must carry text, an image, or
+  both*.
+</ParamField>
+
+<ParamField path="images" type="array">
+  Up to four images, as base64 `data:` URLs. See [images](#images).
+</ParamField>
+
+<ParamField path="stream" type="boolean" default="false">
+  Answer as a `text/event-stream` instead of one JSON body. See
+  [streaming](#stream-the-reply).
+</ParamField>
+
+The response is the whole turn:
+
+```json
+{
+  "input": { "id": "a41c…", "type": "message", "role": "user", "text": "My order 10432 never arrived. What happens now?" },
+  "status": "done",
+  "error": null,
+  "superseded_by_item_id": null,
+  "items": [
+    { "id": "c93e…", "type": "function_call", "direction": "internal", "trigger_item_id": "a41c…" },
+    { "id": "d07a…", "type": "function_call_output", "direction": "internal", "trigger_item_id": "a41c…" },
+    { "id": "e5b2…", "type": "message", "role": "assistant", "direction": "outbound", "text": "I've found order 10432 — it was returned to the depot yesterday…", "trigger_item_id": "a41c…" }
+  ],
+  "chat_status": "open"
+}
+```
+
+(Items are trimmed here; each is a full [item](#items).)
+
+| Field | Meaning |
+| --- | --- |
+| `input` | Your message, as stored. |
+| `status` | `done`, `error`, `canceled`, or `running`. |
+| `error` | Why, when `status` is `error`. |
+| `superseded_by_item_id` | On `canceled`: the newer message that took over. |
+| `items` | Everything the turn produced, oldest first — tool calls and their outputs beside the reply. |
+| `chat_status` | `ended` when the agent ended the chat on this turn. Stop sending. |
+
+The request waits up to **120 seconds**. A turn still working at that point
+returns `status: "running"`; read the reply from
+`GET /v1/chats/{id}/items` when it lands.
+
+A message to a chat that has ended is refused with `409` — start a new chat.
+
+### Stream the reply
+
+Set `stream: true` and the same request answers as server-sent events:
+
+```bash
+curl -N -X POST "https://api.in.talqing.com/v1/chats/$CHAT_ID/messages" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"client_message_id\": \"$(uuidgen | tr 'A-Z' 'a-z')\",
+    \"message\": \"And how long do returns usually take?\",
+    \"stream\": true
+  }"
+```
+
+| `event` | Payload | When |
+| --- | --- | --- |
+| `assistant.started` | `trigger_item_id` | The reply has begun |
+| `assistant.delta` | `trigger_item_id`, `text` | One chunk of the reply. **Deltas append**; they are not cumulative |
+| `assistant.completed` | `trigger_item_id`, `text` | The reply is whole. `text` is every delta joined |
+| `item.created` | One [item](#items) | Each item the turn produces |
+| `turn.result` | The same body the JSON response carries | Last frame; the stream then closes |
+
+Each frame repeats its name in an `event` field, so a client narrows on it with
+a plain `switch`. The stream stays open until the turn is over, however long
+that takes, with a keep-alive comment every 15 seconds. `turn.result` is read
+from the database, so it is the record even if a delta was dropped on the way.
+
+A request that is refused — an ended chat, a bad image — is an ordinary HTTP
+error, not a broken stream.
+
+### The latest message wins
+
+Send message B while the agent is still answering A, and A is superseded: A's
+request returns `status: "canceled"` with `superseded_by_item_id` naming B, and
+B's request returns the reply. That is what makes a chat box where someone
+corrects themselves mid-sentence behave the way they expect. A superseded
+message is not charged for.
+
+## End a chat
+
+<CodeGroup>
+```bash cURL
+curl -X POST "https://api.in.talqing.com/v1/chats/$CHAT_ID/end" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+await talqing.chats.end({ chat_id: chat.id });
+```
+
+```python Python
+talqing.chats.end(chat["id"])
+```
+</CodeGroup>
+
+`202`, with the chat. It is marked `ended` at once — the next message is a
+`409` — and the rest follows in the background. Ending a chat that has already
+ended changes nothing.
+
+### When a chat ends
+
+Whichever way it ended, in this order:
+
+1. The agent's [`on_exit`](/agents/lifecycle-hooks) hook runs. Anything it says
+   is saved to the chat's items.
+2. [Analysis](/observability/call-analysis) runs — summary, outcome and your
+   extracted fields — and lands on the chat's `analysis`. It is on by default
+   for a text agent.
+3. The chat is priced, and `session.completed` is sent with the transcript,
+   analysis and cost. See [webhook events](/api-reference/webhook-events).
+
+| `close_reason` | What ended it |
+| --- | --- |
+| `end_call` | The agent, with its `end_call` tool. That turn's response says `chat_status: "ended"`. |
+| `api_end` | `POST /v1/chats/{id}/end`. |
+| `replaced` | A new chat for the same contact and agent, or a channel trigger pointed at a different agent. |
+
+When the agent ends the chat itself, `on_exit` runs after that turn's response
+has been returned, so read what it said from the chat's items.
+
+## From a browser
+
+A personal access token is a workspace credential and never belongs in browser
+code. A browser gets a **chat token** instead: your server starts the chat,
+mints a token for it, and hands that response to the page.
+
+```bash
+curl -X POST "https://api.in.talqing.com/v1/chats/$CHAT_ID/token" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```json
+{
+  "chat_id": "5d0e7c1a-8a53-4f0e-9d0b-3c8a1f2b6e44",
+  "token": "eyJhbGciOi…",
+  "expires_at": "2026-10-01T10:14:02Z",
+  "api_url": "https://api.in.talqing.com"
+}
+```
+
+The token lasts **one hour** and is pinned to that one chat — mint another to
+keep going; a chat that has ended is refused with `409`. As
+`Authorization: Bearer`, from any origin, it may call exactly four routes, for
+that chat only:
+
+| Route | |
+| --- | --- |
+| `GET /v1/chats/{id}` | The chat's status |
+| `GET /v1/chats/{id}/items` | The messages so far |
+| `POST /v1/chats/{id}/messages` | Send a message |
+| `POST /v1/chats/{id}/end` | End the chat |
+
+**A token holder is the customer, and sees only what a customer should.** Items
+are the `customer_visible` ones — no tool calls, no handoffs — and the chat reads
+back with `cost: null`, `analysis: null` and `userdata: {}`.
+
+`@talqing/client` wraps those four routes:
+
+```ts
+import { TalqingChat } from "@talqing/client";
+
+const chat = new TalqingChat({
+  // Your own endpoint: POST /v1/chats once, then POST /v1/chats/{id}/token.
+  fetchToken: async () => (await fetch("/api/chat-token", { method: "POST" })).json(),
+});
+
+const { events, result } = chat.send("Where is my order?");
+for await (const event of events) {
+  if (event.event === "assistant.delta") render(event.text);
+}
+const turn = await result;
+if (turn.chat_status === "ended") closeChatBox();
+```
+
+`fetchToken` is called again shortly before each token expires, so have it mint
+a token for the **same** chat rather than start a new one. `chat.items()` reloads
+the chat after a page refresh, and `chat.end()` ends it.
+
+<Note>
+There is no public agent id and no embeddable widget: a browser can only talk to
+a chat your server started for it. That is also why a browser cannot choose a
+`contact_key` — it would let anyone read another person's history.
+</Note>
+
+## Read chats back
+
+| | |
+| --- | --- |
+| `GET /v1/chats` | Newest first. Filters: `agent_id`, `contact_key`, and `status` — `open`, `ended` or `all` (the default). |
+| `GET /v1/chats/{id}` | One chat, with its `cost` and, once ended, its `analysis`. |
+| `GET /v1/chats/{id}/items` | Its items. `order=asc` (the default) or `desc` for the newest page, plus `limit` and `offset`. |
+| `DELETE /v1/chats/{id}` | Erase an **ended** chat's content; `409` while it is open. The chat and its cost stay. |
+
+A chat is also a session of its conversation, so it appears on
+`GET /v1/conversations/{conversation_id}/sessions` beside any calls in the same
+thread, and in the dashboard under **Conversations**. See
+[conversations](/observability/conversations).
+
+## Items
+
+Every row in a chat is an item, and there are five kinds.
+
+| `type` | What it is |
+| --- | --- |
+| `message` | Something said — by the person or by the agent. |
+| `function_call` | The agent called a tool, with the arguments it chose. |
+| `function_call_output` | What the tool returned. |
+| `agent_handoff` | The chat moved to another agent. |
+| `agent_config_update` | The running agent's configuration changed mid-chat. |
+
+| Field | Values | Meaning |
+| --- | --- | --- |
+| `direction` | `inbound`, `outbound`, `internal` | Who it came from. `internal` is machinery — tool calls, handoffs. |
+| `visibility` | `customer_visible`, `internal` | Whether a person is meant to see it. |
+| `trigger_item_id` | uuid / null | Which inbound message caused this item. |
+| `turn_status`, `turn_error` | `running`, `done`, `error`, `canceled` | On an inbound message: where its turn stands. |
+| `delivery_status` | `not_applicable`, `pending`, `sending`, `sent`, `failed`, `skipped` | Whether an outbound message reached a messaging provider. `not_applicable` on a chat you drive over the API. |
+
+Items also carry `session_id` (the chat), `agent_id` and `agent_version` (so a
+chat that handed off reads correctly line by line), `attachments`, and per-turn
+`metrics`.
+
+## Images
+
+Attach up to **four images per message**, as base64 `data:` URLs beside the text:
+
+```json
+{
+  "client_message_id": "b1c9c8a2-7c4b-4f5e-9a0d-4c1c2a3b4d5e",
+  "message": "Is this the right part?",
+  "images": [
+    { "data_url": "data:image/jpeg;base64,/9j/4AAQSkZJRg...", "filename": "part.jpg" }
+  ]
+}
+```
+
+**An image and its caption arrive as one turn and one item** — one row, one
+bubble, one thing the model reads whole.
+
+The images come back on the item as `attachments`, each with a URL signed per
+request and a `url_expires_at`.
+
+Sending an image to an agent whose model cannot read one is refused with a `409`
+naming the model — `<provider>/<model> cannot read images — pick a model that
+can` — **before** anything is decoded or uploaded. Formats, sizes and the
+per-conversation ceiling are on [vision and
+images](/agents/vision-and-images).
+
+In a browser, `talqingImageDataUrl(file)` from `@talqing/client` validates,
+downscales and encodes a `File` into exactly the `data_url` above.
+
+## Hooks and handoffs
+
+- [`on_enter`](/agents/lifecycle-hooks) runs **once**, when the chat's first
+  message arrives. `on_exit` runs once, when the chat ends.
+- **A handoff lasts for the rest of the chat.** Once the chat moves to another
+  agent, that agent answers every later message, however long the gap. The move
+  is recorded as an internal `agent_handoff` item. See
+  [handoffs](/teams/handoffs).
+- Within a chat the model always sees the whole chat so far.
+
+## Memory between chats
+
+What a *new* chat knows about the contact's earlier ones is the agent's
+[`conversation.context`](/agents/conversation-memory), the same setting a call
+uses:
+
+| `context` | A new chat… |
+| --- | --- |
+| `none` (default) | Gets its own conversation and starts clean. |
+| `summary` | Gets its own conversation, with summaries of the contact's earlier sessions as background. |
+| `transcript` | Continues the contact's newest conversation, with everything in it. |
+
+## What it costs
+
+**$0.0001 per answered message** is Talqing's platform fee on text, drawn from
+your credit balance. An answered message is one whose turn finished `done`; a
+superseded (`canceled`) or failed (`error`) one is free. Your language-model
+spend goes to your own provider key, as on every channel. See [pricing and
+credits](/get-started/pricing-and-credits).
+
+A chat is priced as it goes, so `cost` on `GET /v1/chats/{id}` fills in while
+the chat is still open and is final once it has ended.
+
+Credit is checked when a chat starts (`402`) and again when a chat that has sat
+idle picks back up — not on every message. Out of credit at that point, the turn
+returns `status: "error"` with the out-of-credits message and the agent does not
+run.
+
+## Retention
+
+Under a [retention policy](/platform/data-retention-and-privacy), a chat's content is
+deleted `retention_days` after the chat **ends**. An open chat is never purged.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Telegram" href="/channels/telegram">
+    Put the same published text agent in front of a Telegram bot.
+  </Card>
+  <Card title="WhatsApp" href="/channels/whatsapp">
+    Or on a WhatsApp number.
+  </Card>
+  <Card title="Conversations" href="/observability/conversations">
+    Reading threads back: sessions, versions, and a person's whole history.
+  </Card>
+  <Card title="Conversation memory" href="/agents/conversation-memory">
+    What an agent carries from one chat to the next.
+  </Card>
+</CardGroup>

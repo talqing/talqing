@@ -1,0 +1,321 @@
+---
+title: "Creating a batch"
+description: "The list, the merged column space, the field map, and everything a create is refused for."
+---
+
+`POST /v1/email/batches` takes a list, the [agent task](/tasks/overview) that drafts each row, a connected Resend account and a field map. It validates the whole combination, writes the rows and the drafting job in one transaction, and returns a `scheduled` batch. Nothing is sent.
+
+An invalid batch is a 400 listing **every** problem at once, not the first one — because telling you about row 12 when rows 12, 47 and 88 are wrong means three round trips through a five-thousand-row upload:
+
+```json
+{
+  "detail": {
+    "message": "invalid email batch",
+    "errors": [
+      "field_map.body names 'message', which is neither a column in the list nor something the task produces",
+      "the task requires a 'company' variable and the list has no such column - add it, give the variable a default, or make it optional"
+    ]
+  }
+}
+```
+
+## The column space
+
+This is the part people get wrong, and everything else follows from it.
+
+A row has **one flat column space**, filled from two directions and edited from a third:
+
+| Layer | Where it comes from | When |
+| --- | --- | --- |
+| `input` | The CSV row you uploaded, keyed by header. Values stay strings. | At create |
+| `output` | The task's typed result for that row. | When the row drafts |
+| `overrides` | What a person typed into a cell during review. | Any time before sending |
+
+They are merged in exactly that order — `input`, then `output`, then `overrides` — so a human edit always wins, and a re-draft can never silently discard one. The merged result is the row's `columns`, and it is what the review table renders.
+
+`field_map` points `to`, `subject` and `body` at names in that merged space, and **each may name either a CSV header or a field the task produces**. That is the whole design in one control, and it is what makes these two the same feature:
+
+```json
+// The list already has addresses. The task writes the words.
+{
+  "field_map": { "to": "email", "subject": "subject_line", "body": "email_body" },
+  "recipients": [
+    { "input": { "email": "asha@example.com", "company": "Asha Textiles" } }
+  ]
+}
+```
+
+```json
+// The list has phone numbers. The task finds the address and writes the words.
+{
+  "field_map": { "to": "work_email", "subject": "subject_line", "body": "email_body" },
+  "recipients": [
+    { "input": { "phone": "+919876543210", "company": "Asha Textiles" } }
+  ]
+}
+```
+
+In the first, `email` is a column of the file and `subject_line` / `email_body` are output fields of the task. In the second, all three are output fields — the task was given a phone number and a company, looked the person up with its tools, and returned `work_email` beside the copy it wrote. Nothing downstream can tell the difference, and nothing downstream needs to.
+
+### What makes a row sendable
+
+A row can be sent when all three mapped names resolve to a **non-empty string** in the merged space, and the resolved `to` parses as an email address. Nothing else is checked.
+
+A mapped column the task does **not** write is decided at upload. If it is blank on a row — or it is `to` and not an address — no draft could ever be sent, so the row is `skipped` with `skip_reason: "unfillable"` straight away and is never drafted or billed. `skips.unfillable` on the batch you get back says how many, which is the moment to go back to your source for them.
+
+Every other field the task produces is kept on the row verbatim as context — visible in the review table, useful when you are deciding whether to send — and read by nobody. A task that returns `confidence`, `industry` and `last_order_date` beside its three mapped fields is doing something useful; those three values are never sent anywhere.
+
+### What the task has to look like
+
+The drafting engine is an ordinary agent task: a prompt, a model, tools and MCP servers, plus a typed `output`. A batch adds two requirements on top of what [inputs and output](/tasks/inputs-and-output) already says:
+
+- **Anything you map must be a `string` output field.** A task output field may be `string`, `boolean`, `integer` or `number`. The other three are fine to produce and are kept on the row, but a `to`, `subject` or `body` mapped at one is refused — an email's subject has to be text.
+- **The task's variables are the list's columns.** Each row's uploaded columns are handed to the task whole as its `{{vars.*}}` values — not filtered to what it declares — so a column the task does not read costs nothing, and a variable the task later declares picks up a column that was already there.
+
+Output field names are lower-case letters, digits and underscores, starting with a letter. Column headers are letters, digits and underscores, starting with a letter or an underscore; a header that could not be read back as `{{vars.name}}` is refused at create.
+
+## Everything refused at create
+
+All of these come back together in one 400.
+
+| Refused | Why |
+| --- | --- |
+| A mapped name that is neither a column of the list nor a field the task **published** | There is nothing for it to resolve to on any row. The published version is what drafts, so it is what the mapping is checked against. |
+| A mapped name that is a task output field but not of type `string` | A `boolean` or a number cannot be a subject or a body. |
+| A CSV header that collides with a task output field name | A row holds both side by side, so one of the two would be unreachable. Rename the column, or rename the output field. |
+| A `required` task variable with no column of that name and no default | Every row would fail before the model was ever reached. |
+| A `from_email` whose domain is not verified on that Resend account right now | Checked live. See [setup](/email/setup). |
+| A `from_email` or `reply_to` that does not parse as an address | — |
+| A column header that is not a valid variable name | It would be a column nothing could read. |
+| An integration that does not exist, is not Resend, or is not `active` | — |
+| A task id that does not exist | — |
+| A task that has never been published | `publish '<name>' before drafting a batch with it`. A batch drafts with the published definition, so there has to be one. |
+| `start_at` in the past, or more than 90 days ahead | A schedule further out than that is a reminder, not a schedule. |
+| More than 10,000 rows, or none | One request carries at most 10,000 rows. Send the rest with [add recipients](/email/reviewing-and-sending#adding-rows-later) once the batch exists. |
+
+<Warning>
+**A header that exists but is blank on some rows still passes create.** The check is on the header, not the cells.
+
+Empty cells are dropped rather than stored as `""`, so a required variable on those rows reads as absent and the row fails at drafting time with `missing_vars` — **one row, not the batch, and with no tokens spent**, because the check runs before the model is reached. The other rows draft normally, and you can fill the cell in and redraft the row: an edit to one of your own uploaded columns is what the task is given on the next run.
+
+That is the good version of this failure, and it is still worth avoiding. Count the blanks in every column a required variable reads before you create the batch.
+</Warning>
+
+The field map is re-validated **whenever the task's published version moves**, not only at create. Publishing the task, or rolling it back, is refused while a live batch would break — but a publish mid-batch can still move ground the guard cannot see, and the batch stops there rather than producing four thousand rows that turn out to be unsendable. A live batch notices within five minutes. See [monitoring](/email/monitoring).
+
+## Policy
+
+Everything that is not the list, the task, the account or the mapping.
+
+| Field | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `name` | string, 1–200 | required | What this list is for. Only you see it. |
+| `body_format` | `text` \| `html` | `text` | Whether the body goes out as plain text or HTML. Pick `html` only if the task writes HTML. |
+| `timezone` | IANA zone | required | The batch's own clock. It interprets `window` and renders every time on the batch page, so a list is worked on its own hours rather than on whoever is reading the page. |
+| `start_at` | timestamp \| null | `null` | When **drafting** begins. Null starts as soon as the job is picked up. At most 90 days ahead. |
+| `window` | object \| null | `null` | `{start, end, days}` — **when email may leave**, on the batch's `timezone`. `days` are ISO weekdays, 1 = Monday. A window that crosses midnight is valid and its day check applies to the start side. `start` and `end` must differ. Every send inherits it and may override it. |
+
+There is deliberately **no drafting window**. Nobody receives a draft, so restricting the hours one is written in gates nothing — it only makes a list take a week. The window means sending, and nothing else.
+
+### Drafting pace
+
+| Field | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `draft_concurrency` | 1–10 | `5` | How many rows draft at once. **This is the only limit in the system** — each row is a model run, and some tasks fan out to tools that rate-limit or charge per call. |
+| `draft_attempts` | 1–5 | `1` | How many times a row's drafting is attempted. Only a timeout, a provider failure or a platform failure is retried; a run that produced no result gives the same non-answer the second time. |
+| `draft_retry_after_minutes` | 5–1440 | `30` | How long to wait before a retried row is claimed again. |
+| `draft_gap_seconds` | 0–3600 | `0` | Minimum seconds between *starting* two rows. `0` starts each row as a slot frees, which is what almost every batch wants — `draft_concurrency` is the real limit, because a task run outlasts any gap you could set. Raise it when the task calls a tool that rate-limits and you want the ramp-up spaced. |
+
+### Sending pace — the defaults every send inherits
+
+A send carries its own copy of all four, taken when it is created. Editing them here steers the **next** send; `PATCH /v1/email/batches/{id}/sends/{send_id}` re-steers one already going out.
+
+| Field | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `send_attempts` | 1–5 | `3` | How many times one row's send is attempted. A rate limit or a provider outage is retried; an address the provider refuses is not. |
+| `send_retry_after_minutes` | 5–1440 | `30` | How long a row waits before its next send attempt. |
+| `send_gap_seconds` | 1–3600 | `1` | Minimum seconds between *starting* two emails. `60` means one email a minute. Sending is strictly serial — there is no send concurrency. |
+| `send_daily_cap` | object \| null | `{"kind": "fixed", "limit": 200}` | How many emails this batch may send per local day, **across all of its sends**: a fixed limit, or a ramp. Null is uncapped. |
+
+<Warning>
+`send_daily_cap` is the safeguard, and it is a rate rather than a count. A brand-new sending domain that emits 5 000 emails in an afternoon is a domain nobody's inbox trusts afterwards, and no review gate can undo that. Raise it deliberately, over weeks.
+</Warning>
+
+`send_daily_cap` is one of two objects:
+
+| Shape | Meaning |
+| --- | --- |
+| `{"kind": "fixed", "limit": 200}` | The same limit every day. `limit` ≥ 1. |
+| `{"kind": "ramp", "start": 10, "end": 50, "step": 1, "interval_days": 1}` | `start` a day, raised by `step` every `interval_days` sending days, up to `end`. `start` ≥ 1, `end` > `start`, `step` ≥ 1, `interval_days` 1–30. |
+
+### Warming up a new domain
+
+A ramp raises the limit by itself, so nobody edits the cap every morning. It advances on **days the batch actually sent**, never on the calendar: a weekend, a closed window or a pause earns nothing, so 14 on Friday is 15 on Monday. `send_daily_cap_today` on the batch and on each send is the limit in force today.
+
+<CodeGroup>
+```bash cURL
+curl -sS -X PATCH https://api.in.talqing.com/v1/email/batches/7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "send_daily_cap": { "kind": "ramp", "start": 10, "end": 50, "step": 1, "interval_days": 1 }
+  }'
+```
+
+```typescript TypeScript
+await talqing.email.batches.update({
+  batch_id: "7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57",
+  patchEmailBatchRequest: {
+    send_daily_cap: { kind: "ramp", start: 10, end: 50, step: 1, interval_days: 1 },
+  },
+});
+```
+
+```python Python
+talqing.email.batches.update(
+    "7c1d94a3-58b2-4e60-9f13-0a6d2c8e4b57",
+    send_daily_cap={"kind": "ramp", "start": 10, "end": 50, "step": 1, "interval_days": 1},
+)
+```
+</CodeGroup>
+
+Editing a ramp keeps its progress unless you change `start`, which begins it again. The limit is **per batch**: two batches on one domain each ramp on their own, and what the domain sends is their sum.
+
+## What happens after create
+
+The batch is `scheduled`, and a drafting job exists for it in the same transaction that wrote the rows. From there:
+
+1. At `start_at`, or as soon as it is picked up if there is none, the batch moves to `drafting` and `email_batch.started` fires.
+2. From there one worker holds the batch to the end, keeping `draft_concurrency` rows in flight — a slot is refilled the moment it frees, not when the whole group finishes — running the task on each and writing the result onto the row. It re-reads your policy as it goes, so pausing it, slowing it down or publishing a better prompt all reach it within five minutes.
+3. When the last row lands the batch becomes `drafted` — **Ready to review** in the dashboard — `email_batch.drafted` fires, and nothing about the batch is scheduled any more.
+
+`drafted` means the drafts are ready. It says nothing at all about what has been sent.
+
+## A complete create
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/email/batches \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Onboarding follow-up, week 34",
+    "task_id": "5e2a7b91-0c34-4d6f-8a12-b93f5c7e2d61",
+    "integration_id": "a41f6c2d-8b17-4e93-9d05-2c7e6f31b840",
+    "from_email": "priya@yourdomain.com",
+    "from_name": "Priya at Northwind",
+    "reply_to": "priya@yourdomain.com",
+    "body_format": "text",
+    "field_map": {
+      "to": "email",
+      "subject": "subject_line",
+      "body": "email_body"
+    },
+    "recipients": [
+      { "input": { "email": "asha@example.com", "company": "Asha Textiles", "plan": "growth" } },
+      { "input": { "email": "ravi@example.org", "company": "Ravi Foods", "plan": "starter" } }
+    ],
+    "timezone": "Asia/Kolkata",
+    "window": { "start": "09:00", "end": "18:00", "days": [1, 2, 3, 4, 5] },
+    "draft_concurrency": 5,
+    "draft_attempts": 2,
+    "draft_retry_after_minutes": 30,
+    "send_gap_seconds": 1,
+    "send_daily_cap": { "kind": "fixed", "limit": 200 }
+  }'
+```
+
+```typescript TypeScript
+const rows = [
+  { email: "asha@example.com", company: "Asha Textiles", plan: "growth" },
+  { email: "ravi@example.org", company: "Ravi Foods", plan: "starter" },
+];
+
+const batch = await talqing.email.batches.create({
+  createEmailBatchRequest: {
+    name: "Onboarding follow-up, week 34",
+    task_id: "5e2a7b91-0c34-4d6f-8a12-b93f5c7e2d61",
+    integration_id: "a41f6c2d-8b17-4e93-9d05-2c7e6f31b840",
+    from_email: "priya@yourdomain.com",
+    from_name: "Priya at Northwind",
+    reply_to: "priya@yourdomain.com",
+    body_format: "text",
+    field_map: { to: "email", subject: "subject_line", body: "email_body" },
+    recipients: rows.map((input) => ({ input })),
+    timezone: "Asia/Kolkata",
+    window: { start: "09:00", end: "18:00", days: [1, 2, 3, 4, 5] },
+    draft_concurrency: 5,
+    draft_attempts: 2,
+    draft_retry_after_minutes: 30,
+    send_gap_seconds: 1,
+    send_daily_cap: { kind: "fixed", limit: 200 },
+  },
+});
+
+console.log(batch.id, batch.status, batch.counts.total);
+```
+
+```python Python
+import csv
+
+with open("list.csv", newline="") as handle:
+    rows = [
+        {k: v.strip() for k, v in row.items() if v and v.strip()}
+        for row in csv.DictReader(handle)
+    ]
+
+batch = talqing.email.batches.create(
+    name="Onboarding follow-up, week 34",
+    task_id="5e2a7b91-0c34-4d6f-8a12-b93f5c7e2d61",
+    integration_id="a41f6c2d-8b17-4e93-9d05-2c7e6f31b840",
+    from_email="priya@yourdomain.com",
+    from_name="Priya at Northwind",
+    reply_to="priya@yourdomain.com",
+    body_format="text",
+    field_map={"to": "email", "subject": "subject_line", "body": "email_body"},
+    recipients=[{"input": row} for row in rows],
+    timezone="Asia/Kolkata",
+    window={"start": "09:00", "end": "18:00", "days": [1, 2, 3, 4, 5]},
+    draft_concurrency=5,
+    draft_attempts=2,
+    draft_retry_after_minutes=30,
+    send_gap_seconds=1,
+    send_daily_cap={"kind": "fixed", "limit": 200},
+)
+
+print(batch["id"], batch["status"], batch["counts"]["total"])
+```
+</CodeGroup>
+
+The response is an `EmailBatchResponse`. Two of its fields describe the column space directly: `input_columns` is every header your list carried, in the order it first appeared, and `output_columns` is every field the task declares — read live, so a task that grew a field shows the new column.
+
+## In the dashboard
+
+**Email → Outbound → New batch** asks the same three questions in the order they have to be answered, because the third cannot be asked before the first two.
+
+<Steps>
+<Step title="The list">
+Type rows in, upload a CSV, or both. The file is parsed in the browser and posted as JSON — it never leaves the tab as a file. Bad column names are flagged red on the header, and a file over 10,000 rows is refused where you chose it rather than after the form is filled in.
+</Step>
+
+<Step title="How it runs">
+The task, the Resend account, the sender, the body format, the schedule, the drafting hours and the pacing. This is the same form you get later when you edit a live batch, because they are the same fields.
+</Step>
+
+<Step title="The email">
+Three dropdowns — To, Subject, Body — each listing your file's columns under **From your file** and the task's output fields under a group named after the task. Non-text output fields appear greyed with `(not text)` beside them. Common names (`email`, `subject`, `body`) are pre-selected if they exist.
+
+Below them, in place of a 400 you would otherwise get: collisions between your columns and the task's fields, required variables your file has no column for, and a count of how many rows have a blank cell in a required column.
+</Step>
+</Steps>
+
+**Review and start drafting** opens a confirmation that states the number of task runs you are about to pay for, that nothing is emailed by it, and that every row runs the task's **published** version.
+
+<CardGroup cols={2}>
+<Card title="Review and send" href="/email/reviewing-and-sending">
+Reading the drafts, editing cells, and creating a send you can steer.
+</Card>
+<Card title="Monitoring a batch" href="/email/monitoring">
+Statuses, counts, cost, and why a batch stops itself.
+</Card>
+</CardGroup>

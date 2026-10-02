@@ -1,0 +1,161 @@
+---
+title: "Inputs and output"
+description: "Declare the variables a task takes in and the typed fields it must produce, and how the generated submit_result tool collects them."
+---
+
+A task's signature is two lists: `vars`, the values a run is given, and `output`, the fields it must hand back. Both are declared on the config, so the same definition can be run a thousand times with different inputs and every result comes back in the same shape.
+
+## Inputs: `vars`
+
+A task declares its inputs exactly as an agent declares its variables — same field, same model, same `{{vars.name}}` templating. See [variables](/agents/variables) for the templating rules themselves.
+
+<ParamField path="name" type="string" required>
+  Letters, digits and underscores, starting with a letter or underscore. Read back in the prompt and in tools as `{{vars.name}}`.
+</ParamField>
+
+<ParamField path="description" type="string" default="">
+  For you and for the TaskCoPilot on a standalone run. When an agent enters this task it becomes the argument's description in the tool schema, so it is read by a model there — write it as the prompt for the value.
+</ParamField>
+
+<ParamField path="default" type="string | null" default="null">
+  What `{{vars.name}}` resolves to when the run supplies no value. Null means empty unless supplied.
+</ParamField>
+
+<ParamField path="required" type="boolean" default="false">
+  Refuse the run rather than resolve this to nothing. A `default` satisfies it.
+</ParamField>
+
+
+<Warning>
+**`vars` are also the input schema an agent calls this task with.** Attached to an agent, every variable the call does not already supply by name becomes an argument the *model* writes into the tool call — and a model asked for an order number will sometimes invent one. Declare a variable only for what the caller or the model must supply; anything the task can read for itself (`{{userdata.last_order_id}}`, `{{system_vars.date}}`) belongs in the prompt. See [agent tasks](/agents/agent-tasks#variables-what-the-model-is-asked-for).
+</Warning>
+
+### What a run supplies
+
+`POST /v1/tasks/{task_id}/runs` takes a flat `{"vars": {name: value}}` map of strings. Values are matched to declarations by name:
+
+- A name the run supplies wins over that variable's `default`.
+- A name the run omits falls back to the `default`.
+- An empty string is a deliberate blank, not a request for the default.
+- **A `required` variable with neither a value nor a default is refused before anything is compiled.** No model is called and no tool runs, so the failure costs nothing.
+- **A value for a name the task does not declare is refused, not dropped.**
+
+That last rule is the one difference from an agent. An agent's key space is open — a request may carry a variable nothing declared, because an agent defined inline in that same request is free to read it. A task's key space is closed, because a task's variables *are* its input contract, and silently ignoring `emial` would produce plausible nonsense instead of an error.
+
+Both refusals are a `400` from the run endpoint, in the standard error shape. The undeclared-name one reads:
+
+```json
+{
+  "detail": {
+    "message": "these values do not match the task's variables",
+    "errors": ["this task does not declare a variable named 'emial'"]
+  }
+}
+```
+
+The values are also handed to the model as the message that opens the run, serialized as JSON. So a variable your prompt never interpolates is still visible to the model — but a prompt that reads `{{vars.email}}` where it matters is what makes the value land in the right place.
+
+## Output: `output`
+
+A flat list of the fields the model must produce. At most 25, and **at least one to publish** — a draft may declare none, so you can save a task before you have decided what it produces.
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | Yes | Lower-case letters, digits and underscores, starting with a letter, up to 40 characters. This is the key in the run's `output`. |
+| `type` | `string` \| `boolean` \| `integer` \| `number` | No, defaults to `string` | The shape of the value. |
+| `description` | string | Yes, non-empty | What the model should put here, and what to send when it cannot find out. |
+| `required` | boolean | No, defaults to `true` | Refuse `null` for this field. Turn it off for a value the model may legitimately fail to find. |
+
+**No arrays and no nested objects.** A task that wants to return five talking points returns one `string` containing them. That is a stated limitation, and it is what keeps a run's result mergeable into a flat column space downstream — which is how an [email batch](/email/overview) maps a task's fields onto a CSV's columns.
+
+Two rules are enforced when you **save**, because a half-written task can still be judged on them:
+
+- **A name may not appear twice in `output`.** Each name gets one type and one description, and the later entry would silently win.
+- **A name may not be both a variable and an output field.** A run's inputs and its output are read side by side, so a collision would make one of the two unreachable. Rename one of each pair.
+
+A third is enforced when you **publish**: `output` must have at least one field. A published task with none would be given a `submit_result` taking no arguments, and every run would "complete" with `{}`.
+
+## How the output is actually collected
+
+The model does not "return" the output, and understanding what does happen is the difference between a task that finishes reliably and one that does not.
+
+When a run starts, the task gains **one generated tool named `submit_result`**, whose arguments are exactly your `output` fields and whose description is the one you wrote:
+
+```json
+{
+  "name": "submit_result",
+  "description": "Submit this run's result and finish, once you have identified the company. Send every field; send null for the headcount if you could not determine it rather than guessing.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "company_name": {
+        "type": "string",
+        "description": "The company's legal or trading name."
+      },
+      "employee_count": {
+        "type": ["integer", "null"],
+        "description": "Headcount as a whole number, from the company's own site or a listing page. Send null rather than estimating."
+      }
+    },
+    "required": ["company_name", "employee_count"],
+    "additionalProperties": false
+  }
+}
+```
+
+Here `company_name` is a required field, so `null` is refused, and `employee_count` has `required` off, so `null` is an accepted answer.
+
+**Nothing is appended to your prompt.** The `description` in that schema is the whole of what the model is told about finishing — which is why `submit_result_description` is required, and why writing it is part of building the task rather than something the platform does for you. A new task starts with `"Submit results if you are sure that you have achieved the goal of this task"` — make it specific to what achieved means for your task.
+
+The tool itself is written for you; the sentence describing it is yours.
+
+<Warning>
+**Never declare a tool named `submit_result`.** It is reserved workspace-wide — creating a tool with that name is refused, so the model can never be shown two tools of one name.
+</Warning>
+
+Calling the tool ends the run: the arguments are validated against the schema above, stored as the run's `output`, and no reply is generated afterwards. If the arguments do not match, the model is told what is wrong and may call it again. Calling it a second time after a valid result is refused.
+
+### Every field is sent; `required` decides whether `null` is allowed
+
+In that tool, **every field is always a required argument**. The model has to say something about each one.
+
+An optional argument would let the model silently omit the address it failed to find — and then "omitted" and "not generated yet" look identical to whoever reads the row. One of those is a fact and the other is a bug, and nothing downstream can tell them apart.
+
+What a field *may* be is its `required` flag. A required field (the default) refuses `null`: the model must produce a real value, and if it tries `null` it is told the result does not match and has to keep working. Turn `required` off for a value the model may legitimately fail to find, and `null` becomes an accepted answer — "I could not find it" — which the field's description should then say when to send.
+
+### The tool's own description
+
+The field descriptions describe the *values*. `submit_result_description` describes **the call** — when to make it, and what making it means:
+
+```json
+{ "submit_result_description": "Submit the qualified lead and finish. Calling this IS how the result is produced; a written summary is not a result. Call it once, after you have read the address back and the caller has confirmed it. Send null for anything you could not determine." }
+```
+
+It is **required and non-empty**, on the same footing as an output field's own description — publishing is refused without it, and there is no platform wording underneath to fall back to. A new task starts with `"Submit results if you are sure that you have achieved the goal of this task"`, written into your config rather than applied behind you: it appears in the editor, in the version diff, and in what the model reads, and it changes only when you change it. Two things are worth saying in your own version — when the job is done enough to call it, and that calling the tool *is* the result.
+
+Which means a non-required field's null case has to be in its description. **The description is the only instruction the model gets about what belongs in that field** — it becomes the argument's description in the tool schema, so it is literally the prompt for the value.
+
+### Writing a description the model can act on
+
+| Bad | Why | Better |
+| --- | --- | --- |
+| `"Company name"` | Restates the field name. Says nothing about where to look or what to do when it is not there. | `"The company's legal or trading name, as it appears on their own site. Send null if the domain resolves to no company you can identify."` |
+| `"The headcount"` | No unit, no source, and nothing stopping the model estimating one. | `"Headcount as a whole number, from the company's own careers or about page. Send null rather than estimating from the size of the office."` |
+| `"Talking points"` | Plural in a single string field, with no shape and no limit. | `"Three talking points, one per line, each tied to something you actually read on their site. Send null if you found nothing specific enough to be worth saying."` |
+| `"Is this urgent?"` | A boolean with no definition, so every run draws the line somewhere else. | `"True if the sender is blocked right now or reports an outage; false for a question or a feature request. Send null if the message gives no signal either way."` |
+| `"The subject line"` | No length, no register, no null case — and this one feeds an email. | `"A subject line under 60 characters that names the company and reads like a person wrote it. No exclamation marks. Send null if you could not identify the company."` |
+
+The pattern in the right-hand column: say what good looks like, say where to look, and say what to send when the answer is not findable.
+
+In the dashboard, the Inputs and output section flags an output field whose description is blank, because a blank one is a quality bug rather than a missing note.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Tools and MCP servers" href="/tasks/tools-and-mcps">
+    Give the task somewhere to look before it fills those fields in.
+  </Card>
+  <Card title="Running and runs" href="/tasks/running-and-runs">
+    Supply the inputs, read the output, and follow the trace.
+  </Card>
+</CardGroup>

@@ -1,0 +1,287 @@
+---
+title: "Triggers"
+description: "Bind an inbound channel event to a published text agent, and decide what happens with the reply."
+---
+
+A trigger is the whole of a channel deployment. It binds **an inbound event on a
+channel integration** to **a published text agent**, and says what to do with the
+answer:
+
+```json
+{
+  "trigger_type": "telegram.message.inbound",
+  "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+  "reply_mode": "public_reply",
+  "enabled": true
+}
+```
+
+That is the entire model. A channel integration is never named in an agent's
+config — nothing goes under `mcps`, nothing is frozen at publish, and the agent
+does not know it is deployed. Point the trigger somewhere else and the next
+message is answered by a different agent, with no republish.
+
+<Note>
+There are three trigger types: `telegram.message.inbound`,
+`whatsapp.message.inbound` and `whatsapp.call.inbound`. The end-to-end
+walkthroughs are on [Telegram](/channels/telegram), [WhatsApp](/channels/whatsapp)
+and [WhatsApp calls](/channels/whatsapp-calls); this page is the model behind them.
+</Note>
+
+## Creating one
+
+Triggers live under an integration: `POST /v1/integrations/{integration_id}/triggers`.
+
+<CodeGroup>
+```bash cURL
+INTEGRATION_ID=7c2f1a90-4e83-4d16-9b7a-2c5e08f31d64
+
+curl -X POST "https://api.in.talqing.com/v1/integrations/$INTEGRATION_ID/triggers" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "trigger_type": "telegram.message.inbound",
+    "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    "reply_mode": "public_reply",
+    "enabled": true
+  }'
+```
+
+```typescript TypeScript
+const integration_id = "7c2f1a90-4e83-4d16-9b7a-2c5e08f31d64";
+
+const trigger = await talqing.integrations.triggers.create({
+  integration_id,
+  createIntegrationTriggerRequest: {
+    trigger_type: "telegram.message.inbound",
+    agent_id: "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    reply_mode: "public_reply",
+    enabled: true,
+  },
+});
+
+console.log(trigger.id, trigger.status);
+```
+
+```python Python
+integration_id = "7c2f1a90-4e83-4d16-9b7a-2c5e08f31d64"
+
+trigger = talqing.integrations.triggers.create(
+    integration_id,
+    trigger_type="telegram.message.inbound",
+    agent_id="9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    reply_mode="public_reply",
+    enabled=True,
+)
+
+print(trigger["id"], trigger["status"])
+```
+</CodeGroup>
+
+`enabled` defaults to **false**, which is the useful default: a disabled trigger
+is a draft you can create while the agent is still being written, and it does not
+subscribe to anything.
+
+### Fields
+
+<ParamField path="trigger_type" type="string" required>
+  `telegram.message.inbound`, `whatsapp.message.inbound` (both answered by a
+  text agent) or `whatsapp.call.inbound` (a voice agent, Twilio numbers only).
+  Anything else is a schema error.
+</ParamField>
+
+<ParamField path="agent_id" type="uuid">
+  The agent that answers. Required to enable; a trigger created without one is
+  valid and lands at `needs_setup`.
+</ParamField>
+
+<ParamField path="enabled" type="boolean" default="false">
+  The switch. Turning it on runs every check below **and** performs the channel
+  subscription.
+</ParamField>
+
+<ParamField path="reply_mode" type="string" default="public_reply">
+  What happens with the agent's answer. See [reply modes](#reply-modes).
+</ParamField>
+
+<ParamField path="metadata" type="object">
+  Yours. Stored and returned untouched.
+</ParamField>
+
+`provider_subscription_ref` is on the response too. It is written by the platform
+when the subscription is made — for Telegram, the callback URL registered with
+the Bot API — and there is no reason to send one.
+
+## What enabling checks
+
+Every one of these runs on create with `enabled: true`, and again on any `PATCH`
+that leaves the trigger enabled.
+
+| Requirement | Refusal |
+| --- | --- |
+| The integration is `active` | `400` `activate or reconnect this integration before enabling a trigger` |
+| The provider supports this trigger type | `400` `integration provider <provider> does not support trigger <type>` |
+| An agent is named | `400` `select an agent before enabling this trigger` |
+| The agent exists in this workspace | `404` `agent not found` |
+| The agent is **published** | `400` `publish the agent before enabling this trigger` |
+| Its published version is on the trigger's channel | `400` `<type> requires a published <channel> agent` |
+| No other enabled trigger of this type on this integration | `400` `this integration already has an enabled trigger of that type` |
+
+Two of them are worth dwelling on.
+
+**Published, not draft.** The check reads the agent's *published* version and its
+channel comes from that frozen snapshot. Editing the draft afterwards changes
+nothing until you publish; publishing reaches the channel on the next message.
+
+**One enabled trigger per integration and type.** Not one trigger — one *enabled*
+one. You can keep several rows around and switch which is live, but two agents
+cannot both answer the same bot, because there would be no rule for which of them
+speaks.
+
+## What enabling does
+
+For a provider with a managed subscription — Telegram — enabling the trigger
+**registers the webhook with the provider for you**. Nothing is pasted anywhere
+by hand. On success the trigger's `provider_subscription_ref` holds the callback
+URL and its status is `active`.
+
+If the registration fails, the trigger row is kept and moved to `error` rather
+than deleted, and the call returns the provider's own message:
+
+```
+502  Telegram webhook registration failed: <what the provider said>
+```
+
+Fix the cause and `PATCH` it enabled again; the registration is attempted afresh
+each time.
+
+Disabling or deleting a trigger tears the subscription down again, best effort,
+so the provider stops delivering. Disabling the integration does the same for
+every enabled trigger under it, and enabling it again re-registers them; deleting
+the integration takes its triggers with it. Messages sent while a trigger is off
+are not answered later.
+
+## Statuses
+
+`status` is **derived, not set**. It is recomputed from `enabled` and the agent on
+every write; the one value you can write yourself is `error`, for marking a
+binding you know is broken.
+
+| Status | What it means | How to clear it |
+| --- | --- | --- |
+| `active` | Enabled, everything validated, the subscription is in place. This is the only status that answers a message. | — |
+| `disabled` | Deliberately off. Everything checks out; nothing is subscribed. | `PATCH {"enabled": true}`. |
+| `needs_setup` | Not enabled, and it could not be: no agent is named, or the one named has never been published. | Set `agent_id`, publish that agent, then enable. |
+| `error` | The channel subscription failed while enabling — or you set it yourself. | Fix what the error message named, then `PATCH` it enabled again. |
+
+Deleting the agent an enabled trigger points at is refused with a `409` naming
+the integration. Repoint or disable the trigger first.
+
+## Reply modes
+
+| `reply_mode` | What happens |
+| --- | --- |
+| `public_reply` | The agent's reply is sent to the person on the channel. The default. |
+| `none` | The agent runs and its reply is stored on the conversation, but nothing is sent. The item settles `delivery_status: "skipped"`. |
+| `internal_note` | Post the reply as a private note where the provider has such a surface. |
+
+**`internal_note` is not usable on Telegram.** The Bot API has no private-note
+surface for a chat, so the reply is never sent and the item settles `skipped` with
+`provider telegram does not support reply_mode:internal_note`. The API accepts the
+value — the refusal happens at delivery — so choosing it produces a bot that
+appears configured and says nothing. On Telegram the two real choices are
+`public_reply` and `none`.
+
+`none` is genuinely useful: it lets a new agent shadow a channel, generating
+answers into the conversation record that you can read on the **Conversations**
+page without anybody outside seeing them.
+
+## Changing and removing one
+
+`PATCH /v1/integrations/{integration_id}/triggers/{trigger_id}` takes the same
+fields; omitted ones are left alone. Repointing at another agent, changing the
+reply mode and switching it off are all this one call.
+
+<CodeGroup>
+```bash cURL
+curl -X PATCH "https://api.in.talqing.com/v1/integrations/$INTEGRATION_ID/triggers/$TRIGGER_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "1b7d4c60-9e35-4a12-b8f3-6c0e5d29a417"}'
+```
+
+```typescript TypeScript
+await talqing.integrations.triggers.update({
+  integration_id,
+  trigger_id,
+  patchIntegrationTriggerRequest: {
+    agent_id: "1b7d4c60-9e35-4a12-b8f3-6c0e5d29a417",
+  },
+});
+```
+
+```python Python
+talqing.integrations.triggers.update(
+    integration_id,
+    trigger_id,
+    agent_id="1b7d4c60-9e35-4a12-b8f3-6c0e5d29a417",
+)
+```
+</CodeGroup>
+
+Repointing an enabled trigger re-runs every check against the new agent, so an
+unpublished replacement is refused rather than quietly taking the channel down.
+
+`DELETE /v1/integrations/{integration_id}/triggers/{trigger_id}` removes it
+permanently and unsubscribes. There is nothing to undo — create it again.
+
+`GET /v1/integrations/{integration_id}/triggers` lists them, newest activity
+first:
+
+<CodeGroup>
+```bash cURL
+curl "https://api.in.talqing.com/v1/integrations/$INTEGRATION_ID/triggers" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const page = await talqing.integrations.triggers.list({ integration_id });
+
+for (const trigger of page.items) {
+  console.log(trigger.trigger_type, trigger.status, trigger.agent_id);
+}
+```
+
+```python Python
+page = talqing.integrations.triggers.list(integration_id)
+
+for trigger in page["items"]:
+    print(trigger["trigger_type"], trigger["status"], trigger["agent_id"])
+```
+</CodeGroup>
+
+## What a fired trigger produces
+
+A message trigger starts a [chat](/channels/text-conversations) when a person
+with no open chat writes in, and every later message joins it until the chat
+ends. A call trigger starts a call. Either is one **session** on the
+conversation for that person, recorded like any other: which agent version ran,
+its usage, its cost, how it ended. The messages are items on the thread. Nothing about reading it back is
+channel-specific — see [conversations](/observability/conversations).
+
+Triggers are workspace resources like everything else, so they are **regional**:
+a trigger created against `api.in.talqing.com` exists only there.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Telegram" href="/channels/telegram">
+    The end-to-end walkthrough, and everything Telegram itself constrains.
+  </Card>
+  <Card title="Connecting" href="/integrations/connecting">
+    Creating the integration a trigger hangs off, and what each status means.
+  </Card>
+  <Card title="Chats" href="/channels/text-conversations">
+    What a message trigger starts, and how it ends.
+  </Card>
+</CardGroup>

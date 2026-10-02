@@ -1,0 +1,164 @@
+---
+title: "WhatsApp"
+description: "Put a published text agent on a WhatsApp number you have at Twilio or Gupshup."
+---
+
+A WhatsApp number answered by one of your text agents takes three things: a
+sender registered at your BSP (Twilio or Gupshup), an integration holding its
+credential, and a **trigger** binding inbound messages to a published agent.
+
+It is the same model as [Telegram](/channels/telegram): WhatsApp is a
+**channel** integration, never attached under `mcps`. The same integration also
+sends [template batches](/whatsapp/setup), and replies to those are answered by
+the same agent.
+
+Talqing does not register senders or create templates. Do both at your BSP —
+Twilio's WhatsApp Senders and Content Template Builder, or your Gupshup app —
+and connect the result here. Your BSP and Meta bill you directly for WhatsApp
+traffic; Talqing charges its usual [$0.0001 per answered
+message](/get-started/pricing-and-credits) when an agent replies.
+
+## Set it up
+
+<Steps>
+  <Step title="Connect the number">
+    In **WhatsApp → Numbers**, press **Connect number**.
+
+    - **Twilio** — the Account SID and the account's **Auth Token** (not an API
+      key: Twilio signs its webhooks with the Auth Token, and nothing else can
+      verify them). Press **Find numbers** and tick one or more; only `ONLINE`
+      senders can be chosen. Each becomes its own integration, and they share
+      one stored secret.
+    - **Gupshup** — the app ID, the app name exactly as Gupshup shows it, an API
+      key from the app's **Settings → API Keys**, and the WhatsApp number.
+
+    The credential is stored as a workspace [secret](/platform/secrets). The
+    connection is checked live before it is saved: Twilio must list the sender
+    as `ONLINE`, and Gupshup must accept the key for that app.
+
+    <CodeGroup>
+    ```bash Twilio
+    curl -X POST https://api.in.talqing.com/v1/integrations \
+      -H "Authorization: Bearer $TALQING_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "display_name": "Sales WhatsApp",
+        "provider": "whatsapp",
+        "credentials_ref": "{{secrets.TWILIO_AUTH_TOKEN}}",
+        "provider_account_info": {
+          "bsp": "twilio",
+          "account_sid": "AC0123456789abcdef0123456789abcdef",
+          "sender_e164": "+14155550100"
+        }
+      }'
+    ```
+
+    ```bash Gupshup
+    curl -X POST https://api.in.talqing.com/v1/integrations \
+      -H "Authorization: Bearer $TALQING_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "display_name": "Support WhatsApp",
+        "provider": "whatsapp",
+        "credentials_ref": "sk_…",
+        "provider_account_info": {
+          "bsp": "gupshup",
+          "app_id": "1365b6e3-d24b-4a1c-af29-2afad9dec64b",
+          "app_name": "AcmeSupport",
+          "sender_e164": "+919876543210"
+        }
+      }'
+    ```
+    </CodeGroup>
+
+    One number is one integration; a second connection for the same number is
+    refused. The number cannot be changed afterwards — connect the other number
+    instead. Rotating the credential is a `PATCH` of `credentials_ref`.
+  </Step>
+
+  <Step title="Choose who answers messages">
+    Pick a **published text agent** in the number's **Messages** cell — or
+    create the trigger over the API with `trigger_type: "whatsapp.message.inbound"`,
+    exactly as for [Telegram](/channels/telegram#set-it-up).
+
+    Talqing registers its webhook with the BSP for you. On Twilio it replaces
+    any URL set on that sender before. On Gupshup it appears in the app's
+    **Webhooks** tab, named `talqing-<integration id>`; leave it there.
+    Switching messages off, pausing or disconnecting the number removes it.
+  </Step>
+
+  <Step title="Message the number">
+    Send the number a WhatsApp message. On Twilio you see a typing indicator,
+    then the reply. The thread appears under **Conversations** with surface
+    `whatsapp`.
+  </Step>
+</Steps>
+
+## What the agent knows
+
+The contact is keyed on the sender and the customer
+(`whatsapp:+14155550100:+919876543210`). The customer's details are in userdata:
+
+| Variable | Value |
+| --- | --- |
+| `{{userdata.whatsapp.phone}}` | The customer's number, E.164 |
+| `{{userdata.whatsapp.profile_name}}` | Their WhatsApp profile name, when WhatsApp sends one |
+
+A customer who first heard from you through a [batch](/whatsapp/creating-a-batch)
+also carries that row's CSV columns, as `{{userdata.<column>}}`, and the template
+sits in the thread as the agent's own first message — its header, footer and
+buttons included, as text (`[Button: Book a demo → https://…]`).
+
+## One chat until it ends
+
+A person's messages all join one [chat](/channels/text-conversations) until it
+ends — there is no inactivity timeout. It ends when the agent runs
+[`end_call`](/tools/end-call), or when you call `POST /v1/chats/{id}/end`; their
+next message starts a new chat, in a new conversation unless the agent's
+[`conversation.context`](/agents/conversation-memory) is `transcript`.
+[Analysis](/observability/call-analysis) and the `session.completed` webhook
+happen when a chat ends, so give the agent an `end_call` tool.
+
+- **A reply to a template joins the template's conversation**, whatever
+  `context` says, so the agent sees what it is answering.
+- **Switching the Messages agent** while a chat is open ends that chat
+  (`close_reason: "replaced"`) on the person's next message, and the new agent
+  answers in a new one.
+- **A message to a number with no agent on Messages** is stored in the thread
+  and starts no chat.
+
+## What is delivered
+
+**Text only.** Images, voice notes, documents and stickers are logged and
+dropped — the agent is not told they arrived. **Replies are split** at
+WhatsApp's 4,096-character limit and sent in order.
+
+**The 24-hour window.** WhatsApp only lets a business send free-form messages
+within 24 hours of the customer's last message. An agent always replies inside
+it, because a reply answers a message. Starting a conversation takes an
+approved template — that is what [batches](/whatsapp/setup) are for.
+
+## Calls
+
+A Twilio number can also take WhatsApp calls, answered by a published **voice**
+agent on a second trigger, `whatsapp.call.inbound`. A call joins the same
+conversation as the chat. See [WhatsApp calls](/channels/whatsapp-calls).
+
+## `reply_mode`
+
+| Value | On WhatsApp |
+| --- | --- |
+| `public_reply` | The reply is sent. The default. |
+| `none` | The agent runs and its reply is recorded, but nothing is sent. |
+| `internal_note` | Not usable: WhatsApp has no private notes. The item settles `skipped`. |
+
+## When something fails
+
+| What you see | Why |
+| --- | --- |
+| `400` on connect: `… is not a WhatsApp sender on Twilio account …` | The number is not a sender on that account. |
+| `400` on connect: `Twilio reports sender … as OFFLINE` | Twilio senders go offline briefly after registration. Try again in a few minutes. |
+| `400` on connect: `Gupshup rejected the API key …` | Create a new key on the app's **Settings → API Keys**. |
+| Trigger `error` with `could not point the Twilio sender at Talqing` | Twilio refused the webhook update; the message says why. Fix it and enable again. |
+| Trigger `error` with `could not register Talqing's webhook with Gupshup` | Gupshup refused the subscription; the message says why. Fix it and enable again. |
+| A reply marked `failed` with `63016` | Outside the 24-hour window (the customer last wrote over a day ago). |

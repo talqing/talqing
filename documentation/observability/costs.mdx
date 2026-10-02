@@ -1,0 +1,322 @@
+---
+title: "Costs"
+description: "Provider spend versus the platform fee, what each of the five metered kinds is priced on, and how to read the credit ledger."
+---
+
+Two numbers sit beside every call, and blurring them is the fastest way to
+misread your own bill.
+
+| | What it is | Who charges it | Comes out of credits |
+| --- | --- | --- | --- |
+| **Provider cost** | What the models on that call cost: your LLM, STT, TTS, realtime and avatar usage, at the providers' own published rates | Your providers, on **your** keys, directly. It never passes through Talqing. | No |
+| **Platform fee** | What Talqing charges: a per-minute rate on a call's duration, or a per-message rate on a chat | Talqing | **Yes** |
+
+`total_charge` is the two added together, and it exists so you can see a call's
+full economics in one figure. **Only the platform fee is ever debited from your
+credit balance.** Debiting the provider cost would charge you a second time for
+spend that already went onto your own key — which is what strict
+bring-your-own-key means here. See [provider keys](/get-started/provider-keys).
+
+## The platform fee
+
+| Channel | Rate |
+| --- | --- |
+| Voice | **$0.0035 per minute** |
+| Video | **$0.01 per minute** |
+| Text | **$0.0001 per answered message** |
+
+On a call it is prorated by the second, not rounded up to a whole minute: a
+90-second voice call is charged $0.00525.
+
+**A [chat](/channels/text-conversations) is charged per answered message, not
+per minute** — a per-minute charge there would bill how promptly your customer
+replies rather than anything the agent did. An answered message is one whose turn
+finished `done`. A message superseded by a newer one (`canceled`) and one whose
+turn failed (`error`) are free, so the waiver below has nothing to do on text.
+
+The rate is decided by the channel the session ran on, and nothing else. Avatar
+time on a video call is provider cost on your own key, on top of this fee, not
+part of it.
+
+### The fee is waived on a failed call
+
+A call that failed keeps its **provider cost** — the providers ran and charged
+you regardless — and is charged **no platform fee**.
+
+A close reason counts as failed if it ends in `_failed`, or if it is one of:
+
+`error`, `stale`, `job_shutdown`, `job crashed`, `orphaned`, `unknown`,
+`avatar_start_failed`, `invalid_dispatch_metadata`, `missing_dispatch_metadata`,
+`unknown_tenant`, `missing_published_definition`, `rejected`,
+`insufficient_credits`.
+
+Everything else is a normal completion and is charged the fee — including a
+call with no close reason at all, and including `transferred`, which is a
+successful escalation rather than a failure. There are no substring heuristics:
+a reason with "error" in the middle of it is not a failure unless it is on this
+list. See [close reasons](/observability/close-reasons).
+
+<Warning>
+**Voicemail is an answered call.** An outbound call that reaches a voicemail
+greeting connects, runs, is recorded and is billed like any other. With
+[voicemail detection](/agents/voicemail) on, the agent hangs up after its message
+and the call ends as `voicemail` — short, but still billed. Without it, the agent
+talks to the machine until something else ends the call.
+</Warning>
+
+## The five metered kinds
+
+Every provider charge on a call is one of five kinds, and each is priced from
+the catalog entry of the exact model that ran.
+
+| Kind | Priced on |
+| --- | --- |
+| `llm` | Input tokens, cached input tokens and output tokens, each per 1M. Cached input is billed at the model's cached rate, or at the full input rate when it publishes no discount — a model that caches but does not discount still bills something. |
+| `stt` | Audio seconds and/or tokens per 1M, depending on how the provider sells it. |
+| `tts` | Characters, and/or audio seconds, and/or tokens per 1M. Most providers bill per character; the audio seconds they also report feed talk time, not the bill. |
+| `realtime` | A seven-way split — text in, cached text in, audio in, cached audio in, text out, audio out — plus a per-session-minute rate for the providers that sell the audio stream by the minute. A speech-to-speech model prices each modality separately, and the audio ones run several times the text ones. |
+| `avatar` | Wall-clock minutes, **idle included**, billed per second. The avatar is alive for the whole call whether or not it is speaking. |
+
+A call fills either `llm` + `stt` + `tts` **or** `realtime` — never both, because
+the agent ran one pipeline or the other. Avatar sits beside whichever it ran.
+
+Two flags qualify an LLM line rather than being a kind of their own:
+
+- `purpose` is `conversation` or `analysis`. [Post-call
+  analysis](/observability/call-analysis) prices through exactly the same path
+  as the call, so without this its cost would fold invisibly into the call's own
+  LLM line.
+- `priority` says the line ran in the provider's priority lane, which prices at
+  a different rate block on the same catalog entry. It is the reason one LLM
+  line can cost double the standard rate. See
+  [priority lane](/agents/priority-lane).
+
+Noise cancellation is not metered by Talqing at all.
+
+## Reading cost on one call
+
+`GET /v1/calls/{session_id}` returns `cost`:
+
+| Field | Meaning |
+| --- | --- |
+| `provider_cost` | The sum of every priced line. |
+| `platform_fee` | Talqing's per-minute charge for this call, or `0` if waived. |
+| `total_charge` | The two added. |
+| `duration_s` | The minutes the fee was computed over. |
+| `pricing_snapshot` | The full breakdown the biller **froze** at settlement: every line with its quantities and the rates it was charged at, grouped `llm` / `stt` / `tts` / `realtime` / `avatar`, plus the rate the fee was charged at. A call carries `platform_fee_per_minute`, and `platform_fee_per_message` and `answered_messages` are null; a chat carries those two, and `platform_fee_per_minute` is null. |
+
+The snapshot is never re-derived from today's catalog. A rate that changes next
+month does not move what an old call says it cost.
+
+<Warning>
+**`cost` is `null` until billing has computed it.** A call in progress shows no
+cost at all — never a partial estimate. `session.billing_status` says which state
+it is in, and only `computed` carries a `cost` object.
+</Warning>
+
+A chat is the exception, because it can stay open indefinitely: it is priced as
+it goes. `GET /v1/chats/{id}` returns `cost` while the chat is still open —
+what it has cost so far — and the figure is final once the chat has ended.
+
+| `billing_status` | Meaning |
+| --- | --- |
+| `pending` | Not priced yet. Normal on a live call; on a call that ended long ago it means the process running it died before it could price, and nothing will price it later. |
+| `computed` | Priced. `cost` and `pricing_snapshot` are both filled in. |
+| `unpriceable` | The call metered something the catalog prices none of. Billing refuses to bill it at $0 rather than hide the gap, so the call is quarantined with the reason attached and never charged. Contact support with the call id. |
+
+<CodeGroup>
+```bash cURL
+curl https://api.in.talqing.com/v1/calls/9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1 \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const call = await talqing.calls.get({
+  session_id: "9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1",
+});
+
+if (call.session.billing_status === "computed" && call.cost) {
+  console.log(call.cost.provider_cost, call.cost.platform_fee, call.cost.total_charge);
+
+  for (const line of call.cost.pricing_snapshot?.llm ?? []) {
+    console.log(line.provider, line.model, line.purpose, line.priority, line.cost);
+  }
+}
+```
+
+```python Python
+call = talqing.calls.get("9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1")
+
+if call["session"]["billing_status"] == "computed":
+    cost = call["cost"]
+    print(cost["provider_cost"], cost["platform_fee"], cost["total_charge"])
+
+    for line in cost["pricing_snapshot"]["llm"]:
+        print(line["provider"], line["model"], line["purpose"], line["cost"])
+```
+</CodeGroup>
+
+## Reading cost across the workspace
+
+`GET /v1/observability` returns a `cost` section over the range, for up to seven
+days at a time.
+
+| Field | Meaning |
+| --- | --- |
+| `priced_sessions` | How many sessions these figures cover. **Every cost figure is over this subset, not over `total_sessions`.** |
+| `provider_cost`, `platform_fee`, `total_cost` | The three totals for the range. |
+| `llm_cost`, `stt_cost`, `tts_cost`, `realtime_cost`, `avatar_cost` | Provider cost split by kind. |
+| `analysis_cost` | The part of `llm_cost` whose `purpose` is `analysis` — what post-call analysis is costing you. |
+| `priority_cost` | The part of `llm_cost` that ran in the priority lane. |
+| `llm_input_tokens`, `llm_cached_input_tokens`, `cache_hit_ratio` | How much of your input was served from the provider's prompt cache. A low ratio on a long-prompt agent is money on the floor. |
+| `lines` | One row per kind, provider and model, with its cost and its `share` of the total. |
+| `by_provider` | The same spend cut by provider, as a per-bucket series. |
+| `unpriceable_reasons` | One row per distinct message, with how many sessions hit it. Empty when nothing was quarantined. |
+
+`GET /v1/calls/stats` is the smaller question — `total_spend` and
+`avg_cost_per_call` over `priced_calls`, for a window that defaults to the last
+30 days. See [calls](/observability/calls).
+
+<CodeGroup>
+```bash cURL
+curl -G https://api.in.talqing.com/v1/observability \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "start_date=2026-08-24" \
+  --data-urlencode "end_date=2026-08-30"
+```
+
+```typescript TypeScript
+const report = await talqing.observability.get({
+  start_date: "2026-08-24",
+  end_date: "2026-08-30",
+});
+
+console.log(report.cost.total_cost, "over", report.cost.priced_sessions, "sessions");
+console.log("analysis:", report.cost.analysis_cost, "priority:", report.cost.priority_cost);
+```
+
+```python Python
+report = talqing.observability.get(start_date="2026-08-24", end_date="2026-08-30")
+
+print(report["cost"]["total_cost"], "over", report["cost"]["priced_sessions"], "sessions")
+for line in report["cost"]["lines"]:
+    print(line["kind"], line["provider"], line["model"], line["cost"], line["share"])
+```
+</CodeGroup>
+
+<Note>
+**Agent task runs are not in any of this.** A task is an agent nobody talks to;
+it writes no session row, so neither its runs nor its spend reach the
+observability endpoint or the calls list. Task spend appears on the task's own
+run history, and — for a task drafting an email campaign — on that batch's page.
+See [running tasks](/tasks/running-and-runs).
+</Note>
+
+## The credit ledger
+
+`GET /v1/billing/credits/ledger` is every movement of this region's balance,
+newest first, with what caused each. `GET /v1/billing/credits` is the balance
+itself, plus what it buys at today's rates.
+
+| `kind` | What it is | What explains it |
+| --- | --- | --- |
+| `signup_grant` | The starting balance for a new account. | Nothing — the kind is the whole explanation. |
+| `purchase` | A credit pack you bought. | `topup_id` |
+| `usage` | A session's **platform fee**, debited — when a call ends, and as a chat goes. | `session_id` |
+| `refund` | A purchase reversed. | `topup_id` |
+| `adjustment` | A human moving the balance, with a reason. | `note` |
+
+Every entry carries `amount` (signed — a `usage` row is negative),
+`balance_after`, and `created_at`.
+
+Three consequences of the ledger holding only the platform fee:
+
+- **A failed call writes no ledger row at all.** Its fee is zero, and a row
+  saying "we took nothing" is noise in a statement you have to read.
+- **A call is debited exactly once, ever.** Re-pricing a call — which is what
+  [backfilling analysis](/observability/call-analysis) does — cannot debit it
+  twice. The fee is a function of duration and channel alone, so a re-price
+  could not change the amount anyway. What a re-analysis *does* grow is your own
+  provider bill, on your own key.
+- **A chat can have several rows.** It is debited as it goes, each row covering
+  the messages answered since the last. They sum to answered messages × $0.0001,
+  and no message is ever debited twice.
+
+Balances are **per region**, because the debit commits in the same transaction
+as the call's money columns. You can hold credit in India and none in the US.
+Never read a balance without knowing which region it belongs to.
+
+<CodeGroup>
+```bash cURL
+curl -G https://api.in.talqing.com/v1/billing/credits/ledger \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "limit=50"
+```
+
+```typescript TypeScript
+const balance = await talqing.billing.credits.get();
+console.log(balance.balance, balance.voice_minutes_remaining);
+
+const page = await talqing.billing.credits.ledger({ limit: 50 });
+for (const entry of page.items) {
+  console.log(entry.created_at, entry.kind, entry.amount, entry.balance_after);
+}
+```
+
+```python Python
+balance = talqing.billing.credits.get()
+print(balance["balance"], balance["voice_minutes_remaining"])
+
+page = talqing.billing.credits.ledger(limit=50)
+for entry in page["items"]:
+    print(entry["created_at"], entry["kind"], entry["amount"], entry["balance_after"])
+```
+</CodeGroup>
+
+## Running out
+
+The check is `balance > 0` and nothing more — no reservation, no forecast of
+what a call might cost. It runs when you start a web call, place an outbound
+call, dial a batch recipient, take an inbound SIP call, or start a chat.
+
+At zero, starting a new call is refused with **HTTP 402**:
+
+> This workspace is out of credits. Add credits in Settings → Billing to start
+> new calls. Calls already in progress are unaffected.
+
+An inbound call refused this way is recorded with `close_reason:
+insufficient_credits`, and is never itself charged the fee it was refused for
+lacking.
+
+A chat is checked when it starts, and again when it picks back up after sitting
+idle — not on every message. Out of credit then, the agent does not run: the turn
+ends `error` with the message above, and nothing is sent on Telegram or WhatsApp.
+
+A call already running is never interrupted. Because of that the balance can end
+a call slightly negative from that call's own fee, and the next top-up pays the
+debt off first. An outbound batch that runs out **pauses without failing and
+without spending an attempt**, and resumes on its own when you top up.
+
+See [pricing and credits](/get-started/pricing-and-credits) for packs, checkout
+and the low-balance warning.
+
+## In the dashboard
+
+The call detail page has a **Cost** section: a proportion bar of where the
+provider cost went, then one row per priced line — kind, provider, model, the
+exact quantities and the rate each was charged at — with `priority` and
+`analysis` tagged on the lines they apply to. Under them sit provider cost, the
+platform fee with its formula (`$0.0035/min × 4m 12s`, or `waived — the call
+failed`), and the total.
+
+Money is shown to six decimal places throughout, because a real line can cost
+$0.000762 and anything shorter rounds it to nothing.
+
+<CardGroup cols={2}>
+  <Card title="Pricing and credits" href="/get-started/pricing-and-credits">
+    Packs, checkout, the signup grant and the zero-balance rules.
+  </Card>
+  <Card title="Provider keys" href="/get-started/provider-keys">
+    Which providers you bring a key for, and what fails without one.
+  </Card>
+</CardGroup>

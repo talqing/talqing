@@ -1,0 +1,220 @@
+---
+title: "Conversations"
+description: "The thread with one person across surfaces, the sessions inside it, and how to read a call that changed agents."
+---
+
+Calls are one half of the reading surface. Conversations are the other, and
+they are what you reach for when the question is about a **person** rather than
+about a single run.
+
+## Three words, kept straight
+
+| Term | What it is |
+| --- | --- |
+| **Conversation** | One bounded stretch of talking with one person on one surface — a web chat, a Telegram thread, or a single phone call. `surface` says which. |
+| **Call** | One voice or video session. A call always has a conversation; a conversation is not always a call. |
+| **Chat** | One text session, from its first message until something ends it. `GET /v1/chats/{id}` — see [chats](/channels/text-conversations). |
+| **Session** | One agent execution inside a conversation. Each call and each chat is one session. |
+
+A person can have many conversations. What ties them together is
+`contact_key` — your own stable id for that person — not `conversation_id`,
+which is new on every call for an agent that starts clean.
+
+So: to read one run, open the call. To read a person's history, list
+conversations by `contact_key`. To find out *which agent version* handled a
+given turn, list the conversation's sessions.
+
+## Listing conversations
+
+`GET /v1/conversations` returns conversations across every channel, most
+recently active first.
+
+| Parameter | Type | Meaning |
+| --- | --- | --- |
+| `limit` | integer, 1–200 | Default `100`. |
+| `offset` | integer | Default `0`. |
+| `agent_id` | uuid | Conversations this agent ran a session in, on any channel. |
+| `contact_key` | string | Only this person's threads — their whole history with you. After "a new conversation per call", this is how you reach a caller's whole history. |
+
+Only customer threads are listed: web, phone (`sip`) and messaging
+integrations. CoPilot threads are not conversations.
+
+<CodeGroup>
+```bash cURL
+curl -G https://api.in.talqing.com/v1/conversations \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "contact_key=user-42"
+```
+
+```typescript TypeScript
+const page = await talqing.conversations.list({ contact_key: "user-42" });
+
+for (const thread of page.items) {
+  console.log(thread.id, thread.surface, thread.last_message_at, thread.summary);
+}
+```
+
+```python Python
+page = talqing.conversations.list(contact_key="user-42")
+
+for thread in page["items"]:
+    print(thread["id"], thread["surface"], thread["last_message_at"])
+```
+</CodeGroup>
+
+## One conversation
+
+`GET /v1/conversations/{conversation_id}` returns the header: `agent_id` and
+`agent_name` for the agent of its newest session, `surface`,
+`last_message_text`, `last_message_at`, `summary`, `metadata` and `userdata`.
+
+`userdata` here is the **contact's** bag, not the thread's. It is what your
+agents' tools have published about this person across every conversation with
+them, so every thread with the same `contact_key` shows the same value. For
+what one call ended up holding, read `session.userdata` on that call —
+[calls](/observability/calls). The two are different questions and the API
+keeps them apart.
+
+`{{vars.*}}` values belong to a session, not to the conversation: each row of
+the sessions list below carries the `vars` that call or chat was started with.
+
+## The transcript
+
+`GET /v1/conversations/{conversation_id}/items` is what was said.
+
+| Parameter | Meaning |
+| --- | --- |
+| `limit` | 1–500, default `200`. |
+| `offset` | Default `0`. |
+| `order` | `asc` (default) reads from the beginning. `desc` returns the newest window, still chronological within the page — which is what you want to see an agent's latest reply. |
+
+Each item carries `direction` (inbound or outbound), `type`, `role`, `text`,
+`attachments`, `metrics` for the turn, and — on an outbound one —
+`delivery_status` and `delivery_error`, which say whether it actually landed.
+An inbound message on a chat also carries `turn_status` (`running`, `done`,
+`error` or `canceled`) and `turn_error`: where the turn it started stands.
+It also stamps its own `agent_id` and `agent_version`, so a thread that handed
+off reads correctly line by line.
+
+## Which version answered
+
+`GET /v1/conversations/{conversation_id}/sessions` lists the agent sessions
+behind a thread, newest first. **This is how you read a multi-agent call**: one
+row per execution, each naming the agent and the version that ran it.
+
+| Field | Meaning |
+| --- | --- |
+| `id` | The session. Pass it to `GET /v1/calls/{session_id}` for the full call, or `GET /v1/chats/{id}` for a chat. |
+| `agent`, `agent_version`, `agent_version_id` | Which agent, and which version ran. `agent_version` is `"draft"` when it ran the unpublished draft. |
+| `type`, `channel`, `status` | `WEB` / `TEXT` / `SIP_INBOUND` / `SIP_OUTBOUND`; `voice` / `video` / `text`; the run's terminal state. |
+| `vars` | The `{{vars.*}}` values this session was started with. |
+| `close_reason`, `close_reason_label` | How it ended, as a code and as a sentence. |
+| `analysis` | What [analysis](/observability/call-analysis) made of it: `status`, `summary`, `outcome`, `fields`. The same object `get_call` and the webhook carry. |
+| `usage`, `cost`, `duration_s` | This session's own metering, its three cost figures and its length. `cost` is null until billing has computed it. |
+| `metrics` | The sealed latency bag: `e2e_latency`, `llm_node_ttft`, `tts_node_ttfb`, `transcription_delay`, `end_of_turn_delay` and `turns`. On a chat, `e2e_latency` is a message arriving until the first token back. |
+| `error` | Set when the run died on an unhandled error. |
+| `started_at`, `ended_at` | Its window. |
+
+<CodeGroup>
+```bash cURL
+curl https://api.in.talqing.com/v1/conversations/4d2e9a71-58c3-4b0e-8f16-2a9d3c7e1b45/sessions \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const sessions = await talqing.conversations.sessions.list({
+  conversation_id: "4d2e9a71-58c3-4b0e-8f16-2a9d3c7e1b45",
+});
+
+for (const run of sessions.items) {
+  console.log(run.channel, run.status, run.agent_id, run.started_at);
+}
+```
+
+```python Python
+sessions = talqing.conversations.sessions.list(
+    "4d2e9a71-58c3-4b0e-8f16-2a9d3c7e1b45"
+)
+
+for run in sessions["items"]:
+    print(run["channel"], run["status"], run["agent_id"], run["started_at"])
+```
+</CodeGroup>
+
+## Did this thread go well?
+
+`GET /v1/conversations/{conversation_id}/snapshot` returns one verdict over the
+whole thread, in the same shape a call's `snapshot` uses. `issues` names every
+problem found across every session — errors, failed tools, slow responses, a
+bad connection — and `ok` is `true` when there were none. Cost and duration sum
+across sessions; latency and tooling come from the merged timeline.
+
+Cost sums only the priced sessions and stays null when none are priced, so a
+partly-priced thread never reports a total that silently omits the rest.
+
+## Correcting what an agent knows
+
+`PATCH /v1/conversations/{conversation_id}` edits `summary`, `userdata` or
+`metadata`.
+
+Writing `userdata` changes what the agent sees as `{{userdata.field}}` on the
+next turn — the way to correct or preload what it knows from outside a call.
+**It belongs to the contact**, so it reaches every conversation with that
+person, not just this one. Each field you send replaces that whole object;
+omitted fields are left alone.
+
+<CodeGroup>
+```bash cURL
+curl -X PATCH \
+  https://api.in.talqing.com/v1/conversations/4d2e9a71-58c3-4b0e-8f16-2a9d3c7e1b45 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"userdata": {"plan": "enterprise", "account_id": "AC-8812"}}'
+```
+
+```typescript TypeScript
+await talqing.conversations.update({
+  conversation_id: "4d2e9a71-58c3-4b0e-8f16-2a9d3c7e1b45",
+  patchConversationRequest: {
+    userdata: { plan: "enterprise", account_id: "AC-8812" },
+  },
+});
+```
+
+```python Python
+talqing.conversations.update(
+    "4d2e9a71-58c3-4b0e-8f16-2a9d3c7e1b45",
+    userdata={"plan": "enterprise", "account_id": "AC-8812"},
+)
+```
+</CodeGroup>
+
+## Watching one happen
+
+`GET /v1/conversations/{conversation_id}/events` is a Server-Sent Events stream
+that opens with a `conversation.snapshot` frame — the conversation and its
+items — and then pushes `item.created`, `item.delivery_updated`, `turn` and
+`turn.failed`, and `assistant.started` / `assistant.delta` /
+`assistant.completed` as a reply is generated. Nothing on the stream is
+canonical: a dropped frame is recovered by reconnecting, which re-sends the
+snapshot, or by reading the items back. The full frame reference is on
+[streaming](/api-reference/streaming). To get one chat reply as it is generated,
+send the message with `stream: true` instead — see
+[chats](/channels/text-conversations#stream-the-reply).
+
+## In the dashboard
+
+**Conversations** is the inbox: one row per thread with its surface, its agent,
+the last message and when it arrived, filterable by agent. Opening one shows
+the transcript with the health verdict at the top, the sessions behind it, and
+per-turn latency for each assistant reply. It follows a live thread over the
+event stream, so a reply appears as it is generated rather than on a refresh.
+
+<CardGroup cols={2}>
+  <Card title="Calls" href="/observability/calls">
+    One voice or video session at full resolution.
+  </Card>
+  <Card title="Conversation memory" href="/agents/conversation-memory">
+    What a new call knows about earlier ones with the same person.
+  </Card>
+</CardGroup>

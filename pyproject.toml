@@ -1,0 +1,25 @@
+[project]
+name = "talqing-dev"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "ruff==0.16.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+extend-exclude = [
+  ".codex",
+]
+
+[tool.ruff.lint]
+# Ruff 0.16 broadened its implicit default from ~59 rules to ~413. State the
+# previous default so a version bump cannot silently change lint policy for the
+# trees this config governs (clients/, openapi/). backend/
+# selects its own rules and is unaffected either way.
+select = ["E4", "E7", "E9", "F"]

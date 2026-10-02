@@ -1,0 +1,429 @@
+---
+title: "Batch calling"
+description: "Call a list of people with one agent, on a schedule, with retries, concurrency and a circuit breaker."
+---
+
+A batch calls a *list* of people rather than one. It is an agent, one of your
+outbound-capable numbers, a list of recipients and a schedule — and it is **the
+most expensive operation on this platform**, because a single request to it can
+place thousands of billable calls.
+
+It is also the only way to schedule a call for later. A single call at a future
+time is a one-row batch.
+
+<Warning>
+Two things to know before you create one, because discovering either from an
+invoice is the version nobody forgives.
+
+- **Voicemail is answered and billed unless the agent detects it.** Turn on
+  [`voicemail_detection`](/agents/voicemail) on the agent: a call that reaches a
+  machine then ends as `voicemail`, the recipient is retried like a missed call,
+  and `counts.voicemail` says how many. Without it, voicemail counts as reached
+  and is never retried.
+- **Every call runs your agent's current published version.** Republishing
+  mid-campaign changes every call placed after that moment, including the
+  remainder of a batch that has been running for an hour. A publish the batch
+  could not dial with — a channel other than `voice`, or a new required
+  variable its `vars` do not supply — is refused until the batch is over.
+</Warning>
+
+## Policy and the recipient list
+
+A batch is two things, and keeping them apart explains most of its behaviour.
+
+| | What it is | What changes it |
+| --- | --- | --- |
+| **Policy** | The schedule, business hours, concurrency, agent, number and retry rule. | `PATCH /v1/calls/batches/{batch_id}` at any time while the batch is `scheduled`, `running` or `paused`. The next dial picks it up. |
+| **Recipient list** | The work. One row per person: who was called, how it went, how many attempts. | `POST .../recipients` appends. Nothing else edits a row. |
+
+A policy change never revisits anyone already called, and calls already in
+flight finish under the policy they were dispatched with.
+
+## Creating one
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/calls/batches \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "October renewals",
+    "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    "from_phone_number_id": "8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+    "timezone": "Asia/Kolkata",
+    "calling_window": { "start": "10:00", "end": "18:00", "days": [1, 2, 3, 4, 5] },
+    "max_concurrency": 3,
+    "max_attempts": 2,
+    "retry_after_minutes": 45,
+    "recipients": [
+      { "to": "+919876543210", "userdata": { "first_name": "Priya", "policy": "NW-40182" } },
+      { "to": "+919812345678", "userdata": { "first_name": "Arjun", "policy": "NW-40311" } }
+    ]
+  }'
+```
+
+```typescript TypeScript
+const batch = await talqing.calls.batches.create({
+  createCallBatchRequest: {
+    name: "October renewals",
+    agent_id: "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    from_phone_number_id: "8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+    timezone: "Asia/Kolkata",
+    calling_window: { start: "10:00", end: "18:00", days: [1, 2, 3, 4, 5] },
+    max_concurrency: 3,
+    max_attempts: 2,
+    retry_after_minutes: 45,
+    recipients: [
+      { to: "+919876543210", userdata: { first_name: "Priya", policy: "NW-40182" } },
+      { to: "+919812345678", userdata: { first_name: "Arjun", policy: "NW-40311" } },
+    ],
+  },
+});
+console.log(batch.status, batch.next_dial_at);
+```
+
+```python Python
+batch = talqing.calls.batches.create(
+    name="October renewals",
+    agent_id="9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    from_phone_number_id="8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+    timezone="Asia/Kolkata",
+    calling_window={"start": "10:00", "end": "18:00", "days": [1, 2, 3, 4, 5]},
+    max_concurrency=3,
+    max_attempts=2,
+    retry_after_minutes=45,
+    recipients=[
+        {"to": "+919876543210", "userdata": {"first_name": "Priya", "policy": "NW-40182"}},
+        {"to": "+919812345678", "userdata": {"first_name": "Arjun", "policy": "NW-40311"}},
+    ],
+)
+print(batch["status"], batch["next_dial_at"])
+```
+</CodeGroup>
+
+Validation is all-or-nothing and reports every bad row at once, not the first:
+an unparseable number, a number that appears twice in the payload, a reserved
+`userdata` key. Numbers are normalized against the region of the number you are
+dialling **from**, the same rule as a single [outbound
+call](/telephony/outbound-calls).
+
+## Personalization is `userdata`
+
+Each recipient carries `to` plus a flat map of strings that becomes that call's
+session state. `{{userdata.first_name}}` in the agent's prompt or greeting is
+that person's name.
+
+Values are strings on purpose: substitution is textual, and a spreadsheet cell
+reading `007` is a reference number, not the integer seven. An empty value is
+dropped rather than stored, so `{{userdata.first_name}}` on a row with no name
+resolves to nothing and the greeting still reads as written.
+
+<Note>
+**There are no per-recipient overrides of anything else.** One batch is one
+agent, one number, one clock. If half your list needs a different agent, that is
+two batches.
+</Note>
+
+Batch-level `vars` exists too — one bag copied onto every call the campaign
+places, for configuring the session rather than describing the person. It is
+fixed at create; `PATCH` cannot change it.
+
+## Scheduling
+
+| Field | Meaning |
+| --- | --- |
+| `timezone` | The batch's clock. A valid IANA zone, required. It interprets `calling_window` and every time the dashboard renders for this batch, so a list is dialled on its recipients' hours rather than on whoever is reading the page. |
+| `start_at` | When it begins. Omit it to start on the next pass. At most 90 days ahead. It can only be changed while the batch is still `scheduled`. |
+| `calling_window` | `{start, end, days}` — the hours and ISO weekdays (1 = Monday) it may dial in. Omit for any hour, any day. |
+| `next_dial_at` | Read-only: when it will next place a call. This is how you tell "waiting for Monday" apart from "stuck". |
+| `next_dial_reason` | Read-only: why it is waiting — `start`, `window` or `daily_cap`. Null whenever `next_dial_at` is. |
+
+A window may cross midnight, and the days then name **the evening it starts
+on**: `21:00`–`06:00` on `days: [5]` runs Friday 21:00 through Saturday 06:00.
+Saturday evening is closed.
+
+So a list uploaded at 23:00 with a `10:00`–`18:00` weekday window starts at
+10:00 the next working morning, stops at 18:00, and resumes at 10:00 the day
+after, untouched in between. `next_dial_at` says exactly when.
+
+`next_dial_at` is `null` when the batch is dialling now, when a human paused it,
+or when it is over — all three of which the status already tells you.
+
+## Limits and defaults
+
+| Field | Range | Default | Notes |
+| --- | --- | --- | --- |
+| `recipients` | 1–10,000 | — | Per request. `POST .../recipients` takes another 10,000, so a batch can grow past that in several calls. |
+| `max_concurrency` | 1–10 | **1** | Calls in flight at once. One by default: the safe reading of an unstated intention for something that spends money. |
+| `max_attempts` | 1–5 | **1** | Attempts per recipient, including the first. |
+| `retry_after_minutes` | 5–1440 | **30** | How long after a failed attempt the next one may be placed. |
+| `dial_gap_seconds` | 0–3600 | **0** | Minimum seconds between *starting* two calls. 0 dials as lines free. The batch is worked in passes 30 seconds apart, so a call can start up to 30 seconds after its gap ends. |
+| `dial_daily_cap` | object \| null | **null** | Calls placed per local day, **retries included**. Null is uncapped. |
+| `start_at` | up to 90 days ahead | now | |
+| `name` | 1–200 characters | — | |
+
+## Pace and warming up a caller ID
+
+`dial_daily_cap` is `{"kind": "fixed", "limit": 200}`, or a ramp:
+`{"kind": "ramp", "start": 10, "end": 50, "step": 1, "interval_days": 1}` places
+10 calls a day, then 11, 12 … up to 50. `start` ≥ 1, `end` > `start`, `step` ≥ 1,
+`interval_days` 1–30.
+
+A ramp advances on **days the batch actually dialled**, never on the calendar: a
+closed window, a weekend or a pause earns nothing. Editing one keeps its progress
+unless you change `start`. It is per batch — two batches on one number each ramp
+on their own.
+
+The batch reports `dialed_today` against `dial_daily_cap_today`, the limit in
+force today. When it is spent, `next_dial_at` is the next local midnight and
+`next_dial_reason` is `daily_cap`.
+
+## Retries, by outcome
+
+Whether a recipient is tried again depends on how the last attempt ended. The
+close reason is on the recipient row as `last_close_reason`, with a plain
+sentence in `last_close_reason_label`.
+
+| Outcome | Retried? |
+| --- | --- |
+| The call was **completed** — anyone answered, including a machine | **Never.** Terminal forever. Nobody is called twice. |
+| Unreachable: busy, no answer, temporarily unavailable, ring timeout | Yes, after `retry_after_minutes`, up to `max_attempts`. |
+| Unreachable: **the number is not in service**, or **the person declined** | No. The carrier reached them and never will. |
+| A carrier fault | Yes. |
+| A configuration problem, a platform fault, or an unrecognised ending | No. Final. |
+
+A dial that could not even be placed still spends an attempt — otherwise a
+permanently broken row would retry for ever.
+
+<Note>
+**A completed call is terminal forever.** That outranks every retry rule, and it
+is what guarantees nobody on your list is called twice.
+</Note>
+
+## The circuit breaker
+
+A batch stops itself after **ten consecutive** setup-style failures. The count
+is rolling, not cumulative, and **any success resets it to zero** — so a batch
+that ran cleanly for 5,000 rows and then met an expired credential still stops
+after ten, rather than burning the other 5,000.
+
+What counts: a carrier fault, a configuration problem, a platform fault, or an
+ending nothing has mapped. Also the failures that happen before a recipient is
+even claimed — an unpublished agent, a deleted number, a carrier account that is
+no longer ready.
+
+What never counts: **busy signals and unanswered phones**. A run of those is a
+phone list, not a fault, and stopping the batch over it would be the breaker
+firing on the very thing it exists to protect.
+
+When it trips, the batch goes to `failed` and `failure_reason` carries the last
+thing that went wrong. Recipients that were never attempted read as `canceled`.
+
+## Running out of credit
+
+<Note>
+Running out of credit **stops a batch dialling**. It does not fail it, it does
+not move it to `paused`, and it does not spend an attempt on anybody — the check
+is per pass, not per recipient.
+</Note>
+
+The batch stays `running`, dials nothing, and `failure_reason` says the
+workspace is out of credits. Top up and it resumes on its own; there is no
+button to press, and the reason clears on the next successful dial. This is
+deliberately not a breaker case: being out of credit fixes itself with a
+payment, and failing the batch permanently would mean a top-up could not undo
+it.
+
+## Steering a running batch
+
+| Action | Effect |
+| --- | --- |
+| `POST .../pause` | Stops claiming new recipients. Calls already ringing or connected **run to their end**. Allowed from `scheduled`, `running` or `completed` — pausing a completed batch holds people you add until you resume. |
+| `POST .../resume` | Carries on from where it stopped. A batch whose `start_at` is still in the future goes back to **`scheduled`**, not `running` — pausing and resuming is never a way to start early. |
+| `POST .../cancel` | Final. Everyone not yet called immediately reads as `canceled`. Calls already in progress are **not** dropped; the batch finishes once they land. |
+| `PATCH` | Policy edits, while `scheduled`, `running`, `paused` or `completed`. |
+
+**Deleting.** `DELETE /v1/calls/batches/{batch_id}` removes a `completed`,
+`canceled` or `failed` batch and its recipient list for good; it is refused
+while the batch is live or one of its calls is still in progress. The calls it
+made stay under **Calls**, with their recordings and costs. In the dashboard,
+**Delete batch** is on a finished batch.
+
+<CodeGroup>
+```bash cURL
+curl -sS -X POST https://api.in.talqing.com/v1/calls/batches/2d5f7a91-4e63-4b08-9c17-8fa2e6b34d05/pause \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+await talqing.calls.batches.pause({ batch_id: "2d5f7a91-4e63-4b08-9c17-8fa2e6b34d05" });
+await talqing.calls.batches.resume({ batch_id: "2d5f7a91-4e63-4b08-9c17-8fa2e6b34d05" });
+```
+
+```python Python
+talqing.calls.batches.pause("2d5f7a91-4e63-4b08-9c17-8fa2e6b34d05")
+talqing.calls.batches.resume("2d5f7a91-4e63-4b08-9c17-8fa2e6b34d05")
+```
+</CodeGroup>
+
+## Adding people to a batch
+
+`POST /v1/calls/batches/{batch_id}/recipients` appends to any batch that is not
+`canceled` or `failed`. The new rows are called after the existing ones, at the
+batch's own pace and hours. A `completed` batch goes back to `running`, so a
+batch can be a standing campaign your CRM pushes leads into every day.
+
+Numbers the batch already holds, and numbers repeated within the upload, are
+**skipped and reported** — re-uploading a list you exported again from your CRM
+never calls anyone twice. `row_number` in `skipped` and in a 400 is the row's
+position in your request, starting at 1.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/calls/batches/2d5f7a91-4e63-4b08-9c17-8fa2e6b34d05/recipients \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "recipients": [{ "to": "+919812345678", "userdata": { "first_name": "Arjun" } }] }'
+```
+
+```typescript TypeScript
+const added = await talqing.calls.batches.recipients.add({
+  batch_id: "2d5f7a91-4e63-4b08-9c17-8fa2e6b34d05",
+  addRecipientsRequest: {
+    recipients: [{ to: "+919812345678", userdata: { first_name: "Arjun" } }],
+  },
+});
+console.log(added.added, added.skipped, added.total_recipients);
+```
+
+```python Python
+added = talqing.calls.batches.recipients.add(
+    "2d5f7a91-4e63-4b08-9c17-8fa2e6b34d05",
+    recipients=[{"to": "+919812345678", "userdata": {"first_name": "Arjun"}}],
+)
+print(added["added"], added["skipped"], added["total_recipients"])
+```
+</CodeGroup>
+
+## Watching it
+
+`GET /v1/calls/batches/{batch_id}` carries live counts and, when something is
+wrong, `failure_reason`.
+
+```json
+{
+  "status": "running",
+  "counts": { "total": 4200, "pending": 3871, "dialing": 3, "completed": 302, "failed": 24, "canceled": 0 },
+  "dialed_today": 329,
+  "dial_daily_cap_today": null,
+  "next_dial_at": null,
+  "next_dial_reason": null,
+  "failure_reason": null
+}
+```
+
+| Where to look | What it answers |
+| --- | --- |
+| `status` + `next_dial_at` + `next_dial_reason` | Is it dialling, waiting for the clock or today's limit, or stopped? |
+| `failure_reason` | Why it is not dialling, or why the breaker stopped it. |
+| `GET .../recipients` | Per person: `status`, `attempts`, `last_close_reason`, `last_close_reason_label`, and `session_id` — the most recent attempt's call. Filter with `?status=failed`. |
+| `GET /v1/calls?batch_id=…` | The calls themselves: transcripts, recordings, cost. |
+| Webhooks `batch.started`, `batch.completed`, `batch.failed` | The three moments worth reacting to. `batch.completed` fires again each time people added later have all been handled. See [webhooks](/observability/webhooks). |
+
+<CodeGroup>
+```bash cURL
+curl -sS "https://api.in.talqing.com/v1/calls/batches/2d5f7a91-4e63-4b08-9c17-8fa2e6b34d05/recipients?status=failed" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+
+curl -sS "https://api.in.talqing.com/v1/calls?batch_id=2d5f7a91-4e63-4b08-9c17-8fa2e6b34d05" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const failed = await talqing.calls.batches.recipients.list({
+  batch_id: "2d5f7a91-4e63-4b08-9c17-8fa2e6b34d05",
+  status: "failed",
+});
+for (const r of failed.items) {
+  console.log(r.to, r.attempts, r.last_close_reason_label);
+}
+
+const calls = await talqing.calls.list({ batch_id: "2d5f7a91-4e63-4b08-9c17-8fa2e6b34d05" });
+```
+
+```python Python
+failed = talqing.calls.batches.recipients.list(
+    "2d5f7a91-4e63-4b08-9c17-8fa2e6b34d05", status="failed"
+)
+for r in failed["items"]:
+    print(r["to"], r["attempts"], r["last_close_reason_label"])
+
+calls = talqing.calls.list(batch_id="2d5f7a91-4e63-4b08-9c17-8fa2e6b34d05")
+```
+</CodeGroup>
+
+## The batch runs as the person who created it
+
+Every dialling pass re-authorizes as the batch's creator, exactly as an HTTP
+request from them would.
+
+<Warning>
+**A creator who leaves the workspace, or is demoted below the editor role, stops
+their own batch.** The next pass records a configuration failure naming them,
+and ten of those in a row trip the breaker. Before someone leaves, hand their
+running campaigns over by re-creating them under an account that will still be
+there.
+</Warning>
+
+## Statuses
+
+**Batch**
+
+| Status | Meaning |
+| --- | --- |
+| `scheduled` | Created, waiting for `start_at`. |
+| `running` | Dialling, or inside its hours and waiting for a free slot. |
+| `paused` | Someone paused it. Live calls still finish. |
+| `completed` | Everyone added so far was handled. Adding more resumes it. |
+| `canceled` | Someone cancelled it. Final. |
+| `failed` | The circuit breaker stopped it. `failure_reason` says why. |
+
+**Recipient**
+
+| Status | Meaning |
+| --- | --- |
+| `pending` | Not yet called, or waiting out `retry_after_minutes`. |
+| `dialing` | A call is in flight for this row. |
+| `completed` | Reached. Terminal forever. |
+| `failed` | Every permitted attempt is spent, or the outcome was final. |
+| `canceled` | Never attempted, and never will be — the batch was cancelled or the breaker stopped it. |
+
+A recipient of a cancelled batch reads `canceled` even though its row was never
+touched. A row still `dialing` when you cancel keeps that status: the call is
+real and still on the phone.
+
+## Pinning a version instead
+
+If you create a batch with any of the per-call configuration fields —
+`agent_version`, `agent_override`, an inline `agent` or an `agent_team` — that
+cast is resolved and frozen when the batch is created, and a republish does
+**not** reach it. That is the opposite of the default behaviour in the warning at
+the top of this page, and it is the one way to hold a campaign steady across a
+publish. Re-pointing a batch at a different `agent_id` with `PATCH` clears any
+such cast and returns it to "the current published version". See [per-call
+configuration](/agents/per-call-configuration).
+
+A batch stores that frozen plan on every call it places. Keep it small: attach
+an [FAQ](/agents/faqs) by `faq_id` rather than defining it inline, or its
+entries are stored once per recipient.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Outbound lead qualification" href="/guides/outbound-lead-qualification">
+    A campaign end to end, from CSV to results.
+  </Card>
+  <Card title="Call analysis" href="/observability/call-analysis">
+    Summaries, outcomes and structured fields across a whole batch.
+  </Card>
+</CardGroup>

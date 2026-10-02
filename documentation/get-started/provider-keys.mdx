@@ -1,0 +1,140 @@
+---
+title: "Provider keys"
+description: "Talqing runs your agents on your own provider accounts. Add a key for every provider your agents use."
+---
+
+Talqing holds no provider credentials of its own. Every model an agent runs — the LLM, the speech-to-text, the voice, the avatar — is called with **your** key, on **your** account, and the provider bills you directly. Talqing charges its platform fee and nothing else, so there is no marked-up model price to reconcile against.
+
+That makes adding provider keys the first thing a new workspace has to do. An agent cannot be published until every provider it names has a key.
+
+## The ten providers
+
+Only an **ADMIN** can add, replace or remove a key. Any member can see which providers are configured.
+
+| Provider | Used for | Where the key comes from |
+| --- | --- | --- |
+| xAI | LLM, realtime, speech-to-text, text-to-speech | `console.x.ai` |
+| OpenAI | LLM, realtime, speech-to-text, text-to-speech | `platform.openai.com` |
+| Gemini | LLM, realtime | Google AI Studio (`aistudio.google.com`) |
+| Sarvam | Speech-to-text, text-to-speech | `dashboard.sarvam.ai` — Sarvam calls it an **API subscription key** |
+| Raya | Speech-to-text, text-to-speech | `getraya.app` |
+| Soniox | Speech-to-text, text-to-speech | `console.soniox.com` |
+| ElevenLabs | Speech-to-text, text-to-speech | `elevenlabs.io`, under your profile |
+| Deepgram | Speech-to-text, text-to-speech | `console.deepgram.com` |
+| Anam | Video avatars | `lab.anam.ai` |
+| ai-coustics | Noise cancellation | `developers.ai-coustics.com` |
+
+<Note>
+**ai-coustics is not an API key.** It issues a signed SDK licence of the form `<payload>.<signature>`, and that whole string is what you paste. A bare API key copied out of the middle of it is rejected with a message telling you so.
+</Note>
+
+Which model belongs to which provider is in the [model catalog](/agents/models); voices are in [voices](/agents/voices) and avatars in [video avatars](/agents/video-avatars).
+
+## Adding a key
+
+In the dashboard: **Build → BYOK**. The page lists all ten providers, whether each has a key, and — for the four providers that publish one — the name of the account behind it. Click a row, paste the key, save.
+
+Over the API it is `PUT /v1/byok/{provider}`, where `{provider}` is the lowercase id from the table above (`openai`, `elevenlabs`, `aicoustics`, …).
+
+<CodeGroup>
+```bash cURL
+curl -X PUT https://api.in.talqing.com/v1/byok/openai \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "api_key": "sk-proj-…" }'
+```
+
+```typescript TypeScript
+const key = await talqing.providerKeys.set({
+  provider: "openai",
+  setProviderKeyRequest: { api_key: process.env.OPENAI_API_KEY! },
+});
+
+console.log(key.account_label, key.api_key_hint);
+```
+
+```python Python
+import os
+
+key = talqing.provider_keys.set("openai", api_key=os.environ["OPENAI_API_KEY"])
+
+print(key["account_label"], key["api_key_hint"])
+```
+</CodeGroup>
+
+### The key is proved before it is stored
+
+Talqing calls the provider with the key you just pasted and refuses to write the row unless the provider accepts it. There are exactly three outcomes:
+
+| Outcome | Status | What is stored |
+| --- | --- | --- |
+| The provider accepted the key | `200` | The new key, encrypted, plus the account name if the provider gave one |
+| The provider rejected the key | `400` — *"OpenAI rejected this API key (HTTP 401)."* | Nothing |
+| The provider did not answer | `502` — *"Could not reach OpenAI to verify this API key. Try again."* | Nothing |
+
+Because nothing is written on a failure, **rotating onto a bad key leaves the working key in place**. Your agents keep running on the old key while you go and find the right one. The same is true of a provider outage: a 502 here means we could not check, not that your key is bad, and retrying costs one click.
+
+xAI is the strictest of the ten. It reports a key it still recognizes but will not serve, so a blocked or disabled key is refused with *"xAI accepted this API key but this key is blocked."* rather than stored and left to fail on the first turn.
+
+### Keys are write-only
+
+A stored key is never returned, by any endpoint, to anyone. A read gives you the last four characters and the account label:
+
+```json
+{
+  "items": [
+    {
+      "provider": "openai",
+      "api_key_hint": "…8f2a",
+      "account_label": "Northwind Labs",
+      "created_at": "2026-08-04T09:12:44.113Z",
+      "updated_at": "2026-08-21T16:02:07.884Z"
+    }
+  ]
+}
+```
+
+`account_label` is whatever the provider calls the account. Four of the ten publish one — xAI, OpenAI, ElevenLabs and Deepgram — and the other six return `""`. An empty label means the provider says nothing about its accounts, not that something failed.
+
+There is no rotation ceremony: `PUT` the same provider again with the new value. Agents pick up the new key on their next run.
+
+## What happens without a key
+
+**Publishing is refused, and the error names the provider.** Validation returns one error per missing provider:
+
+```
+no ElevenLabs API key for this workspace - add one under BYOK
+```
+
+Two things about that gate are worth knowing before you build:
+
+- **It runs only at publish, never on a draft save.** You can build an entire agent against a provider you have not configured yet, and the refusal arrives when you try to make it live. That is deliberate — a half-built draft should not be blocked on a credential — but it means a draft that saves cleanly is not proof it can be published. Run [validation](/agents/validation) to find out early.
+- **It also gates agent tasks**, at their own publish, with the same message. A run is checked again at the last moment — for a key deleted since — and that message ends *"…add one under BYOK before running this task"*.
+
+An agent needs a key for every provider in its model stack, including a [fallback](/agents/model-fallbacks) model on a different provider and an [analysis](/observability/call-analysis) model if you named one. Leaving the analysis model unset is the safe default: analysis then runs on the agent's own LLM, so turning it on can never demand a key the agent did not already need.
+
+## What happens if you delete a key
+
+<Warning>
+Deleting a provider key does not un-publish anything. Agents keep their published version, keep answering calls, and **fail on their next run** the moment they reach that provider. There is no fallback and no platform key behind it. Remove a key only when you have stopped the agents that need it.
+</Warning>
+
+Deleting is also `DELETE /v1/byok/{provider}`, ADMIN only, and returns `404` if there was no key to remove.
+
+## Where Talqing does use its own keys
+
+Three things run on our account rather than yours, and none of them is an agent:
+
+- The **CoPilots** in the agent, tool and task editors — their model calls are ours, and they are never billed to you.
+- The **voice and avatar galleries**, so the editor has something to show before you have stored a key for that provider. Once you store one, the gallery browses your own account, which is what makes a voice you cloned yourself pickable.
+
+No platform key ever backs an agent run, a call, or a task.
+
+<CardGroup cols={2}>
+<Card title="Models" href="/agents/models">
+  Which providers each model slot can draw from, and what each costs.
+</Card>
+<Card title="Pricing and credits" href="/get-started/pricing-and-credits">
+  What Talqing charges on top of your own provider spend.
+</Card>
+</CardGroup>

@@ -1,0 +1,318 @@
+---
+title: "Tools overview"
+description: "A tool is one capability the agent's model can call mid-conversation, defined once and attached to any agent."
+---
+
+A tool is one capability the agent's LLM can call while it is talking to someone:
+look an order up, book a slot, write a lead into your CRM. You define what the
+model sees — a name, a description, an argument schema — and an ordered list of
+operations that runs when it is called.
+
+Tools belong to the workspace, not to an agent. One tool can be attached to
+several agents, and it carries its own draft and published versions.
+
+## The fields
+
+| Field | Type | What it is |
+| --- | --- | --- |
+| `name` | string | The function name the model sees. Must match `^[a-zA-Z_][a-zA-Z0-9_]*$` and be unique in the workspace. `stop_recording`, `submit_result`, `get_faq_answers` and four other runtime names are [reserved](/tools/schema-and-description#name). |
+| `description` | string | Tells the model *when* to call it. Defaults to `""`, which leaves the model only the name to go on. |
+| `json_schema` | object | The arguments the model supplies. Defaults to `{}` — no arguments. |
+| `operations` | array | The ordered tree that runs when the tool is called. Defaults to `[]`; a tool with no operations cannot be published. |
+| `long_running_task` | boolean | Default `false`. See below. |
+| `silent` | boolean | Default `false`. See below. |
+| `disable_interruptions` | boolean | Default `false`. See below. |
+
+`name`, `description` and `json_schema` are the three fields that decide whether
+the model calls the tool correctly, and they are worth more care than the tree —
+see [schema and description](/tools/schema-and-description). The tree itself is
+covered in [the operation tree](/tools/operation-tree).
+
+## The behaviour flags
+
+**`long_running_task`** — on voice and video, a tool that takes more than a
+second hands the turn back: the model is told the work has started and the agent
+keeps talking to the caller while the tree runs. When the tree finishes, the
+result — or the failure — is delivered as that tool's result and the agent shares
+it, one turn later. It stays in the conversation's history, so the agent can
+still answer questions about it afterwards.
+
+**A tool that finishes inside that first second behaves like an ordinary tool**,
+whatever the flag says: the agent answers with the real result in the same turn
+rather than announcing work it has already done. The flag says *"this is
+usually slow"*, and whether a given run was slow is only knowable by running it.
+
+There is no fixed acknowledgement line. The model says something of its own in
+the same turn it calls the tool, and **the way to steer that is the tool's
+[description](/tools/schema-and-description)**.
+
+Write that instruction **conditionally**. "Tell the caller you have started it
+and keep talking" reads as an order to say so every time — including the runs
+that finish inside the first second, where the model already has the answer in
+the same turn and will announce work it has just completed, or say it is
+starting something that already failed. "If it is still running, say you are on
+it and carry on; if the result is already there, give it" covers both, and the
+second half costs you nothing on the runs that are genuinely slow.
+
+The caller can also change their mind: the agent can cancel a background tool
+that is still running.
+
+**Text agents wait for the result either way** — a text session is scoped to one
+message, so releasing the turn would drop the answer.
+
+Three shapes are refused when you publish. A tree containing a `transfer` or a
+`handoff`, because switching who the caller is talking to has to happen inside
+the turn that asked for it. And a tool that is also `silent`, because a
+background tool exists to report its result later and a silent one never reports
+— if what you want is fire-and-forget with no result at all, tick
+`background_execution` on the operation instead, see
+[the operation tree](/tools/operation-tree).
+
+`disable_interruptions` is not refused but warns, because it does nothing here:
+the turn ends as soon as the work is dispatched, so there is no speech left to
+protect.
+
+<Warning>
+A background tool is **cancelled if the call ends or the agent hands off**, so
+its side effects can be half applied. Work that must finish regardless belongs
+behind a [webhook](/observability/webhooks) and your own queue. See
+[tool failures](/tools/failures).
+</Warning>
+
+**`silent`** — the model is told nothing after the tool runs, so it does not
+speak on top of it. You rarely need to set it: a tool in which **no operation
+can return a response is silent automatically**, and so is any run that reaches
+`end_call`. Setting it is for the case where the tree does have an `http` or
+`code` result and you do not want the model narrating it.
+
+**`disable_interruptions`** — the caller cannot barge in while the tool runs.
+Reach for it when a tool runs long enough that a caller will say "hello?" into
+the silence and the answer still has to be spoken: five seconds after an
+interruption the agent has no way left to deliver it.
+
+## One capability, not many thin ones
+
+Prefer one meaningful business capability per tool over several thin ones. The
+model picks `book_appointment` more reliably than it sequences
+`check_availability`, `create_booking` and `send_confirmation` — and the
+sequence is exactly the part it gets wrong. Chain those calls inside the
+operation tree, where the order is yours.
+
+The exception is destinations: one tool per transfer destination, never one tool
+that branches. See [transfer](/tools/transfer).
+
+## Building one end to end
+
+Create the tool, publish it, then attach it to an agent by id. The example
+reads an order status over HTTP and speaks the answer itself.
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/tools \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "check_order_status",
+    "description": "Look up where a customer order is. Use it once the caller has given you their order number and asks where the order is, when it will arrive, or whether it has shipped.",
+    "json_schema": {
+      "type": "object",
+      "properties": {
+        "order_id": {
+          "type": "string",
+          "description": "The order number the caller read out, digits only, e.g. 4417029. Ask for it if they have not said it."
+        }
+      },
+      "required": ["order_id"]
+    },
+    "operations": [
+      {
+        "kind": "http",
+        "config": {
+          "method": "GET",
+          "url": "https://api.example.com/orders/{{args.order_id}}",
+          "headers": { "Authorization": "Bearer {{secrets.SHOP_API_KEY}}" },
+          "timeout": 10
+        },
+        "silent": true,
+        "publish_fields": [
+          { "path": "status", "store": "tooldata" },
+          { "path": "estimated_delivery", "key": "eta", "store": "tooldata" }
+        ]
+      },
+      {
+        "kind": "say",
+        "config": {
+          "text": "Order {{args.order_id}} is {{tooldata.status}}, and it should reach you {{tooldata.eta}}."
+        }
+      }
+    ]
+  }'
+```
+
+```typescript TypeScript
+const tool = await talqing.tools.create({
+  createToolRequest: {
+    name: "check_order_status",
+    description:
+      "Look up where a customer order is. Use it once the caller has given you their order number and asks where the order is, when it will arrive, or whether it has shipped.",
+    json_schema: {
+      type: "object",
+      properties: {
+        order_id: {
+          type: "string",
+          description:
+            "The order number the caller read out, digits only, e.g. 4417029. Ask for it if they have not said it.",
+        },
+      },
+      required: ["order_id"],
+    },
+    operations: [
+      {
+        kind: "http",
+        config: {
+          method: "GET",
+          url: "https://api.example.com/orders/{{args.order_id}}",
+          headers: { Authorization: "Bearer {{secrets.SHOP_API_KEY}}" },
+          timeout: 10,
+        },
+        silent: true,
+        publish_fields: [
+          { path: "status", store: "tooldata" },
+          { path: "estimated_delivery", key: "eta", store: "tooldata" },
+        ],
+      },
+      {
+        kind: "say",
+        config: {
+          text: "Order {{args.order_id}} is {{tooldata.status}}, and it should reach you {{tooldata.eta}}.",
+        },
+      },
+    ],
+  },
+});
+
+await talqing.tools.publish({
+  tool_id: tool.id,
+  publishToolRequest: { changelog: "First version" },
+});
+```
+
+```python Python
+tool = talqing.tools.create(
+    name="check_order_status",
+    description=(
+        "Look up where a customer order is. Use it once the caller has given you "
+        "their order number and asks where the order is, when it will arrive, or "
+        "whether it has shipped."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "order_id": {
+                "type": "string",
+                "description": (
+                    "The order number the caller read out, digits only, e.g. 4417029. "
+                    "Ask for it if they have not said it."
+                ),
+            }
+        },
+        "required": ["order_id"],
+    },
+    operations=[
+        {
+            "kind": "http",
+            "config": {
+                "method": "GET",
+                "url": "https://api.example.com/orders/{{args.order_id}}",
+                "headers": {"Authorization": "Bearer {{secrets.SHOP_API_KEY}}"},
+                "timeout": 10,
+            },
+            "silent": True,
+            "publish_fields": [
+                {"path": "status", "store": "tooldata"},
+                {"path": "estimated_delivery", "key": "eta", "store": "tooldata"},
+            ],
+        },
+        {
+            "kind": "say",
+            "config": {
+                "text": "Order {{args.order_id}} is {{tooldata.status}}, and it should reach you {{tooldata.eta}}."
+            },
+        },
+    ],
+)
+
+talqing.tools.publish(tool["id"], changelog="First version")
+```
+</CodeGroup>
+
+Two things about that tree are worth naming. `SHOP_API_KEY` must already exist
+as a [workspace secret](/platform/secrets) — publish fails on a secret that does
+not. And because the only operation that could return a result is marked
+`silent`, the tool is silent: the agent speaks the `say` line and adds nothing
+after it.
+
+Then attach it to an agent. A write sends only the fields that change, but a
+list is sent whole, so `tools` must carry any tool the agent already has — see
+[updating an agent](/agents/overview#updating-an-agent):
+
+<CodeGroup>
+```bash cURL
+curl -X PATCH https://api.in.talqing.com/v1/agents/9c1e6f42-7b30-4a55-9d18-2f0a6c4b8e31 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"config": {"tools": [{"tool_id": "2b7d1f08-4c9a-4e6b-8f21-0d5a3c7e9b44"}]}}'
+```
+
+```typescript TypeScript
+await talqing.agents.update({
+  agent_id,
+  updateAgentRequest: { config: { tools: [{ tool_id: tool.id }] } },
+});
+await talqing.agents.publish({ agent_id });
+```
+
+```python Python
+talqing.agents.update(agent_id, config={"tools": [{"tool_id": tool["id"]}]})
+talqing.agents.publish(agent_id)
+```
+</CodeGroup>
+
+Leave `tool_version` out. A draft agent tracks whatever version of the tool is
+published now; publishing the agent pins the version that is live at that
+moment. Republishing a tool therefore changes nothing on live calls until the
+agent is published again — see [versions](/tools/testing-and-publishing).
+
+## Defining a tool inline
+
+An entry in an agent's `tools` may carry `{"tool": { … }}` — a whole tool
+written in place of an id — so an agent and its tools can be built in one
+request. On an agent this is a **shorthand, not a second kind of tool**: the
+write creates it, publishes it at v1, and stores `{"tool_id": "…"}` in its
+place, after which it is an ordinary tool. Attaching an existing tool is still
+`tool_id`, and one entry cannot carry both.
+
+## In the dashboard
+
+Tools live under **Build → Tools**. The list shows each tool's signature — the
+name and its arguments, which is what the model is shown — its description,
+whether it is a draft or `Live v<n>`, and which agents attach it. The editor has
+three cards, **Configuration**, **Arguments** and **Operations**, with **Save**,
+**Validate**, **Test** and **Publish** across the top.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Schema and description" href="/tools/schema-and-description">
+    The three fields that decide whether the model calls the tool correctly.
+  </Card>
+  <Card title="The operation tree" href="/tools/operation-tree">
+    The eleven operation kinds, `on_error`, and the branching rules.
+  </Card>
+  <Card title="Templating and data" href="/tools/templating-and-data">
+    The six template roots, `tooldata` vs `userdata`, and `publish_fields`.
+  </Card>
+  <Card title="Testing and publishing" href="/tools/testing-and-publishing">
+    Test runs, validation, versions and the pin-at-agent-publish rule.
+  </Card>
+</CardGroup>

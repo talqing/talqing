@@ -1,0 +1,537 @@
+# talqing — the local stack. `docker-compose up --build`
+#
+# TWO APPLICATIONS, because there are two planes and they are separate FastAPI
+# apps rather than one app with a role switch:
+#
+#   api-control  :8001  uvicorn api.control.main:app   ENV=local.control
+#                       identity, organizations, tokens, payments, the region
+#                       list. One of these exists for the whole deployment; in
+#                       production it is a droplet of its own in another country.
+#   api          :8000  uvicorn api.dataplane.main:app ENV=local.in
+#   stream-gateway :8090 uvicorn api.stream.main:app    ENV=local.in
+#                       everything a tenant's workspace is made of, for ONE
+#                       region. The published API.
+#
+# A route that does not belong to a host is simply not mounted there, so hitting
+# /v1/agents on :8001 is an ordinary 404. The region reaches control over HTTP
+# with a bearer token and holds no control-plane DSN — which is exactly the
+# arrangement production has, and the reason local runs both.
+#
+# Plus two Postgres planes (control + data DBs that hold tenant rows isolated by
+# tenant_id), Redis, Kafka, LiveKit (+ livekit-sip), and three worker
+# processes (voice-worker, text-worker, background-worker). The local default
+# data DB is created by data-pg.
+
+services:
+  # Cluster mode with one node holding all 16384 slots, so the cluster client the
+  # app builds is exercised here rather than first meeting a cluster in prod.
+  #
+  # LiveKit and livekit-sip share this node with a plain non-cluster client.
+  # That works and keeps working: with every slot on one node no MOVED redirect
+  # is ever issued, so a non-cluster client sees no difference.
+  #
+  # No cluster-announce-ip: the node announces its compose-network address,
+  # which is what every other service here connects by. Setting it to 127.0.0.1
+  # for the sake of host tools would break all of them. `redis-cli` from the
+  # host still works — one node never redirects.
+  redis:
+    image: redis:7-alpine
+    command:
+      - "redis-server"
+      - "--cluster-enabled"
+      - "yes"
+      # Redis rewrites this itself; on the volume so the node does not forget
+      # its identity and slot ownership when the container is recreated.
+      - "--cluster-config-file"
+      - "/data/nodes.conf"
+      - "--cluster-node-timeout"
+      - "5000"
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    # cluster_state, not PING. A cluster-enabled node with no slots answers PONG
+    # and then CLUSTERDOWN to every key operation, so PING would let dependents
+    # start against a Redis that refuses all work.
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli cluster info | grep -q '^cluster_state:ok'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Gives the node its slots on first boot. Separate from the healthcheck above
+  # because that check cannot pass until this has run. Idempotent: re-running
+  # against a formed cluster does nothing.
+  redis-init:
+    image: redis:7-alpine
+    restart: "no"
+    depends_on:
+      redis:
+        condition: service_started
+    command:
+      - "sh"
+      - "-c"
+      - |
+        until redis-cli -h redis ping 2>/dev/null | grep -q PONG; do sleep 1; done
+        redis-cli -h redis cluster info | grep -q '^cluster_state:ok' && exit 0
+        redis-cli -h redis cluster addslotsrange 0 16383
+
+  kafka:
+    image: apache/kafka:4.3.1
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: CONTROLLER://:9093,PLAINTEXT://:9092,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 12
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+  control-pg:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: talqing
+      POSTGRES_PASSWORD: PhQrqWbF9Ejh3GEgPy2GE8NfK4vtCPIz  # gitleaks:allow
+      POSTGRES_DB: talqing_control
+    ports:
+      - "5433:5432"
+    volumes:
+      - control_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U talqing -d talqing_control"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  data-pg:
+    image: postgres:16-alpine
+    # JIT never pays off on our short OLTP queries, and it JIT-compiles asyncpg's
+    # type-introspection query (~2 s, measured) on the first query of every call.
+    command: ["postgres", "-c", "jit=off"]
+    environment:
+      POSTGRES_USER: talqing
+      POSTGRES_PASSWORD: PhQrqWbF9Ejh3GEgPy2GE8NfK4vtCPIz  # gitleaks:allow
+      POSTGRES_DB: talqing_data
+    ports:
+      - "5434:5432"
+    volumes:
+      - data_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U talqing -d talqing_data"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One proxy in front of both planes, and every Python container connects
+  # through it — api, voice-worker, text-worker, background-worker and
+  # job-scheduler. They reach it because TALQING_PG_PROXY is set in
+  # backend/.env; unset it and they connect directly again, which is the
+  # rollback for the whole arrangement. code-exec is Node and touches no
+  # database.
+  #
+  # It is here for voice-worker: one LiveKit job process per call, exiting when
+  # the call does, so its two Postgres connections are never amortized and the
+  # connection count scales with concurrent calls. Transaction pooling holds a
+  # server connection for the duration of a transaction instead. Sizing and the
+  # rest of the reasoning are in pgbouncer/pgbouncer.ini.
+  #
+  # One proxy down is every container down. On a single box where control-pg and
+  # data-pg are themselves single containers that is not a new class of failure,
+  # but it is one more process that can take the environment with it, which is
+  # what `restart: unless-stopped` keeps to seconds.
+  pgbouncer:
+    image: ghcr.io/icoretech/pgbouncer-docker:1.25.2
+    # 1.25.2 is a floor, not a preference: it fixes CVE-2026-6667, an admin
+    # console authorization hole letting any console user run KILL_CLIENT, and
+    # the dev stack gives a metrics exporter console access. GHCR rather than
+    # Docker Hub for the same reason as kamailio/cadvisor/postgres-exporter —
+    # Docker Hub rate-limits anonymous pulls to 100 per 6h per IP. The image has
+    # no entrypoint script: the mounted .ini is the entire interface.
+    environment:
+      # Read by the healthcheck below and by nothing else — the credentials
+      # pgbouncer actually uses are in the mounted userlist.txt. Do not delete
+      # it as unused.
+      PG_PASSWORD: PhQrqWbF9Ejh3GEgPy2GE8NfK4vtCPIz  # gitleaks:allow
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    depends_on:
+      control-pg:
+        condition: service_healthy
+      data-pg:
+        condition: service_healthy
+    # Reaches Postgres, not just pgbouncer. Every app blocks on
+    # `depends_on: service_healthy` here and four of them run migrate_data() at
+    # startup, so a proxy that is listening but cannot reach the server has to
+    # fail. `SHOW LISTS` would not do: pgbouncer answers it from its own memory
+    # whether or not a server is reachable.
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=$$PG_PASSWORD psql -h 127.0.0.1 -p 6432 -U talqing -d talqing_data -c 'SELECT 1' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # pgbouncer reads SIGTERM as "shut down now" and SIGINT as "stop accepting,
+    # let existing connections finish". Compose signals every container at once,
+    # so without this `docker compose down` kills the proxy under live calls.
+    stop_signal: SIGINT
+    # voice-worker's, because its 3-hour drain runs through this container.
+    stop_grace_period: 10860s
+    restart: unless-stopped
+
+  # No object-storage service here on purpose. Call recordings go to the real
+  # DigitalOcean Spaces bucket in `configs/local.in.config.yaml`, even locally.
+  #
+  # Before re-adding MinIO: the blocker is not CORS. The API signs a presigned
+  # URL and the BROWSER fetches it, and SigV4 signs the Host header — so the two
+  # must name the bucket by the same address. On this network the API sees
+  # `minio:9000` and a browser can only reach `localhost:9000`, and that URL is
+  # a `SignatureDoesNotMatch`. (`PutBucketCors` is also unimplemented in MinIO,
+  # but `MINIO_API_CORS_ALLOW_ORIGIN` covers that half.) A stand-in needs every
+  # developer to add `127.0.0.1 minio` to /etc/hosts; a real bucket does not.
+  #
+  # The trade that buys: recordings are shared with the dev droplet's bucket and
+  # `docker compose down -v` does not clear them.
+
+  livekit:
+    image: livekit/livekit-server:v1.13.7
+    command: ["--config", "/etc/livekit.yaml"]
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "50000-50019:50000-50019/udp"
+    volumes:
+      - ./backend/livekit.yaml:/etc/livekit.yaml:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:7880 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Open-source LiveKit SIP bridge. Shares Redis + API keys with
+  # livekit-server. Ports 5060 + RTP must be reachable from SIP providers for
+  # real PSTN; local-only is fine for trunk/rule CRUD and non-PSTN tests.
+  # Host networking is ideal for RTP but awkward on Docker Desktop macOS —
+  # bridge ports are enough for SIP signaling smoke tests.
+  livekit-sip:
+    image: livekit/sip:v1.17.0
+    environment:
+      SIP_CONFIG_BODY: |
+        api_key: devkey
+        api_secret: 0afb5b0317f24772c630e7d955297af7ff5167b45fbc5792  # gitleaks:allow
+        ws_url: ws://livekit:7880
+        redis:
+          address: redis:6379
+        sip_port: 5060
+        rtp_port: 10000-10009
+        use_external_ip: false
+        logging:
+          level: info
+    ports:
+      - "5060:5060"
+      - "5060:5060/udp"
+      # RTP not published on host (Mac Docker Desktop). Media stays bridge-internal.
+    depends_on:
+      redis:
+        condition: service_healthy
+      livekit:
+        condition: service_healthy
+
+  # The code-execution service: AI-authored tool code runs in
+  # a fresh V8 isolate per request HERE, never in the agent worker. Stateless:
+  # the API sends TS to /transpile at tool publish; the worker sends compiled
+  # JS + request JSON to /execute mid-call. Holds no platform credentials; its
+  # outbound fetch blocks private/metadata ranges.
+  code-exec:
+    build:
+      context: ./code-exec
+      dockerfile: Dockerfile
+    environment:
+      PORT: "8090"
+      ISOLATE_MEMORY_MB: "128"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8090/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # The control plane. Identity, organizations, tokens, payments, and the region
+  # list — the global half, shared by every region.
+  #
+  # Its ENV overrides the shared backend/.env, which is what selects
+  # configs/local.control.config.yaml: the FILENAME is what keeps the two nodes
+  # apart, so a control process handed a regional config does not load it and
+  # start wrong, it fails to find it and refuses to start.
+  #
+  # No workers and no LiveKit: control runs no tenant code, holds no tenant
+  # secrets key and never opens a data plane.
+  api-control:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["uvicorn", "api.control.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - ./backend/.env
+    environment:
+      ENV: local.control
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+
+  # The `in` region's data plane. Everything a tenant's workspace is made of.
+  #
+  # NOTE: no --reload — backend edits need a manual `docker-compose restart api`.
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    # `--timeout-graceful-shutdown` is load-bearing, not tidiness: without it a
+    # SIGTERM cuts off `POST /v1/tasks/{id}/runs`, which runs the task INLINE in
+    # the request, and its `task_runs` row is left `running` for ever. At the
+    # timeout uvicorn cancels every remaining request task, which is what reaches
+    # `run_task`'s cancel handler and settles the row as `canceled`. Thirty
+    # seconds, not the 600-second `timeout_seconds` ceiling: one editor's manual
+    # run must not hold a deploy for ten minutes, and the run history is now
+    # honest about what happened either way.
+    command:
+      - "uvicorn"
+      - "api.dataplane.main:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--timeout-graceful-shutdown"
+      - "30"
+    env_file:
+      - ./backend/.env
+    environment:
+      ENV: local.in
+    ports:
+      - "8000:8000"
+    # Comfortably above the uvicorn timeout above, so Docker never SIGKILLs
+    # before uvicorn has finished its own shutdown.
+    stop_grace_period: 45s
+    volumes:
+      - ./backend:/app
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+      livekit:
+        condition: service_started
+      code-exec:
+        condition: service_started
+      # Not `service_healthy`: every authenticated request goes through control,
+      # so it has to be up — but this API's own boot does not touch it, and
+      # gating on a healthcheck would only trade one startup order for another.
+      api-control:
+        condition: service_started
+
+  # Every deferred thing the platform does runs here, and nothing else does:
+  # email drafting and sending, WhatsApp sends, batch dialling, session purges — all
+  # `scheduled_jobs` rows that job-scheduler publishes and this claims. Session
+  # pricing itself runs at end-of-session in the workers.
+  # Safe to `--scale background-worker=N` up to KAFKA_NUM_PARTITIONS (12 here):
+  # the group splits the partitions and `store.claim` refuses whatever arrives
+  # twice.
+  background-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["python", "-m", "workers.background.main"]
+    env_file:
+      - ./backend/.env
+    environment:
+      ENV: local.in
+    volumes:
+      - ./backend:/app
+    # The executor cancels every job in flight at once and then allows
+    # SETTLE_GRACE_SECONDS (15) for them to write their rows; a cancelled job
+    # releases its `scheduled_jobs` row for another container. 15 + the 1s
+    # consumer poll + the pool close, doubled for headroom. Deliberately the same
+    # number as the droplet's: a process that behaves differently on a laptop
+    # than in production is one nobody can reason about.
+    stop_grace_period: 30s
+    depends_on:
+      api:
+        condition: service_started
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # Scheduled jobs arrive here over Kafka.
+      kafka:
+        condition: service_started
+
+  # Finds deferred work that has come due (`scheduled_jobs`) and publishes it to
+  # Kafka; background-worker claims and runs it. Its own container rather than
+  # another loop in background-worker because it is meant to REPLACE a mechanism
+  # — the batch dispatcher's bespoke discovery loop and Redis lock — not sit
+  # beside one. It never runs a job, so a single replica is enough and a second
+  # would only produce duplicate messages the claim already absorbs.
+  job-scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["python", "-m", "workers.scheduler.main"]
+    # No stop_grace_period: `discovery_loop` waits on the stop event with a
+    # TICK_SECONDS (5) timeout and exits inside it, so Docker's 10s default is
+    # already comfortable. Said here rather than left for the reader to derive.
+    env_file:
+      - ./backend/.env
+    environment:
+      ENV: local.in
+    volumes:
+      - ./backend:/app
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  # Text-agent LiveKit turns: tenant text agents and the CoPilots
+  # (latest-message-wins interrupt). Same Kafka topic; plane from
+  # requested_agent_id. Redis for conversation / CoPilot SSE.
+  text-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["python", "-m", "workers.text.main"]
+    env_file:
+      - ./backend/.env
+    environment:
+      ENV: local.in
+    volumes:
+      - ./backend:/app
+    # Every warm actor closes at once and each finalize is bounded by
+    # TEXT_SESSION_SHUTDOWN_FINALIZE_SECONDS (15); they run concurrently, so the
+    # tail is one finalize plus the 1s consumer poll. 60s is that with room for a
+    # slow plane. It does not need to match background-worker's 30s — they bound
+    # different things — only to be derived rather than chosen.
+    stop_grace_period: 60s
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      code-exec:
+        condition: service_started
+
+  # The WebSocket media-stream gateway: a partner's contact-centre platform
+  # terminates the PSTN leg and streams one socket per call here. Its own
+  # container rather than a router on `api`, because a long-lived audio socket
+  # has no business sharing an event loop with request/response traffic.
+  stream-gateway:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    # `--ws-per-message-deflate false` is load-bearing: uvicorn's default is ON,
+    # the partner protocol requires it off, and it is negotiated in the handshake
+    # before any of our code runs, so there is no per-connection version of the
+    # decision. `api/stream/main.py` asserts it at startup rather than trusting
+    # this line to survive an edit.
+    #
+    # The access log stays ON. Nothing in a connect URL is secret — it is
+    # `{dialect}/{tenant}/{agent}`, three identifiers we publish elsewhere — and
+    # one line per connect is the first thing anyone debugging "it just doesn't
+    # connect" asks for.
+    command:
+      - "uvicorn"
+      - "api.stream.main:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8090"
+      - "--ws-per-message-deflate"
+      - "false"
+    env_file:
+      - ./backend/.env
+    environment:
+      ENV: local.in
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./backend:/app
+    # 30s, and deliberately NOT the voice-worker's three hours. uvicorn has no
+    # drain: on SIGTERM it sends close 1012 to every live socket and stops the
+    # listener, so a longer window would buy nothing but a slower deploy. Nor
+    # would building one help — the gateway binds :8090, so anything that waited
+    # would refuse new calls for as long as it waited, and a refused connect on
+    # this channel is a dropped call the partner cannot see either. **A deploy
+    # ends live stream calls.** What this window is for is the teardown that
+    # follows: leaving each room so the worker files the call as
+    # `stream_gateway_restart_failed` — ours, fee waived — rather than leaving a
+    # `running` row for the stale sweeper.
+    stop_grace_period: 30s
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+      api-control:
+        condition: service_started
+
+  # LiveKit voice/video worker — web rooms and SIP calls.
+  voice-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["python", "-m", "workers.voice.main", "start"]
+    env_file:
+      - ./backend/.env
+    environment:
+      ENV: local.in
+      # Not a duplicate of AgentServer(prometheus_multiproc_dir=…) — see the
+      # comment there. prometheus_client chooses its value class when it is
+      # imported, and the SDK sets this variable only at Worker start, so
+      # without it here :9091 answers 200 with an empty body.
+      PROMETHEUS_MULTIPROC_DIR: /tmp/talqing-prom
+      # Builds the openai SDK's models at import, off the call's event loop.
+      DEFER_PYDANTIC_BUILD: "false"
+    ports:
+      - "9091:9091"   # prometheus
+    volumes:
+      - ./backend:/app
+    # Outer bound on shutdown, sized to contain AgentServer(drain_timeout=10800)
+    # — itself held at the 3h call cap — plus 60s for the graceful close that
+    # follows it. Reaching 10860s means something hung, so SIGKILL stays a
+    # backstop rather than the normal path — Docker's 10s default would cut live
+    # calls dead before drain even got going.
+    stop_grace_period: 10860s
+    depends_on:
+      api:
+        condition: service_started
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+      code-exec:
+        condition: service_started
+
+volumes:
+  control_pgdata:
+  data_pgdata:
+  redis_data:

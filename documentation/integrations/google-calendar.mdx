@@ -1,0 +1,253 @@
+---
+title: "Google Calendar"
+description: "Nine calendar tools run straight against the Calendar API, what each one is for, and how to prompt an agent to book."
+---
+
+Google Calendar is the one **native** integration: the nine tools are implemented
+by Talqing against the Calendar REST API rather than proxied through a server
+Google hosts. There is no vendor MCP hop, which is one less thing between the
+caller and the answer.
+
+From your side it is identical to every other integration — same OAuth connect,
+same tool approval, same `tools_namespace`, same
+`GET /v1/integrations/{id}/mcp-tools` listing, same `mcps` attachment on the
+agent. Everything on [MCP servers](/integrations/mcp-servers) applies. What
+follows is what is only true of these nine.
+
+## Connecting
+
+Google Calendar is OAuth, so it is connected **from the dashboard** — the flow is
+a browser redirect and `POST /v1/integrations` refuses the provider outright.
+
+<Steps>
+  <Step title="Add the integration">
+    Dashboard → **Integrations** → **Add integration** → Google Calendar.
+  </Step>
+  <Step title="Approve the access">
+    Google asks for your identity and four calendar scopes. Approve as the account
+    whose calendars the agent should act on.
+  </Step>
+  <Step title="Approve the tools">
+    The tool-approval modal opens when you come back. Approve the ones the agent
+    actually needs — an agent that only reads should not be holding
+    `delete_event`.
+  </Step>
+</Steps>
+
+The connection is named for the account — `Google Calendar - ada@northwind.com` —
+and that account's identity is what the tools act as.
+
+### The access it asks for
+
+| Scope | What it buys |
+| --- | --- |
+| `openid`, `email`, `profile` | The account identity shown in the dashboard. |
+| `calendar.calendarlist.readonly` | `list_calendars`. |
+| `calendar.events.readonly` | `list_events`, `search_events`, `get_event`. |
+| `calendar.events.freebusy` | `suggest_time`. |
+| `calendar.events.owned` | `create_event`, `update_event`, `delete_event`, `respond_to_event`. |
+
+<Warning>
+**Writes only work on calendars the connected account owns.** `events.owned` is
+"calendars you own", not "all your calendars" — a calendar merely shared with the
+account, however generous the sharing, cannot be written to.
+
+Google answers such a write with a 403 or a 404 depending on how much of the
+calendar the account can see, and neither says which calendar or why. The error
+the model gets back says it for them: *Events can only be created, changed or
+deleted on calendars the connected Google account owns — `list_calendars` reports
+`accessRole` for each.* That is enough for the model to recover by picking a
+calendar it owns — but if the booking is *meant* to land on a shared calendar,
+nothing at runtime can fix it. Connect the account that owns it.
+</Warning>
+
+## The nine tools
+
+Default namespace is `google_calendar`, so the model sees
+`google_calendar_list_events` and your prompt must say that. Approval matches the
+bare names below.
+
+| Tool | What it does | When the agent should reach for it |
+| --- | --- | --- |
+| `list_calendars` | Every calendar the account can see, with `accessRole` on each. | To turn "my family calendar" into a `calendarId`, and to find one it may write to. |
+| `list_events` | Events on **one** calendar, with optional time range, free-text match, type filter and ordering. Recurring events come back expanded into occurrences. | "What is on my calendar tomorrow?" and anything scoped to a known calendar. |
+| `search_events` | Keyword search across the account's calendars, 30 days back to a year ahead, sorted by start time. Each hit names the calendar it came from. | "Find my meeting with Priya" when nobody said which calendar. |
+| `get_event` | One event in full, by id. | After a search, when the agent needs the details it did not get. |
+| `create_event` | Books an event: title, start, end, attendees, location, description, reminders, availability. | The booking itself. |
+| `update_event` | Changes an event. Arguments left out are left alone. | Moving or renaming a booking. |
+| `delete_event` | Removes an event. | Cancelling. |
+| `respond_to_event` | Sets the account's **own** RSVP on an invitation — accepted, declined or tentative — leaving the other guests untouched. | "Accept the Thursday review for me." |
+| `suggest_time` | The periods inside a window when every listed attendee is free. | Before proposing a time to anyone but the caller. |
+
+`calendarId` is optional on every tool that takes one and defaults to the
+account's **primary** calendar. Ids are email-shaped, and a subscribed calendar's
+looks like `en.usa#holiday@group.v.calendar.google.com`.
+
+## Behaviour that decides whether a booking is correct
+
+**`search_events` is broad, `list_events` is precise.** Search fans out over up to
+**20** of the account's calendars — including subscribed ones such as holidays —
+and always uses its own window of 30 days back to a year ahead. For one calendar,
+or any other time range, the agent should use `list_events` with `fullText`
+instead. Both facts are in the tools' own descriptions, so the model usually picks
+correctly; a prompt that names the calendar helps it more.
+
+**`suggest_time` spans up to 50 attendees.** More than fifty addresses is refused
+rather than truncated. Include the caller's own address, or the agent will happily
+propose a slot they are already booked in.
+
+It returns each free period **whole** rather than chopped into candidate slots, so
+a wide-open day comes back as one long period, and the agent picks a time inside
+it. `durationMinutes` (default 30) is the shortest period worth returning.
+
+**Working hours are clipped per local day.** The `preferences.startHour` /
+`endHour` window is applied in a named timezone, day by day, rather than as
+arithmetic on a UTC offset — so "09:00 to 17:00 on weekdays" stays right across a
+daylight-saving change instead of being an hour out for half the window. The zone
+is the tool's `timeZone` argument, or the account's primary calendar's.
+
+An attendee whose calendar Google will not share — usually anyone outside the
+account's organisation — is listed in `unreadableCalendars`. **That is unknown,
+not free.** Say so in the prompt, or the agent will present a slot as clear when
+it has no idea.
+
+**All-day end dates are exclusive.** A one-day all-day event ends on the *next*
+day. Getting it backwards is refused rather than silently booked: *`endTime` must
+be after `startTime`. All-day end dates are exclusive, so a one-day event on
+2026-04-30 ends the next day.*
+
+**A time with no offset is refused unless a timezone rides with it.** `startTime`
+must be an ISO 8601 stamp like `2026-04-30T10:00:00+05:30`, or the call must set
+`timeZone`. The error says exactly that. This is the single most common reason a
+first booking attempt fails, and it is why the agent's own `timezone` matters —
+see below.
+
+**Guests are notified by default.** When an event has attendees and the model does
+not say otherwise, invitations go out. Google's own reference warns that
+suppressing them "can have significant adverse effects, including events not
+syncing to external calendars", so the agent has to opt out deliberately rather
+than opt in. An event with nobody to notify sends nothing.
+
+**An event id from a recurring series addresses one occurrence.** `list_events`
+and `search_events` expand a series into its occurrences, so an id taken from
+either changes or cancels that occurrence, not the whole series.
+
+**Deleting something already deleted** comes back as *That event has already been
+deleted*, which is a fact the agent can report rather than an error it should
+retry.
+
+Rate limits and transient failures are retried three times with a small jittered
+backoff, capped deliberately low because a caller is waiting.
+
+## Prompting an agent to book
+
+The tools are good. Getting a *call* to book correctly is prompt work, and four
+things do most of it.
+
+### 1. Set `timezone` on the agent
+
+Without it the clock variables do not resolve at all — `{{system_vars.date}}` in a
+prompt with no `timezone` is a save error — and the model has no idea what "next
+Tuesday" is. Set an IANA name (`Asia/Kolkata`, `America/Los_Angeles`) and put the
+date in the prompt:
+
+```text
+Today is {{system_vars.date}} and the time is {{system_vars.time}}.
+All times you say or book are in Asia/Kolkata.
+```
+
+The prompt's clock is resolved **once, when the agent starts**, so on a long call
+it reads as the time it picked up. That is fine for a date and it is why you
+should never ask the agent to compute a duration from it. See
+[variables](/agents/variables#when-the-clock-is-read).
+
+### 2. Collect everything the tools need before calling them
+
+`create_event` requires a title, a start and an end. `suggest_time` requires
+attendee addresses and a window. A model that calls a tool with a placeholder gets
+an error it then tries to vary its way out of, and the caller hears silence.
+Enumerate the fields in the prompt and tell it to ask.
+
+### 3. Say something while the tool runs
+
+A calendar round trip is dead air on a voice call. The model will not fill it
+unless told to.
+
+```text
+Before you call a calendar tool, say what you are about to do in a short sentence
+— "let me check the calendar" — and then call it.
+```
+
+### 4. Confirm back what was actually booked
+
+Read the tool's result, not the request. If the agent asked for 3 pm and the tool
+returned something else — or failed — the caller has to hear that.
+
+### A prompt fragment
+
+```text
+You book appointments for Northwind Dental.
+
+Today is {{system_vars.date}}. All times are Asia/Kolkata, and every time you send
+to a calendar tool must carry the +05:30 offset, for example
+2026-05-04T15:00:00+05:30.
+
+Before you book, you must know: the patient's full name, the treatment, and a day
+and time they want. Ask for whatever is missing, one question at a time.
+
+To find a time:
+1. Say "let me check the calendar" and call google_calendar_suggest_time with the
+   clinic's address and the day they asked about, working hours 09:00 to 18:00.
+2. Offer at most two times from what comes back, in plain language: "Monday at
+   half past three, or Tuesday morning at ten."
+3. Anyone listed in unreadableCalendars is UNKNOWN, not free. Do not present a
+   slot that depends on them as confirmed.
+
+To book, call google_calendar_create_event on the clinic calendar with a title of
+"<treatment> - <patient name>", the start and end times, and the patient's email
+as an attendee if they gave one.
+
+Then read back what the tool returned: the day, the time and the treatment. If the
+tool failed, say plainly that you could not book it and offer to have someone call
+them back. Never say an appointment is confirmed unless a create call succeeded.
+```
+
+### The flow it produces
+
+<Steps>
+  <Step title="The caller asks for an appointment">
+    The agent collects name, treatment and a rough day — the three things the
+    prompt named — before touching a tool.
+  </Step>
+  <Step title="It looks for a time">
+    `suggest_time` over that day's working hours. The agent says it is checking,
+    then offers two of the periods that came back.
+  </Step>
+  <Step title="It books">
+    `create_event` with a full ISO timestamp carrying the offset, on a calendar the
+    connected account **owns**. The attendee is added, so Google sends the
+    invitation.
+  </Step>
+  <Step title="It confirms">
+    The agent reads back the day, time and treatment from the tool's result, and
+    ends the call.
+  </Step>
+</Steps>
+
+If step 3 fails on ownership, the error tells the model to check `list_calendars`
+and it can retry on a calendar it owns — which may not be the one you wanted. The
+durable fix is connecting the owning account.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="MCP servers" href="/integrations/mcp-servers">
+    Attaching, approving and namespacing these nine tools.
+  </Card>
+  <Card title="Appointment booking" href="/guides/appointment-booking">
+    The whole thing end to end: timezone handling, confirmation, transfer on failure.
+  </Card>
+  <Card title="Variables" href="/agents/variables">
+    `timezone`, the clock keys, and when each is resolved.
+  </Card>
+</CardGroup>

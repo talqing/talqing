@@ -1,0 +1,171 @@
+---
+title: "Setup"
+description: "Connect a Resend account, verify a sending domain, and choose what a batch sends from."
+---
+
+Every email batch sends through one connected Resend account, on your own API key. Talqing holds no email credential of its own and never sends from an address of ours.
+
+Connect the account once, verify a domain on Resend's side, and every batch afterwards picks the account from a list.
+
+## Connect the account
+
+<Steps>
+<Step title="Create a Resend API key">
+At `resend.com/api-keys`, create a key with sending permission. It starts `re_`.
+</Step>
+
+<Step title="Add the integration">
+In the dashboard, go to **Integrations**, press **+ Add integration**, choose **Resend**, give it a name and paste the key.
+
+The key is stored as a workspace [secret](/platform/secrets) — by default under the name `RESEND_API_KEY`, or a suffixed variant if that name is already taken — and the integration keeps a `{{secrets.NAME}}` reference to it. You can also paste an existing reference instead of a raw key.
+</Step>
+
+<Step title="Check it is active">
+A batch will only accept an integration whose `provider` is `resend` and whose `status` is `active`. An integration in `disabled`, `needs_reconnect` or `error` is refused at create, and a live batch that hits one stops.
+</Step>
+</Steps>
+
+Over the API, that is `POST /v1/integrations`:
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.in.talqing.com/v1/integrations \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "resend",
+    "display_name": "Resend (marketing)",
+    "credentials_ref": "re_your_resend_api_key"
+  }'
+```
+
+```typescript TypeScript
+const integration = await talqing.integrations.create({
+  createIntegrationRequest: {
+    provider: "resend",
+    display_name: "Resend (marketing)",
+    credentials_ref: "re_your_resend_api_key",
+  },
+});
+```
+
+```python Python
+integration = talqing.integrations.create(
+    provider="resend",
+    display_name="Resend (marketing)",
+    credentials_ref="re_your_resend_api_key",
+)
+```
+</CodeGroup>
+
+Connecting an integration needs the EDITOR or ADMIN role. Resend is the only email provider a batch can send through; the [catalog](/integrations/catalog) lists everything else you can connect.
+
+## Sender verification is domain-level
+
+Resend verifies **domains**, not addresses. Once `yourdomain.com` is verified, any local part on it sends — `hello@`, `priya@`, `no-reply@` — and there is no list of addresses anywhere to enumerate or approve.
+
+That is why the sender endpoint returns domains:
+
+<CodeGroup>
+```bash cURL
+curl -G https://api.in.talqing.com/v1/email/senders \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "integration_id=a41f6c2d-8b17-4e93-9d05-2c7e6f31b840"
+```
+
+```typescript TypeScript
+const senders = await talqing.email.senders.list({
+  integration_id: "a41f6c2d-8b17-4e93-9d05-2c7e6f31b840",
+});
+console.log(senders.domains); // ["yourdomain.com"]
+```
+
+```python Python
+senders = talqing.email.senders.list(
+    integration_id="a41f6c2d-8b17-4e93-9d05-2c7e6f31b840",
+)
+print(senders["domains"])  # ["yourdomain.com"]
+```
+</CodeGroup>
+
+```json
+{
+  "integration_id": "a41f6c2d-8b17-4e93-9d05-2c7e6f31b840",
+  "domains": ["yourdomain.com"]
+}
+```
+
+**The list is read live off the account, never cached.** Verification is something you change in someone else's dashboard, and a stale list here would offer you a sender that starts failing twenty minutes later. The call also proves the credential works: an integration whose key has been revoked answers with a 400 saying so rather than an empty list.
+
+A `from_email` whose domain is not in that list right now is refused in three places:
+
+| When | What happens |
+| --- | --- |
+| `POST /v1/email/batches` | 400 before anything is written, naming the domain and listing the verified ones. |
+| `PATCH /v1/email/batches/{batch_id}`, when `from_email` changes | Same 400. The batch keeps its old sender. |
+| `POST /v1/email/batches/{batch_id}/sends`, when the press overrides `from_email` | Same 400. No send is created. |
+
+The check is a live call to Resend each time, so it costs a round trip and it is worth it: "that domain is not verified" is a sentence you can act on while you are standing there, and fifty failed rows twenty minutes later is not.
+
+## What "verified" means on Resend's side
+
+Adding a domain in Resend is not the same as verifying it. Resend hands you a set of DNS records to publish — an MX and a TXT record for the return path and SPF, a TXT record carrying the DKIM key, and a CNAME for open and click tracking — and then watches for them.
+
+Resend reports one of these states for a domain:
+
+| Resend status | What it means | Counts as a sender here |
+| --- | --- | --- |
+| `not_started` | Added, but you have not pressed **Verify DNS Records** yet. | No |
+| `pending` | Resend is still looking for the records. | No |
+| `verified` | Verified for sending. | **Yes** |
+| `partially_verified` | One capability (send or receive) is verified, the other still pending. | No |
+| `partially_failed` | Verified, but one of send or receive did not verify. | No |
+| `failed` | Resend could not find the records within 72 hours. | No |
+| `temporary_failure` | A previously verified domain whose records stopped resolving. Resend rechecks for 72 hours. | No |
+
+`GET /v1/email/senders` returns only domains Resend reports as `verified` and whose sending capability is not disabled — nothing else. A domain sitting at `partially_verified` will not appear, even though part of it is verified, so finish verification on Resend before you create the batch.
+
+<Note>
+A domain can drop out of that list without anyone touching Talqing. If your DNS records stop resolving, Resend moves the domain to `temporary_failure`, and from that moment every create, patch and send press against it is refused until the records come back.
+</Note>
+
+## Choosing the sender
+
+Three fields on a batch describe who the email is from:
+
+<ParamField path="from_email" type="string" required>
+The default sending address. Its domain must be verified on the connected account right now. Whitespace is trimmed.
+</ParamField>
+
+<ParamField path="from_name" type="string | null">
+Optional display name, at most 200 characters. With a name the header is `Name <address>`; without one it is the bare address.
+</ParamField>
+
+<ParamField path="reply_to" type="string | null">
+Optional, and where replies land. It is not validated against your verified domains — only that it parses as an address. **Talqing does not read replies.** There is no inbox, no reply parsing and no reply webhook; whatever you put here is a mailbox you own and read yourself.
+</ParamField>
+
+A single send press may override `from_email`, `from_name` and `reply_to` for that call alone, which is how one list gets worked through from more than one address. The batch's own defaults are untouched, so the next press starts from them again. See [reviewing and sending](/email/reviewing-and-sending).
+
+## One account per batch
+
+The Resend account is **not** overridable per send, and there is no field on `PATCH` that moves a batch to a different one. A different account is a different credential, a different rate limit and a different suppression list — which makes it a different batch.
+
+The same is true of the task: a batch's `task_id` and `integration_id` are fixed for its whole life.
+
+If the integration is deleted while a batch is live, the batch's `integration_id` goes null, `integration_name` reads as disconnected, and the next send stops the batch with a message saying the account has been disconnected.
+
+## Resend as an agent tool is a different thing
+
+The same Resend integration can also be attached to an agent or a task as an MCP server, which gives the model Resend's own tools to call. That is unrelated to batches, and the two never meet.
+
+**A batch never asks a model to send an email.** Sending happens after the human review gate, from our backend, over Resend's REST API, with an idempotency key, a pace and a retry policy — none of which a model's tool call can be made to have. See [the integrations catalog](/integrations/catalog) for the tool side.
+
+<CardGroup cols={2}>
+<Card title="Create a batch" href="/email/creating-a-batch">
+The list, the column space, and everything refused at create.
+</Card>
+<Card title="Connecting integrations" href="/integrations/connecting">
+Credentials, secrets, and connecting from the dashboard or the API.
+</Card>
+</CardGroup>

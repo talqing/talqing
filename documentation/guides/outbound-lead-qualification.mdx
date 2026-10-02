@@ -1,0 +1,527 @@
+---
+title: "Outbound lead qualification"
+description: "An outbound voice agent, a CRM write-back, post-call analysis and a scheduled campaign, end to end."
+---
+
+You are going to build a campaign that calls a list of leads, opens by saying who is calling and why, asks four qualifying questions, writes the answer back to your CRM, and leaves behind a call record you can filter into a shortlist. When it is finished you will have one published agent, one published tool, one outbound-capable number, and a batch that dials on a schedule you set, retries the phones nobody answered, and stops itself if something is broken.
+
+<Warning>
+Two things decide whether this campaign is a good idea, and both are easier to accept now than from an invoice.
+
+- **Voicemail is still a billed call.** The agent below turns on [voicemail detection](/agents/voicemail), so a call that reaches a machine leaves a short message, hangs up, ends as `voicemail` and is retried like a missed call. It connected, so it is billed at the full platform fee — a list with many machines costs money even when it reaches nobody.
+- **Every call in a batch runs your agent's current published version.** The batch re-reads it before each dial, so republishing at 14:00 changes every call placed from 14:00 onwards, including the rest of a campaign that has been running since morning. If you need a campaign held steady across an edit, pin it — see [batch calling](/telephony/batch-calling).
+</Warning>
+
+## What you need
+
+| | Why |
+| --- | --- |
+| Provider keys for a speech-to-text, an LLM and a text-to-speech model | Talqing is bring-your-own-key and holds no provider credentials. Publishing an agent whose provider has no key is refused. See [provider keys](/get-started/provider-keys). |
+| A carrier account, provisioned | Plivo, Twilio, Vobiz or Exotel. See [carrier accounts](/telephony/carrier-accounts). |
+| A phone number you already own at that carrier, imported | You never buy a number through Talqing. See [phone numbers](/telephony/phone-numbers). |
+| An endpoint on your CRM that accepts a qualification write, and a token for it | Stored as a workspace [secret](/platform/secrets), never in the tool's arguments. |
+| Credit on the workspace, in this region | Running out mid-campaign pauses the batch. See [pricing and credits](/get-started/pricing-and-credits). |
+| The EDITOR role | Creating a batch, dialling and publishing all need it. |
+
+Everything below is regional. An agent, a number, a batch and a credit balance created against `https://api.in.talqing.com` do not exist in `https://api.us.talqing.com`; the same token reaches both. See [regions](/get-started/regions).
+
+## The build
+
+<Steps>
+
+<Step title="Write the agent for an outbound conversation">
+
+An outbound call is a stranger's phone ringing. The prompt has to carry three things a support agent's prompt does not: who is calling, why, and how the person gets off the phone without a fight.
+
+```json
+{
+  "config": {
+    "name": "Northwind outbound qualification",
+    "channel": "voice",
+    "greeting": "Hi {{userdata.first_name}} — this is Maya from Northwind Tools, calling about the capacity planning guide you downloaded. Is now a bad moment?",
+    "prompt": "You are Maya, calling on behalf of Northwind Tools. Northwind sells warehouse management software to mid-market distributors.\n\nYou are calling someone who downloaded our capacity planning guide. You have never spoken to them before.\n\nOpen by saying who you are, which company you are calling from, and why you are calling. Then check whether now is a good time. Within your first three sentences, offer to send an email instead and leave them alone — and mean it. If they take that offer, thank them and end the call.\n\nIf they are willing to talk, find out four things, in this order, and only for as long as they stay willing:\n1. What they use to plan warehouse capacity today.\n2. Whether there is budget for a change this year, and roughly what band.\n3. When they would want something in place.\n4. Who else would be involved in deciding.\n\nRules:\n- Ask one question at a time and wait for the answer.\n- If they say they are not interested, thank them, confirm nobody will call again, and end the call. Do not ask why and do not try a second time.\n- Never state a price, a discount, a delivery date or another customer's name. If they ask, say someone will follow up by email.\n- Do not read back anything you know about them beyond their first name and company. They did not ask you to.\n- Before the call ends, call record_qualification exactly once, with 'unknown' for anything they did not tell you.\n- Keep sentences short. This is a phone call, not an email.",
+    "language": "en",
+    "timezone": "Asia/Kolkata",
+    "stt": { "provider": "deepgram", "model": "nova-3-general" },
+    "llm": { "provider": "openai", "model": "gpt-5.6-luna" },
+    "tts": { "provider": "deepgram", "model": "aura-2", "voice": "aura-2-thalia-en" },
+    "voicemail_detection": {
+      "enabled": true,
+      "message": "Hi {{userdata.first_name}}, this is Maya from Northwind Tools about the capacity planning guide you downloaded. I'll follow up by email — no need to call back."
+    }
+  }
+}
+```
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/agents \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @agent.json
+```
+
+```typescript TypeScript
+const agent = await talqing.agents.create({
+  createAgentRequest: { config },
+});
+console.log(agent.id);
+```
+
+```python Python
+agent = talqing.agents.create(config=config)
+print(agent["id"])
+```
+</CodeGroup>
+
+To change it later, send only the fields that change — see [updating an agent](/agents/overview#updating-an-agent).
+
+</Step>
+
+<Step title="Personalize each call with the recipient's own userdata">
+
+Each row of a batch carries `to` plus a flat map of strings that becomes that call's session state, and `{{userdata.field}}` in the prompt and the greeting is substituted from it when the agent starts. One published agent, a different opening line per lead.
+
+```json
+{ "to": "+919876543210", "userdata": { "first_name": "Priya", "company": "Asha Textiles", "crm_id": "lead_88213" } }
+```
+
+**A field that is not in userdata resolves to nothing**, so put the token where an empty value still leaves a sentence. `"Hi {{userdata.first_name}} — this is Maya from Northwind Tools"` still reads if the name is missing; `"Hi, am I speaking to {{userdata.first_name}}?"` does not. Values are strings on purpose — a spreadsheet cell reading `007` is a reference number, not the integer seven. See [userdata](/agents/userdata).
+
+### Branching the opening on the call direction
+
+If the same agent also answers inbound calls on that number, the greeting has to differ: outbound says who is calling and why, inbound does not. A greeting is one verbatim line and has no conditionals, so put the branch in an `on_enter` hook, which finishes **before** the greeting and whose writes to userdata the greeting then reads.
+
+Create this tool, publish it, and set the agent's `greeting` to `"{{userdata.opening}}"`:
+
+```json
+{
+  "name": "choose_opening",
+  "description": "Lifecycle hook: pick the opening line for this call's direction.",
+  "json_schema": {},
+  "operations": [
+    {
+      "kind": "if",
+      "config": { "left": "{{system_vars.direction}}", "op": "eq", "right": "outbound" },
+      "then": [
+        {
+          "kind": "set_variable",
+          "config": {
+            "key": "opening",
+            "value": "Hi {{userdata.first_name}} — this is Maya from Northwind Tools, calling about the capacity planning guide you downloaded. Is now a bad moment?",
+            "store": "userdata"
+          }
+        }
+      ],
+      "else": [
+        {
+          "kind": "set_variable",
+          "config": {
+            "key": "opening",
+            "value": "Northwind Tools, this is Maya. How can I help?",
+            "store": "userdata"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+Attach it as `"on_enter": { "tool_id": "7a2e5b91-0c34-4d6f-8a12-b93f5c7e2d61" }`.
+
+<Warning>
+Keep this hook to `set_variable` operations and nothing else. If the hook fails, the call carries on but `{{userdata.opening}}` resolves to nothing — and **an empty greeting on first entry means the agent says nothing at all** and waits for the other person to speak. On an outbound call that is dead air into a stranger's ear. A hook that only writes two strings has nothing that can fail; a hook that calls an HTTP endpoint does.
+</Warning>
+
+`{{system_vars.direction}}` is `inbound` or `outbound` and is empty on web calls and text conversations. See [variables](/agents/variables).
+
+</Step>
+
+<Step title="Write the qualification back to your CRM">
+
+One tool, one capability. The model supplies what it learned as arguments; the tree posts them and says one line. The CRM's token is a workspace secret, so the model never sees it and cannot put it in an argument.
+
+```json
+{
+  "name": "record_qualification",
+  "description": "Record how this lead qualified. Call it exactly once per call, after they have answered the budget and timing questions, or as soon as they say they are not interested. Send 'unknown' for anything they did not tell you rather than guessing.",
+  "json_schema": {
+    "type": "object",
+    "properties": {
+      "interested": {
+        "type": "boolean",
+        "description": "True if they are open to a follow-up conversation. False if they asked not to be contacted again or said they are not interested."
+      },
+      "current_tool": {
+        "type": "string",
+        "description": "What they said they use to plan capacity today, in their own words. Send 'unknown' if they did not say."
+      },
+      "budget_band": {
+        "type": "string",
+        "enum": ["none", "under_10l", "10l_to_50l", "over_50l", "unknown"],
+        "description": "The annual budget band they described, in rupees. 'none' means they said there is no budget this year. 'unknown' means they did not say."
+      },
+      "timeline": {
+        "type": "string",
+        "enum": ["this_quarter", "next_quarter", "this_year", "no_plan", "unknown"],
+        "description": "When they said they would want something in place. 'unknown' means they did not say."
+      },
+      "other_stakeholders": {
+        "type": "string",
+        "description": "Who else they said would be involved in deciding, by role or name. Send 'unknown' if they did not say."
+      }
+    },
+    "required": ["interested", "current_tool", "budget_band", "timeline", "other_stakeholders"]
+  },
+  "operations": [
+    {
+      "kind": "http",
+      "silent": true,
+      "config": {
+        "method": "POST",
+        "url": "https://crm.northwind.example/v1/leads/{{userdata.crm_id}}/qualification",
+        "headers": {
+          "Authorization": "Bearer {{secrets.CRM_TOKEN}}",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "interested": "{{args.interested}}",
+          "current_tool": "{{args.current_tool}}",
+          "budget_band": "{{args.budget_band}}",
+          "timeline": "{{args.timeline}}",
+          "other_stakeholders": "{{args.other_stakeholders}}",
+          "called_from": "{{system_vars.agent_phone_number}}",
+          "called_at": "{{system_vars.now}}"
+        }
+      },
+      "publish_fields": [
+        { "path": "id", "key": "crm_qualification_id", "store": "userdata" }
+      ]
+    },
+    { "kind": "say", "config": { "text": "Got it, thank you — I have noted that down." } }
+  ]
+}
+```
+
+<CodeGroup>
+```bash cURL
+TOOL_ID=$(curl -sS https://api.in.talqing.com/v1/tools \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @record_qualification.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+curl -sS -X POST "https://api.in.talqing.com/v1/tools/$TOOL_ID/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"changelog": "First version"}'
+```
+
+```typescript TypeScript
+const tool = await talqing.tools.create({ createToolRequest: definition });
+await talqing.tools.publish({
+  tool_id: tool.id,
+  publishToolRequest: { changelog: "First version" },
+});
+```
+
+```python Python
+tool = talqing.tools.create(**definition)
+talqing.tools.publish(tool["id"], changelog="First version")
+```
+</CodeGroup>
+
+Two details worth understanding. `silent: true` on the `http` operation hides the CRM's response from the model — and because no operation in the tree can then hand the model anything, the tool is **derived silent**: the `say` line plays and the agent does not improvise a second sentence on top of it. And `{{system_vars.now}}` and `{{system_vars.agent_phone_number}}` are filled in by the platform, so the model is never asked to know the time or the number it called from. See [the operation tree](/tools/operation-tree) and [templating](/tools/templating-and-data).
+
+Attach it with `"tools": [{ "tool_id": "3f8b0f4c-9a1e-4a7d-9c2b-1d5e6f70a821" }]` and leave `tool_version` out — publishing the agent fills it in.
+
+</Step>
+
+<Step title="Turn on post-call analysis">
+
+The tool writes what the agent was *told*. Analysis writes what a reader *infers* from the finished transcript, which is what makes a campaign readable without listening to four hundred calls. Add it to the agent's config:
+
+```json
+{
+  "analysis": {
+    "enabled": true,
+    "summary": true,
+    "outcome": {
+      "prompt": "A successful call is one where a real person answered, agreed to talk, and gave an answer on both budget and timing — even a negative one. A call that reached voicemail, was cut off in the first fifteen seconds, or ended with the person asking to be left alone is a failure."
+    },
+    "fields": [
+      { "name": "fit", "type": "string", "description": "How well this lead matches a mid-market distributor with a warehouse, judged from what they said about their operation. One of: strong, possible, poor, unclear. Use unclear if the call was too short to tell." },
+      { "name": "budget", "type": "string", "description": "What they said about money, in one short phrase, e.g. 'about 20 lakh approved for this year' or 'no budget until April'. Use 'not discussed' if it never came up." },
+      { "name": "timeline", "type": "string", "description": "When they said they would want something in place, in one short phrase. Use 'not discussed' if it never came up." },
+      { "name": "next_step", "type": "string", "description": "The single next action a salesperson should take, written as an instruction, e.g. 'send the integration one-pager to the ops head'. Use 'none' if the person asked not to be contacted again." }
+    ]
+  }
+}
+```
+
+<Note>
+**Analysis fields and userdata answer different questions, and one must not be used for the other.** `userdata` is what the agent *knew* — seeded from the recipient row, written by a tool, confirmed on the call. Analysis fields are what a model *inferred* afterwards by reading the transcript. Analysis results are never merged into userdata, deliberately: a guess must not overwrite a tool-confirmed value.
+
+So `budget_band` on the CRM write is an argument the model filled in while the person was on the line, and it is what you act on. `budget` in the analysis fields is a sentence a reader can scan. If a value has to be right, make it a tool argument. If it only has to be readable, make it an analysis field.
+</Note>
+
+Analysis runs on the agent's own LLM, so it needs no second provider key. It adds roughly 5% to the cost of a call and runs during call finalize, so its tokens land in the same bill. A call is skipped rather than analysed when it ended on a failure reason, when fewer than two caller turns happened, or when the spec produces nothing. See [call analysis](/observability/call-analysis).
+
+</Step>
+
+<Step title="Publish the agent">
+
+Publishing freezes the draft as an immutable version and pins each attached tool to the tool version live at that moment. Republishing the tool afterwards changes nothing until you publish the agent again.
+
+<CodeGroup>
+```bash cURL
+curl -sS -X POST "https://api.in.talqing.com/v1/agents/$AGENT_ID/validate" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+
+curl -sS -X POST "https://api.in.talqing.com/v1/agents/$AGENT_ID/publish" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const check = await talqing.agents.validate({ agent_id });
+if (check.errors.length) throw new Error(check.errors.join("; "));
+await talqing.agents.publish({ agent_id });
+```
+
+```python Python
+check = talqing.agents.validate(agent_id)
+if check["errors"]:
+    raise RuntimeError("; ".join(check["errors"]))
+talqing.agents.publish(agent_id)
+```
+</CodeGroup>
+
+</Step>
+
+<Step title="Pick the number you dial from, and check its outbound flag">
+
+A batch dials from one number, named by `from_phone_number_id`. That number has to be `active` on a carrier account that is `ready`, and it has to have `can_outbound` set — a number imported for inbound only is refused at create with *this number is not enabled for outbound*.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/telephony/phone-numbers \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+
+curl -sS -X PATCH "https://api.in.talqing.com/v1/telephony/phone-numbers/$NUMBER_ID" \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"can_outbound": true}'
+```
+
+```typescript TypeScript
+const numbers = await talqing.telephony.phoneNumbers.list();
+await talqing.telephony.phoneNumbers.update({
+  number_id: "8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+  patchPhoneNumberRequest: { can_outbound: true },
+});
+```
+
+```python Python
+numbers = talqing.telephony.phone_numbers.list()
+talqing.telephony.phone_numbers.update(
+    "8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2", can_outbound=True
+)
+```
+</CodeGroup>
+
+The number the campaign dials *from* is also what decides how each `to` is parsed: numbers are normalized against the region of the dialling number, not a global default.
+
+</Step>
+
+<Step title="Place one real call to yourself">
+
+Before the list, one call. `POST /v1/calls/outbound` runs the same published agent with the same userdata a batch row would carry, so it exercises the greeting, the tool and the analysis in one go.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/calls/outbound \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from_phone_number_id": "8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+    "to": "+919812345678",
+    "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    "userdata": { "first_name": "Priya", "company": "Asha Textiles", "crm_id": "lead_test_1" }
+  }'
+```
+
+```typescript TypeScript
+const call = await talqing.calls.outbound({
+  outboundCallRequest: {
+    from_phone_number_id: "8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+    to: "+919812345678",
+    agent_id: "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    userdata: { first_name: "Priya", company: "Asha Textiles", crm_id: "lead_test_1" },
+  },
+});
+console.log(call.session_id);
+```
+
+```python Python
+call = talqing.calls.outbound(
+    from_phone_number_id="8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+    to="+919812345678",
+    agent_id="9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    userdata={"first_name": "Priya", "company": "Asha Textiles", "crm_id": "lead_test_1"},
+)
+print(call["session_id"])
+```
+</CodeGroup>
+
+This rings a real phone and is billed. There is no dry run. Use a number you own, and use a `crm_id` your CRM will accept and you can delete afterwards.
+
+</Step>
+
+<Step title="Create the batch">
+
+Now the list. One request carries the policy and up to 10,000 recipients.
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/calls/batches \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Capacity guide, week 36",
+    "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    "from_phone_number_id": "8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+    "timezone": "Asia/Kolkata",
+    "start_at": "2026-09-01T04:30:00Z",
+    "calling_window": { "start": "10:00", "end": "18:00", "days": [1, 2, 3, 4, 5] },
+    "max_concurrency": 3,
+    "max_attempts": 3,
+    "retry_after_minutes": 90,
+    "recipients": [
+      { "to": "+919876543210", "userdata": { "first_name": "Priya", "company": "Asha Textiles", "crm_id": "lead_88213" } },
+      { "to": "+919812345678", "userdata": { "first_name": "Arjun", "company": "Ravi Foods", "crm_id": "lead_88401" } }
+    ]
+  }'
+```
+
+```typescript TypeScript
+import { readFileSync } from "node:fs";
+
+type Lead = { phone: string; first_name: string; company: string; crm_id: string };
+const leads: Lead[] = JSON.parse(readFileSync("leads.json", "utf8"));
+
+const batch = await talqing.calls.batches.create({
+  createCallBatchRequest: {
+    name: "Capacity guide, week 36",
+    agent_id: "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    from_phone_number_id: "8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+    timezone: "Asia/Kolkata",
+    start_at: "2026-09-01T04:30:00Z",
+    calling_window: { start: "10:00", end: "18:00", days: [1, 2, 3, 4, 5] },
+    max_concurrency: 3,
+    max_attempts: 3,
+    retry_after_minutes: 90,
+    recipients: leads.map(({ phone, ...userdata }) => ({ to: phone, userdata })),
+  },
+});
+console.log(batch.id, batch.status, batch.next_dial_at);
+```
+
+```python Python
+import csv
+
+with open("leads.csv", newline="") as handle:
+    recipients = [
+        {
+            "to": row.pop("phone"),
+            "userdata": {k: v for k, v in row.items() if v},
+        }
+        for row in csv.DictReader(handle)
+    ]
+
+batch = talqing.calls.batches.create(
+    name="Capacity guide, week 36",
+    agent_id="9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    from_phone_number_id="8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+    timezone="Asia/Kolkata",
+    start_at="2026-09-01T04:30:00Z",
+    calling_window={"start": "10:00", "end": "18:00", "days": [1, 2, 3, 4, 5]},
+    max_concurrency=3,
+    max_attempts=3,
+    retry_after_minutes=90,
+    recipients=recipients,
+)
+print(batch["id"], batch["status"], batch["next_dial_at"])
+```
+</CodeGroup>
+
+In the dashboard this is **Telephony → Outbound Calling → New batch**, which takes the same fields and a pasted or uploaded list.
+
+The four numbers that decide how it behaves:
+
+| Field | Range | Default | What to pick |
+| --- | --- | --- | --- |
+| `max_concurrency` | 1–10 | **1** | 2 or 3 while you are still reading transcripts; higher once the agent has earned it. The default is 1 because an unstated intention about something that spends money should be read conservatively. |
+| `max_attempts` | 1–5 | **1** | 2 or 3 for a cold list, where most first dials go unanswered. The default is 1 for the same reason: nobody should discover they called a stranger three times. |
+| `retry_after_minutes` | 5–1440 | 30 | 90 or more. Ten minutes later is the same hour of the same day and usually the same voicemail. |
+| `calling_window` | — | any hour, any day | Set it. Without one a list uploaded at 23:00 starts dialling at 23:00. `days` are ISO weekdays with 1 = Monday. |
+
+`timezone` is the batch's own clock, and it interprets `calling_window` — so the window is the *recipients'* working day, not the working day of whoever pressed the button.
+
+</Step>
+
+</Steps>
+
+## Test it
+
+Before the list runs, prove each piece separately on the single call you placed.
+
+1. **The transcript.** `GET /v1/calls/{session_id}` returns the transcript with every tool call and its output, plus per-stage latency. Check the greeting was substituted, that the agent gave the way out inside the first three sentences, and that `record_qualification` was called once rather than twice.
+2. **The CRM row.** Look in your CRM, not at the tool's response. The `http` operation is `silent`, so a 200 with the wrong body looks identical to a correct write from the agent's side.
+3. **The analysis.** Read `analysis.status`, `analysis.outcome` and `analysis.fields` on the same call. If a field came back vague, that is the field's `description` failing, not the model — rewrite it and use `POST /v1/calls/{session_id}/analysis/preview` to try new wording against the same transcript. Preview writes nothing and still costs a real LLM call.
+4. **A two-row batch to phones you own.** Create the campaign with two of your own numbers and `max_concurrency: 1` before you create it with four hundred. Everything about scheduling, retries and counters is the same shape at two rows as at four thousand.
+
+## Running it
+
+`next_dial_at` is the field that tells "waiting for Monday" apart from "stuck". It is null while the batch is actually dialling, while a person has it paused, and once it is over — all three of which `status` already tells you.
+
+- **Pausing** stops claiming new recipients; calls already ringing or connected run to their end. **Resuming** carries on, and a batch whose `start_at` is still in the future goes back to `scheduled` rather than `running` — pausing and resuming is never a way to start early.
+- **Adding rows to a running batch** works: `POST /v1/calls/batches/{batch_id}/recipients` appends, and numbers the batch already holds are **silently skipped and reported** rather than rejected. Re-uploading the same CRM export never calls anyone twice.
+- **The circuit breaker** stops a batch after **ten consecutive** setup-style failures — a carrier fault, an unpublished agent, an expired credential. The count is rolling and any success resets it, and busy signals and unanswered phones never count towards it: a run of those is a phone list, not a fault.
+- **Running out of credit pauses the campaign rather than failing it.** No attempt is spent on anybody, `failure_reason` says the workspace is out of credits, and it resumes on its own once you top up. There is no button to press.
+- **Cancel is final.** A finished batch can be deleted, which removes its recipient list; the calls it made stay.
+
+The full behaviour of every one of these — statuses, the retry table by close reason, policy edits — is in [batch calling](/telephony/batch-calling).
+
+## What to watch
+
+| Where | What it answers |
+| --- | --- |
+| `GET /v1/calls/batches/{batch_id}` | `counts` (total, pending, dialing, completed, failed, canceled), `status`, `next_dial_at`, `failure_reason`. |
+| `GET /v1/calls/batches/{batch_id}/recipients?status=failed` | Per person: `attempts`, `last_close_reason` and a plain sentence in `last_close_reason_label`. |
+| `GET /v1/calls?batch_id=…` | The calls themselves, with `summary` and `outcome` on each row. Add `&outcome=success` for the ones that got an answer. |
+| `GET /v1/calls/{session_id}` | The only place the custom analysis `fields` appear — the list gives you `summary` and `outcome`, not the four fields. |
+| The `session.completed` webhook | Carries `analysis.summary`, `analysis.outcome` and `analysis.fields` for every call as it lands, plus `batch_id`. If you want a shortlist in your own system rather than a script that fetches each call, subscribe to this. See [webhooks](/observability/webhooks). |
+
+Turning the campaign into a qualified list, then, is two filters and a fetch: list the batch's calls with `outcome=success`, fetch each one, and keep the rows whose `fit` is `strong` or `possible`. The `next_step` field is what a salesperson reads first.
+
+## Where it falls short
+
+- **Voicemail detection is the model's judgement.** It hears the machine's greeting and decides, so an unusual greeting can slip through as a conversation with nobody, and each retry that reaches the same mailbox leaves the message again. `counts.voicemail` on the batch says how many recipients' latest call was a machine.
+- **One batch is one agent, one number, one clock.** There are no per-recipient overrides of anything but `userdata`. Half a list needing a different agent, a different caller ID or a different language is a second batch.
+- **The batch runs as the person who created it.** Every dialling pass re-authorizes as that user. If they leave the workspace or drop below the EDITOR role, their campaign records a configuration failure on the next pass, and ten of those trip the breaker. Hand running campaigns over before somebody leaves.
+- **Calling law is yours to know.** Consent, do-not-call registers, permitted calling hours, disclosure requirements and recording law differ by country and by state, and Talqing enforces none of them. `calling_window` is a scheduling feature, not a compliance one — it does not know a public holiday from a Tuesday.
+- **Analysis is a reading, not a record.** It is one LLM call over the transcript, with a 30-second timeout, three-valued on purpose so that a wrong number comes back `unknown` rather than being forced into a verdict. Back a business decision with what a tool confirmed, not with what a summary suggested.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Batch calling" href="/telephony/batch-calling">
+    Every status, the retry table, policy edits and pinning a version.
+  </Card>
+  <Card title="Call analysis" href="/observability/call-analysis">
+    Outcome, fields, preview and backfilling calls you already have.
+  </Card>
+  <Card title="Webhooks" href="/observability/webhooks">
+    Get each finished call, with its analysis, pushed to your own system.
+  </Card>
+</CardGroup>

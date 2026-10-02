@@ -1,0 +1,406 @@
+---
+title: "Voices"
+description: "Pick the voice an agent speaks in, set its speed, and carry an ElevenLabs voice's own tuning onto the agent."
+---
+
+The voice lives on `config.tts` — one provider, one model, one voice id from
+that provider's roster. Browse the roster with `GET /v1/catalog/voices` before
+you write an id, because every provider names its voices differently and a
+wrong id fails at synthesis time, on a live call.
+
+Speech-to-speech agents pick a voice too, on `config.realtime` instead of
+`config.tts`. Everything below about browsing applies; the settings differ, and
+are called out where they do.
+
+## The `tts` object
+
+<ParamField path="provider" type="string" default="sarvam">
+  A text-to-speech provider from `GET /v1/catalog` — `elevenlabs`, `deepgram`,
+  `openai`, `sarvam`, `raya`, `soniox` or `xai`.
+</ParamField>
+
+<ParamField path="model" type="string" default="bulbul:v3">
+  A model that provider offers, such as `eleven_flash_v2_5`. The
+  provider/model pair must appear in the catalog and must list `voice` (or
+  `video`) among its channels, or the write is refused.
+</ParamField>
+
+<ParamField path="voice" type="string | null">
+  The voice id, as `GET /v1/catalog/voices` returns it. `null` falls back to
+  that model's catalog `default_voice`.
+</ParamField>
+
+<ParamField path="voice_name" type="string | null">
+  A display label for the dashboard. It is stored and shown, never sent to the
+  provider — the id is what speaks.
+</ParamField>
+
+<ParamField path="speed" type="number" default="1.0">
+  Speaking rate. The field accepts 0.5–2.0, and then the model's own range
+  applies on top: publishing `1.4` on a model that stops at `1.2` is refused.
+  Models that declare no speed control accept `1.0` and nothing else.
+</ParamField>
+
+<ParamField path="stability" type="number | null">
+  ElevenLabs only, 0.0–1.0. The picked voice's own value — see
+  [the ElevenLabs step](#elevenlabs-voices-need-a-second-call). Setting it on
+  any other model is refused.
+</ParamField>
+
+<ParamField path="similarity_boost" type="number | null">
+  ElevenLabs only, 0.0–1.0, and the same story as `stability`.
+</ParamField>
+
+<ParamField path="expressive" type="boolean" default="false">
+  Lets the agent write delivery tags into its own speech. Only on models that
+  declare a tag dialect — see [expressive delivery](/agents/expressive-delivery).
+</ParamField>
+
+<ParamField path="fallback" type="object | null">
+  A second provider/model to switch to mid-call if the first starts failing. It
+  carries its own `voice`, `speed` and voice settings. See
+  [model fallbacks](/agents/model-fallbacks).
+</ParamField>
+
+There is no `language` on `tts`. The agent carries one language for the whole
+pipeline — see [language](/agents/language).
+
+## Browsing voices
+
+`GET /v1/catalog/voices` takes a `provider` and returns that provider's roster
+plus the filter options it supports. `model` scopes the list where a provider's
+voices belong to one model; `search` matches free text against a voice's name,
+id and description and works on every provider; `language`, `accent` and `gender`
+narrow it further where the provider has them.
+
+<CodeGroup>
+```bash cURL
+curl -G https://api.in.talqing.com/v1/catalog/voices \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  --data-urlencode "provider=elevenlabs" \
+  --data-urlencode "language=hi" \
+  --data-urlencode "accent=marathi" \
+  --data-urlencode "gender=female"
+```
+
+```typescript TypeScript
+const { voices, accents, has_more } = await talqing.catalog.voices.list({
+  provider: "elevenlabs",
+  language: "hi",
+  accent: "marathi",
+  gender: "female",
+});
+```
+
+```python Python
+page = talqing.catalog.voices.list(
+    provider="elevenlabs",
+    language="hi",
+    accent="marathi",
+    gender="female",
+)
+```
+</CodeGroup>
+
+Each voice carries `id`, `name` and whatever attributes the provider publishes:
+`gender`, `language`, `accent`, `country`, `locale`, `description`,
+`sample_url` (an audio preview), `image_url`, `tier` and `owner_id`. Only `id`
+goes on the agent.
+
+The response also echoes back the facets that provider actually has —
+`languages`, `accents`, `genders`. An empty list means that provider exposes no
+such filter, not that nothing matched. `accents` stays empty until you pick a
+`language`, because an accent only means something inside one.
+
+<Note>
+  If your workspace has a [provider key](/get-started/provider-keys) saved for
+  the provider, the listing runs on your key and `workspace_key` comes back
+  `true` — for ElevenLabs that means your own account's voices lead the first
+  page. Without a key you see the provider's public roster.
+</Note>
+
+### What each provider offers
+
+| Provider | Roster | Scoped by `model` | Filters | Preview audio | Pages |
+| --- | --- | --- | --- | --- | --- |
+| `elevenlabs` | Your account, then the shared library | No | language, accent, gender | Yes | Yes — `page` + `has_more` |
+| `deepgram` | Live from Deepgram | Yes | language, accent, gender | Yes | No |
+| `xai` | Live from xAI (shared with Grok Voice) | No | language, gender | No | No |
+| `raya` | Live from Raya | **Yes** | language | No | No |
+| `soniox` | Live from Soniox | **Yes** | gender | No | No |
+| `openai` | Fixed list in the catalog | Yes | gender | No | No |
+| `sarvam` | Fixed list in the catalog (37 speakers) | Yes | gender | No | No |
+| `gemini` | Fixed list in the catalog (realtime only) | Yes | — | No | No |
+
+Raya and Soniox voices belong to exactly one model — a Raya `m1` voice is
+rejected by `standard`, and vice versa — so pass the `model` you are going to
+run or the picker will offer ids that fail at synthesis.
+
+Deepgram is a special case: the voice id *is* the Deepgram model string
+(`aura-2-thalia-en`, `flux-alexis-en`), and the language is baked into it.
+`flux`, `aura-2` and `aura-1` on the agent are the billing ids; the voice
+decides what is spoken and in which language. The rosters do not overlap — a
+Flux voice is rejected by Aura and vice versa — so pass the `model` here too.
+
+For a speech-to-speech agent, add `kind=realtime`. Those models have their own
+voice rosters — OpenAI's realtime models offer 10 of the 13 OpenAI TTS voices,
+and Gemini Live offers 30 of its own.
+
+## Speed
+
+`speed` is clamped by the model, not by the field. Ask for something outside
+the range and the write is refused with the range in the message
+(`TTS speed for 'elevenlabs/eleven_flash_v2_5' must be between 0.8 and 1.2`).
+
+| Model | Speed | Range |
+| --- | --- | --- |
+| `xai/xai-tts` | Yes | 0.7 – 1.5 |
+| `sarvam/bulbul:v3` | Yes | 0.5 – 2.0 |
+| `raya/m1` | Yes | 0.5 – 1.5 |
+| `raya/standard` | Yes | 0.5 – 1.5 |
+| `soniox/tts-rt-v2` | Yes | 0.7 – 1.3 |
+| `elevenlabs/eleven_turbo_v2_5` | Yes | 0.8 – 1.2 |
+| `elevenlabs/eleven_flash_v2_5` | Yes | 0.8 – 1.2 |
+| `elevenlabs/eleven_v3` | No | — |
+| `elevenlabs/eleven_v3_conversational` | No | — |
+| `openai/gpt-4o-mini-tts` | Yes | 0.5 – 2.0 |
+| `openai/tts-1` | Yes | 0.5 – 2.0 |
+| `openai/tts-1-hd` | Yes | 0.5 – 2.0 |
+| `deepgram/flux` | No | — |
+| `deepgram/aura-2` | No | — |
+| `deepgram/aura-1` | No | — |
+| `openai/gpt-realtime-2.1` | Yes | 0.5 – 2.0 |
+| `openai/gpt-realtime-2.1-mini` | Yes | 0.5 – 2.0 |
+| `openai/gpt-live-1` | No | — |
+| `gemini/gemini-3.8-live` | No | — |
+| `gemini/gemini-2.5-flash-native-audio-preview-12-2025` | No | — |
+| `xai/grok-voice-think-fast-2.0` | No | — |
+| `xai/grok-voice-think-fast-1.0` | No | — |
+
+Eleven v3 expresses pace through [delivery tags](/agents/expressive-delivery)
+rather than a speed parameter, which is why it takes no speed at all.
+
+## ElevenLabs voices need a second call
+
+<Warning>
+  An ElevenLabs voice set without `stability` and `similarity_boost` does not
+  speak in its author's tuning. It speaks in ElevenLabs' generic default, on
+  every call, with nothing anywhere to say why.
+</Warning>
+
+ElevenLabs applies a voice's own settings only to a request that carries no
+overrides at all. Talqing always sends a speed, so a `voice_settings` object is
+always on the wire — and any key that object omits falls back to ElevenLabs'
+global default (stability 0.5, similarity boost 0.75), never to the voice's own.
+There is no way to inherit one field and override another.
+
+So the two numbers have to travel with the agent. Read them once, when you pick
+the voice, and store them on the same `tts` object.
+
+<Steps>
+  <Step title="Find the voice">
+    `GET /v1/catalog/voices?provider=elevenlabs`. A voice already in your
+    workspace's ElevenLabs account comes back with **no** `owner_id` — use its
+    `id` directly and skip the next step. A shared-library voice carries an
+    `owner_id`.
+  </Step>
+  <Step title="Save a shared-library voice">
+    `POST /v1/catalog/voices/elevenlabs/add` with the voice's `voice_id` and
+    `owner_id`. It is saved into your workspace's own ElevenLabs account and the
+    response returns the id to use from here on — which may differ from the
+    library id. An agent on your key cannot synthesize with a voice that is not
+    in your account.
+  </Step>
+  <Step title="Read the voice's settings">
+    `GET /v1/catalog/voices/elevenlabs/{voice_id}/settings`, with the id the
+    previous step returned. It answers `{ "stability": …, "similarity_boost": … }`.
+    Called with a library id that was never saved, it returns 404 telling you to
+    save it first.
+  </Step>
+  <Step title="Write both onto the agent">
+    Set `tts.voice`, `tts.stability` and `tts.similarity_boost` together, and
+    publish.
+  </Step>
+</Steps>
+
+<CodeGroup>
+```bash cURL
+VOICE_ID=$(curl -s -X POST https://api.in.talqing.com/v1/catalog/voices/elevenlabs/add \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"voice_id":"hpp4J3VqNfWAUOO0d1Us","owner_id":"a1b8c0d2e3f4a5b6c7d8e9f0a1b2c3d4","name":"Hope"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["voice_id"])')
+
+curl -s "https://api.in.talqing.com/v1/catalog/voices/elevenlabs/$VOICE_ID/settings" \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+# {"stability":0.45,"similarity_boost":0.8}
+
+curl -X PATCH https://api.in.talqing.com/v1/agents/6f1d0a2c-6a0e-4f77-9b1e-6c1a2d3e4f50 \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "tts": {
+        "provider": "elevenlabs",
+        "model": "eleven_flash_v2_5",
+        "voice": "hpp4J3VqNfWAUOO0d1Us",
+        "voice_name": "Hope",
+        "speed": 1.0,
+        "stability": 0.45,
+        "similarity_boost": 0.8
+      }
+    }
+  }'
+```
+
+```typescript TypeScript
+const agentId = "6f1d0a2c-6a0e-4f77-9b1e-6c1a2d3e4f50";
+
+// 1. Pick a voice.
+const { voices } = await talqing.catalog.voices.list({
+  provider: "elevenlabs",
+  language: "en",
+  gender: "female",
+});
+const picked = voices[0];
+
+// 2. A shared-library voice has an owner_id and must be saved first.
+let voiceId = picked.id;
+if (picked.owner_id) {
+  const added = await talqing.catalog.voices.elevenlabs.add({
+    addVoiceRequest: {
+      voice_id: picked.id,
+      owner_id: picked.owner_id,
+      name: picked.name ?? picked.id,
+    },
+  });
+  voiceId = added.voice_id;
+}
+
+// 3. Read the voice's own tuning, with the id step 2 returned.
+const settings = await talqing.catalog.voices.elevenlabs.settings({
+  voice_id: voiceId,
+});
+
+// 4. Write all three values onto `tts` together. A null clears the agent's own value.
+await talqing.agents.update({
+  agent_id: agentId,
+  updateAgentRequest: {
+    config: {
+      tts: {
+        provider: "elevenlabs",
+        model: "eleven_flash_v2_5",
+        voice: voiceId,
+        voice_name: picked.name,
+        speed: 1.0,
+        stability: settings.stability,
+        similarity_boost: settings.similarity_boost,
+      },
+    },
+  },
+});
+await talqing.agents.publish({ agent_id: agentId });
+```
+
+```python Python
+agent_id = "6f1d0a2c-6a0e-4f77-9b1e-6c1a2d3e4f50"
+
+picked = talqing.catalog.voices.list(
+    provider="elevenlabs", language="en", gender="female"
+)["voices"][0]
+
+voice_id = picked["id"]
+if picked.get("owner_id"):
+    added = talqing.catalog.voices.elevenlabs.add(
+        voice_id=picked["id"],
+        owner_id=picked["owner_id"],
+        name=picked.get("name") or picked["id"],
+    )
+    voice_id = added["voice_id"]
+
+settings = talqing.catalog.voices.elevenlabs.settings(voice_id)
+
+talqing.agents.update(
+    agent_id,
+    config={
+        "tts": {
+            "provider": "elevenlabs",
+            "model": "eleven_flash_v2_5",
+            "voice": voice_id,
+            "voice_name": picked.get("name"),
+            "speed": 1.0,
+            "stability": settings["stability"],
+            "similarity_boost": settings["similarity_boost"],
+        }
+    },
+)
+talqing.agents.publish(agent_id)
+```
+</CodeGroup>
+
+The dashboard's voice picker does all four steps when you click a voice. It is
+only over the API that you have to sequence them yourself.
+
+<Note>
+  `stability` and `similarity_boost` may legitimately come back `null` — that
+  means the voice stores no override of its own, and leaving them unset on the
+  agent is then exactly right.
+</Note>
+
+### The settings belong to that voice, not to the agent
+
+They describe one voice's tuning and mean nothing on another. Two rules follow:
+
+- **Change the voice, re-read the settings.** Carrying one voice's numbers onto
+  another is worse than having none.
+- **Change to a model that has no such setting, and clear them.** Publishing
+  `stability` on, say, `sarvam/bulbul:v3` is refused outright:
+  `text-to-speech model 'sarvam/bulbul:v3' has no stability setting - clear it,
+  or pick one of: elevenlabs/eleven_turbo_v2_5, elevenlabs/eleven_flash_v2_5,
+  elevenlabs/eleven_v3, elevenlabs/eleven_v3_conversational`. It fails at publish rather than being dropped silently,
+  because a setting that quietly does nothing is the failure this whole step
+  exists to prevent.
+
+A fallback voice carries its own `stability` and `similarity_boost` and is
+checked the same way.
+
+## Reference: text-to-speech models
+
+`supports_voice_settings` is the catalog flag that decides whether `stability`
+and `similarity_boost` are allowed at all. Only ElevenLabs sets it.
+
+| Model | Voice settings | Speed | Expressive | Languages published | Voices |
+| --- | --- | --- | --- | --- | --- |
+| `xai/xai-tts` | No | 0.7 – 1.5 | Yes | 20, plus an Auto option | Live |
+| `sarvam/bulbul:v3` | No | 0.5 – 2.0 | No | 11 | 37, fixed |
+| `raya/m1` | No | 0.5 – 1.5 | No | 13 | Live, model-scoped |
+| `raya/standard` | No | 0.5 – 1.5 | No | 13 | Live, model-scoped |
+| `soniox/tts-rt-v2` | No | 0.7 – 1.3 | No | 63 (a language is **required**) | Live, model-scoped |
+| `elevenlabs/eleven_turbo_v2_5` | **Yes** | 0.8 – 1.2 | No | 32 | Live |
+| `elevenlabs/eleven_flash_v2_5` | **Yes** | 0.8 – 1.2 | No | 32 | Live |
+| `elevenlabs/eleven_v3` | **Yes** | — | Yes | 33 | Live |
+| `elevenlabs/eleven_v3_conversational` | **Yes** | — | Yes | 33 | Live |
+| `openai/gpt-4o-mini-tts` | No | 0.5 – 2.0 | No | None — multilingual | 13, fixed |
+| `openai/tts-1` | No | 0.5 – 2.0 | No | None — multilingual | 9, fixed |
+| `openai/tts-1-hd` | No | 0.5 – 2.0 | No | None — multilingual | 9, fixed |
+| `deepgram/flux` | No | — | No | None — the voice encodes it (English only) | Live, model-scoped |
+| `deepgram/aura-2` | No | — | No | None — the voice encodes it | Live, model-scoped |
+| `deepgram/aura-1` | No | — | No | None — the voice encodes it | Live, model-scoped |
+
+Every entry above runs on `voice` and `video`. Most are priced per character;
+`openai/gpt-4o-mini-tts` bills text input and audio output tokens instead. All
+of it goes to your own provider key — see [costs](/observability/costs).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Expressive delivery" href="/agents/expressive-delivery">
+    Let the agent write laughs, whispers and pauses into what it says.
+  </Card>
+  <Card title="Language" href="/agents/language">
+    One setting, every model, and what Auto really means.
+  </Card>
+  <Card title="Model fallbacks" href="/agents/model-fallbacks">
+    A second voice for when the first provider stops answering.
+  </Card>
+</CardGroup>

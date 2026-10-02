@@ -1,0 +1,221 @@
+---
+title: "Outbound calls"
+description: "Dial one real phone number from one of your numbers, with a published voice agent on the call."
+---
+
+`POST /v1/calls/outbound` places a live phone call: it dials `to` from one of
+your workspace's numbers and puts a published `voice` agent on it.
+
+<Warning>
+This places a **real, billable call to a real person**. There is no dry-run
+mode, no test number and no sandbox. The request returns when the call has been
+placed, not when it has been answered.
+</Warning>
+
+## A call
+
+<CodeGroup>
+```bash cURL
+curl -sS https://api.in.talqing.com/v1/calls/outbound \
+  -H "Authorization: Bearer $TALQING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from_phone_number_id": "8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+    "to": "+919876543210",
+    "agent_id": "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    "userdata": { "name": "Priya", "policy_number": "NW-40182" }
+  }'
+```
+
+```typescript TypeScript
+const call = await talqing.calls.outbound({
+  outboundCallRequest: {
+    from_phone_number_id: "8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+    to: "+919876543210",
+    agent_id: "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    userdata: { name: "Priya", policy_number: "NW-40182" },
+  },
+});
+console.log(call.session_id, call.warnings);
+```
+
+```python Python
+call = talqing.calls.outbound(
+    from_phone_number_id="8b41d0e6-2c77-4a19-b3f5-91ad6e40c8b2",
+    to="+919876543210",
+    agent_id="9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704",
+    userdata={"name": "Priya", "policy_number": "NW-40182"},
+)
+print(call["session_id"], call["warnings"])
+```
+</CodeGroup>
+
+## The request
+
+<ParamField path="from_phone_number_id" type="uuid" required>
+Which of your numbers to dial from. It must be `active`, have `can_outbound`
+enabled, and sit on a carrier account that is `ready`. Its E.164 is the caller
+ID the person sees.
+</ParamField>
+
+<ParamField path="to" type="string" required>
+The number to dial. Any format — see normalization below.
+</ParamField>
+
+<ParamField path="agent_id" type="uuid">
+A published `voice` agent in this workspace. A `video` or `text` agent is
+refused with `this endpoint runs voice agents; '<name>' resolves to a <channel>
+agent`.
+</ParamField>
+
+<ParamField path="userdata" type="object">
+What this call starts knowing about the person, read as `{{userdata.field}}` in
+the prompt, the greeting and every tool. It is merged onto their contact record,
+so it is there again on their next call. Keys beginning with `_talqing` are
+reserved. See [userdata](/agents/userdata).
+</ParamField>
+
+<ParamField path="vars" type="object">
+A flat map of strings read as `{{vars.name}}`. It overrides the declared
+defaults on every agent this session runs and is gone when the call ends —
+never written onto anyone's contact record, and no tool can change it mid-call.
+Use `userdata` for facts about the person and `vars` for configuration of the
+session. See [variables](/agents/variables).
+</ParamField>
+
+### Running something other than the published agent
+
+The same four fields every session-starting endpoint takes — `agent_version`
+(including `"draft"`), `agent_override`, a whole inline `agent`, and
+`agent_team` — work here too. They are mutually exclusive with each other in the
+usual way: one agent, or a team of them. Prefer `agent_id` and `userdata`; reach
+for the rest only when the definition is generated per request and would never
+be reused. See [per-call configuration](/agents/per-call-configuration) for the
+full reference.
+
+The merged result is validated by the same rules that guard publishing, so a bad
+override is a `400` at create rather than a call that connects and then fails.
+
+## How `to` is normalized
+
+`to` is normalized to E.164 **against the region of the number you are dialling
+from**, not against a platform-wide default. A bare national number is national
+relative to your own number, which is the only honest reading — `07911123456` is
+a UK mobile and an Indian national-format string, and only the number it is
+being dialled from says which.
+
+| You send | Dialling from `+912248900123` (India) | Dialling from `+442079460000` (UK) |
+| --- | --- | --- |
+| `+919876543210` | `+919876543210` | `+919876543210` |
+| `00919876543210` | `+919876543210` | `+919876543210` |
+| `07911123456` | `+917911123456` | `+447911123456` |
+| `09876543210` | `+919876543210` | Refused — not a valid UK number |
+
+Validation is strict: the result has to be a number that is actually assignable
+in its plan. A typo is refused with
+`to: '<what you sent>' is not a valid number to dial from <your number>` rather
+than dialled. There is money and a carrier at the other end.
+
+## Caller ID
+
+The person sees the E.164 of `from_phone_number_id`. You cannot set a different
+caller ID per call — it is a property of the number, set at the carrier.
+
+## What comes back
+
+```json
+{
+  "session_id": "5c3ba6d2-08a7-4c1e-b6f0-7e1a94c3d2f8",
+  "warnings": []
+}
+```
+
+Two fields, and that is deliberate: nothing has been dialled yet, so there is no
+call to describe. `GET /v1/calls/{session_id}` answers on this id from the moment
+it is returned and carries the status, the conversation, the version and
+everything else — the same is true of the token endpoint on
+[web calls](/channels/web-calls).
+
+`warnings` is the exception, and the reason it is here: it carries what the plan
+resolved but could not refuse — an unreachable team member, a handoff into an
+agent that records when this one does not — and **nothing stores it**. Log it
+here or it is gone. The plan resolves against state at call time, so it is not
+the list publishing returned.
+
+### Following the call
+
+| How | What you get |
+| --- | --- |
+| `GET /v1/calls/{session_id}` | The transcript with every tool call and its output, per-stage latency, usage and cost. See [calls](/observability/calls). |
+| Webhook `session.queued` | Fired as the call is placed, with both numbers and the phone number id. |
+| Webhook `session.completed` | Fired after the call ends and its recording, analysis and billing have landed. See [webhooks](/observability/webhooks). |
+
+Cost is `null` until the call has been priced — a call in progress shows no cost
+at all rather than a partial estimate.
+
+## Credit is checked before anything is dialled
+
+If the workspace has no credit, the request is refused with a `402` and nothing
+is written or dialled:
+
+```json
+{
+  "detail": {
+    "message": "This workspace is out of credits. Add credits in Settings → Billing to start new calls. Calls already in progress are unaffected.",
+    "errors": []
+  }
+}
+```
+
+Top up and retry. See [pricing and credits](/get-started/pricing-and-credits).
+
+## What this does not do
+
+<Warning>
+**Voicemail is only detected if the agent asks for it.** With
+[`voicemail_detection`](/agents/voicemail) off — the default — a call that reaches
+a voicemail greeting is answered, billed like any other call, and reported as a
+normal completion, with the agent talking to nobody. Turn it on for any agent
+that places calls: it then leaves your message, if you wrote one, hangs up, and
+the call ends as `voicemail`.
+</Warning>
+
+A **test call from the dashboard is exactly this endpoint**. It is a real,
+billable call to whatever number you type into it, placed with a real agent.
+There is no test mode behind that button.
+
+## Limits on a live call
+
+| Limit | Value | What happens |
+| --- | --- | --- |
+| Ring time | 60 seconds | The callee's phone rings this long before the call is given up on. Platform-wide, not settable per call; the ceiling is 80 seconds. |
+| Call duration | 3 hours | A hard cap on any phone call. At the cap the call is ended, whatever is happening on it. |
+| Silence on the line | 120 seconds | A leg that carries no audio for this long is dropped by the carrier side. It is why a call parked on hold for minutes can disappear. |
+
+The three-hour cap matters most where a call can be left open by something other
+than a conversation — see [transfers](/telephony/transfers), where two humans on
+a bridged call hold the line until one of them hangs up.
+
+## Errors
+
+| Status | Message | Cause |
+| --- | --- | --- |
+| `400` | `this number is not enabled for outbound` | `can_outbound` is false on the number. |
+| `400` | `phone number must be active (provisioned) for outbound calls` | The number is `pending`, `provisioning`, `error` or `disabled`. |
+| `400` | `telephony account is not ready for outbound; provision it first` | The carrier account is not `ready`. |
+| `400` | `to: … is not a valid number to dial from …` | `to` did not normalize to a valid number. |
+| `400` | `'<name>' is required and has no default` | The agent declares a variable you did not supply in `vars`. |
+| `402` | out of credits | See above. |
+| `404` | `phone number not found` / `agent not found` | Wrong id, or wrong region. |
+| `502` | `failed to dispatch outbound call: …` | The call could not be started. The session is recorded as failed with `sip_dispatch_failed`. |
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Batch calling" href="/telephony/batch-calling">
+    The same call, to a list, on a schedule.
+  </Card>
+  <Card title="Close reasons" href="/observability/close-reasons">
+    Every way a call can end, and what to do about each.
+  </Card>
+</CardGroup>

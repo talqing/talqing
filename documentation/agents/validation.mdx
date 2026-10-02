@@ -1,0 +1,335 @@
+---
+title: "Validation"
+description: "Publish-grade checks on an agent draft: what blocks a publish, what only warns, and how to fix each refusal."
+---
+
+`POST /v1/agents/{agent_id}/validate` runs every check publishing runs, and
+publishes nothing. It returns two lists:
+
+```json
+{ "errors": [], "warnings": ["…"] }
+```
+
+**An error blocks a publish. A warning does not.** Publishing calls the same
+validator, so anything in `errors` here is exactly what a publish would refuse,
+and `POST /v1/agents/{agent_id}/publish` returns the same `warnings` on success.
+
+Validation runs server-side against state a draft cannot be checked against by
+eye — the provider catalog, which tools are published, which provider keys the workspace holds, which phone numbers
+point at this agent. Call it before every publish rather than reasoning about
+the config.
+
+The TypeScript and Python samples below assume a configured client — see
+[SDKs](/sdks/overview).
+
+<CodeGroup>
+```bash cURL
+curl -sS -X POST \
+  https://api.in.talqing.com/v1/agents/9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704/validate \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const agentId = "9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704";
+const report = await talqing.agents.validate({ agent_id: agentId });
+if (report.errors.length) throw new Error(report.errors.join("\n"));
+report.warnings.forEach((w) => console.warn(w));
+```
+
+```python Python
+report = talqing.agents.validate("9f1c0a3e-4b21-4f7a-9c6d-2a5b8e13d704")
+if report["errors"]:
+    raise SystemExit("\n".join(report["errors"]))
+for warning in report["warnings"]:
+    print("warning:", warning)
+```
+</CodeGroup>
+
+`validate` needs the editor role, like `publish`.
+
+## When each check runs
+
+Not every check waits for publish. Creating or updating an agent already runs
+most of them and rejects the write, so a stored draft is never arbitrarily
+broken.
+
+| Check | On every draft write | On `validate` and `publish` |
+| --- | --- | --- |
+| Config shape: models, channels, speed, language, templating, endpointing | Yes | Yes |
+| References: tools published, integrations and FAQs exist | Yes | Yes |
+| Tool name and MCP namespace collisions | Yes | Yes |
+| Handoff targets and media compatibility | Yes | Yes |
+| Inline tool and inline MCP definitions | Yes | Yes |
+| A provider key for every provider the agent needs | No | Yes |
+| The operation trees of attached and lifecycle-hook tools | No | Yes |
+| A required variable with no default on an agent that answers a number | No | Yes |
+| A channel that what the agent is assigned to cannot run | No | Yes |
+| An integration that is not active (warnings) | No | Yes |
+| An attached FAQ with no entries (warning) | No | Yes |
+
+A draft may reference a provider you have not brought a key for yet; a published
+agent may not, because it would fail on its first turn.
+
+## The error envelope
+
+A failed publish is a `400` in the one error shape every Talqing endpoint uses:
+
+```json
+{
+  "detail": {
+    "message": "this agent has validation errors",
+    "errors": [
+      "unknown LLM model 'openai/gpt-4.9' - pick from: xai/grok-4.5, xai/grok-4.3, openai/gpt-5.6-sol, …",
+      "tool 'check_order' has no published version - publish it before attaching"
+    ]
+  }
+}
+```
+
+`message` changes with what you were doing; `errors` is the same list `validate`
+would have returned.
+
+| Where | `message` |
+| --- | --- |
+| `POST /v1/agents` or `PATCH /v1/agents/{agent_id}` | `this agent config has problems` |
+| `POST /v1/agents/{agent_id}/publish` | `this agent has validation errors` |
+| `POST /v1/agents/{agent_id}/versions/{version}/rollback` | `this version cannot answer this agent's phone numbers` |
+| A call-starting request with `agent`, `agent_override` or `agent_team` | `the resolved agent config is invalid` |
+
+Both SDKs surface it the same way: `error.errors` on `TalqingApiError`
+(TypeScript) and `error.errors` on `TalqingAPIError` (Python). See
+[errors](/api-reference/errors).
+
+## Models and the pipeline
+
+| Cause | Error | Fix |
+| --- | --- | --- |
+| No model in a slot the channel needs | `voice agents need a text-to-speech model` | Voice and video need `stt`, `llm` and `tts`, or a `realtime` model instead of all three. Text needs `llm`. |
+| A `provider`/`model` pair the catalog does not have | `unknown LLM model 'openai/gpt-4.9' - pick from: …` | Read `GET /v1/catalog` and use an exact pair. See [models](/agents/models). |
+| A model that exists but not for this channel | `TTS model 'provider/model' does not support channel 'video'` | Pick a model whose catalog entry lists this channel. |
+| A fallback set to the primary | `LLM fallback is the same model as the primary ('openai/gpt-5.6-luna') - pick a different one, or remove it` | Pick a different model, or drop `fallback`. |
+| A streaming STT paired with a batch STT fallback | `speech-to-text fallback must match the primary: 'deepgram/nova-3' is streaming but 'openai/gpt-transcribe' transcribes in batches - pick a fallback of the same kind` | Both sides of an STT failover must be the same kind. See [model fallbacks](/agents/model-fallbacks). |
+| `speed` on a model that has no speed control | `TTS model 'deepgram/aura-2' does not support speed` | Leave `speed` at `1.0`. |
+| `speed` outside the model's range | `TTS speed for 'elevenlabs/eleven_turbo_v2_5' must be between 0.8 and 1.2` | Use a value inside the range the catalog entry publishes. |
+| `speed` that is not a finite number | `TTS speed must be a finite number` | Send a real number. |
+| `reasoning_effort` on a model with no thinking setting | `the model 'openai/gpt-4.1' has no thinking setting - leave the reasoning effort unset` | Remove it, or pick a model that offers one. |
+| A `reasoning_effort` the model does not offer | `the model 'openai/gpt-5.6-luna' does not support thinking effort 'minimal' - it offers: none, low, medium, high` | The accepted values are per model. See [reasoning](/agents/reasoning-and-builtin-tools). |
+| `priority: true` on a model with no priority lane | `the model 'openai/gpt-5.4-nano' has no priority lane - turn it off, or pick a model that offers one` | Support is per model, not per provider. |
+| `priority: true` on the call-analysis model | `the call analysis model cannot use the priority lane - analysis runs after the call has ended` | Turn it off. Analysis runs once the caller has hung up. |
+| A built-in tool the model does not have | `the model 'gemini/gemini-3.6-flash' has no built-in tool 'web_search' - it offers: google_search, url_context, code_execution` | Check the model's catalog entry. The primary and the failover are judged separately. |
+| The same built-in tool twice | `built-in tool 'web_search' is switched on twice` | Remove the duplicate. |
+| An option a built-in tool does not take | `built-in tool 'web_search' has no option 'depth' - it takes: allowed_domains, search_context_size` | Only the options the catalog entry declares. |
+| A built-in tool option of the wrong type | `built-in tool 'file_search' option 'max_num_results' must be a whole number` | Match the declared type: boolean, integer, string, enum or string list. |
+| A required built-in tool option left blank | `built-in tool 'file_search' needs 'vector_store_ids' (Vector store IDs)` | Supply it. |
+| Two built-in tool options that conflict | `built-in tool 'web_search' cannot set both 'allowed_domains' and 'excluded_domains'` | The provider rejects a request carrying both. Pick one. |
+| A realtime agent with `greeting_interruptible: false` | `realtime models detect interruptions themselves, so the greeting cannot be protected from them` | Make the greeting interruptible, or move to the cascade. |
+| A realtime agent with an `on_user_turn_completed` hook | `realtime models detect the end of a turn themselves, so the 'after each user turn' hook would never run` | Remove the hook, or move to the STT → LLM → TTS cascade. See [lifecycle hooks](/agents/lifecycle-hooks). |
+| Endpointing windows that disagree | `maximum silence must be at least the minimum` | Raise `max_silence_duration`, or lower `min_silence_duration`. |
+
+## Voice, delivery and avatars
+
+| Cause | Error | Fix |
+| --- | --- | --- |
+| `stability` or `similarity_boost` on a model that reads neither | `text-to-speech model 'sarvam/bulbul:v3' has no stability or similarity_boost setting - clear it, or pick one of: …` | Those two settings exist only on ElevenLabs models. Clearing them is not the same as sending them — see [voices](/agents/voices). |
+| `expressive: true` on a voice that speaks no delivery tags | `text-to-speech model 'sarvam/bulbul:v3' cannot speak delivery tags, so expressive delivery would change nothing` | Turn it off, or pick a model whose catalog entry declares a dialect. |
+| `expressive` set on the primary but not the fallback, or the reverse | `expressive delivery is on for '…' but off for '…' - a fallback takes over mid-call, and the agent keeps writing delivery tags either way, so set both the same` | Match the flag on both. See [expressive delivery](/agents/expressive-delivery). |
+| A video agent with no avatar | `video agents need an avatar` | Set `avatar.avatar_id`. |
+| A video agent with no avatar model | `video agents need an avatar model (e.g. anam)` | Set `avatar.model`. |
+| An avatar model the catalog does not have | `unknown avatar model 'anam/x' - pick from: anam/anam` | Read `GET /v1/catalog`. See [video avatars](/agents/video-avatars). |
+| A noise-cancellation model the catalog does not have | `unknown noise cancellation model 'aicoustics/quail_x' - pick from: aicoustics/quail_vf_s, aicoustics/quail_vf_l, aicoustics/quail_l` | Only checked while `noise_cancellation.enabled` is true. See [audio processing](/agents/audio-processing). |
+
+## Language
+
+| Cause | Error | Fix |
+| --- | --- | --- |
+| A language code the catalog does not publish | `unknown language 'en-XX' - pick one from the agent's language list` | Use a code from the catalog. |
+| A model that does not speak the agent's language | `text-to-speech model 'xai/xai-tts' does not support Tamil` | Pick a model that lists it, or change `config.language`. Fallbacks are checked too. |
+| `language: null` on a model that cannot detect one | `text-to-speech model 'soniox/tts-rt-v2' does not detect languages on its own - set the agent's language instead of leaving it on Auto` | Set `config.language`. See [language](/agents/language). |
+
+A model that publishes no language list is left alone — the setting genuinely
+does not apply to it.
+
+## Prompt, greeting and handoff prose
+
+The prompt, the greeting, and each handoff destination's `description`,
+`summary_prompt` and `message` are substituted before the model or the caller
+sees them, so a token that resolves to nothing would reach them as literal
+braces.
+
+| Cause | Error | Fix |
+| --- | --- | --- |
+| A token whose root is not one of ours | `the system prompt reads {{customer.number}}, which is not a variable - it would be sent exactly as written, braces and all. A system prompt can read {{userdata.…}}, {{system_vars.…}} and {{vars.…}}` | Rewrite it onto a real root. A bare `{{name}}` or a typo like `{{userdate.name}}` hits this. |
+| A root with no key | `the greeting reads {{userdata}}, which is the whole userdata bag rather than one variable - add a dot and the name of the one you want` | Name the field. |
+| A `{{system_vars.…}}` key that does not exist | `the system prompt reads {{system_vars.caller}}, which is not a system variable - the system variables are: human_phone_number, agent_phone_number, direction, now, date, time` | Use one of the six. |
+| A clock variable with no `timezone` | `the greeting reads {{system_vars.time}}, but this agent has no timezone - set one so the agent knows what "now" means (for example 'Asia/Kolkata')` | Set `config.timezone` to an IANA name. |
+| `{{secrets.…}}` in prose | `the system prompt cannot use {{secrets.API_KEY}} - a workspace secret is a credential for tools to send, never text for the model` | Read it from a tool instead. See [secrets](/platform/secrets). |
+| `{{args.…}}` in prose | `the system prompt cannot use {{args.order_id}} - tool arguments exist only inside a tool call` | Remove it. |
+| `{{tooldata.…}}` in prose | `the system prompt cannot use {{tooldata.total}} - tooldata exists only while the tool that wrote it is running - publish the value to userdata instead` | Publish the value to `userdata` from the tool. |
+| `{{consent.notice}}` anywhere but the greeting | `the system prompt cannot use {{consent.notice}} - the model would paraphrase or drop it, and a recording notice has to be spoken word for word - put it in the greeting instead` | Move it into the greeting. |
+
+## Variables
+
+| Cause | Error | Fix |
+| --- | --- | --- |
+| The same variable declared twice | `these variables are declared more than once: order_id - each name gets one description and one default, and the later entry would silently win` | Keep one declaration. |
+| A `required` variable with no `default` on an agent assigned to a phone number | `'account_id' is required and has no default, and this agent answers inbound calls on +911234567890 - which carry no request to supply it. Give the variable a default, make it optional, or unassign the number` | An inbound call carries no request of yours, so nothing could ever supply it. Give it a default, make it optional, or unassign the number. |
+| Rolling back to a version in that state | `version 4 declares 'account_id' as required with no default, and this agent answers inbound calls on +911234567890 … Roll back to a version that gives it a default, or unassign the number` | Roll back to a different version. A frozen version cannot be edited. |
+
+The same rule is enforced from all three directions — assigning the number,
+publishing under one already assigned, and rolling back — so the state is not
+reachable by any route. See [variables](/agents/variables).
+
+## What the agent is assigned to
+
+A phone number, a stream connection, an enabled integration trigger and a call
+batch that follows the published version all run whatever this agent publishes,
+so a publish or rollback that would break one is refused. A batch created with
+its own cast (`agent_version`, `agent_override` or `agent_team`) runs a frozen
+copy, and a disabled trigger is re-checked when enabled, so neither is checked here.
+
+| Cause | Error | Fix |
+| --- | --- | --- |
+| Leaving `voice` while a number is assigned | `inbound calls on +911234567890 need a voice agent and this agent is text - switch the channel back to voice, or unassign the number` | Numbers only take voice agents. |
+| Leaving `voice` while a stream connection points here | `stream connection 'Exotel IVR' needs a voice agent and this agent is video - switch the channel back to voice, or point the connection at another agent` | A stream carries audio only. |
+| Leaving `voice` while a batch is scheduled, running or paused | `call batch 'Renewals' needs a voice agent and this agent is text - switch the channel back to voice, or cancel the batch` | Cancel the batch, or publish once it is done. |
+| A new required variable the batch cannot supply | `this agent requires 'plan' with no default, and call batch 'Renewals' supplies no value for it - give the variable a default, make it optional, or cancel the batch` | A batch's `vars` are fixed at create. |
+| Leaving the channel an enabled trigger needs | `the trigger on integration 'Support bot' needs a text agent and this agent is voice - switch the channel back to text, or point the trigger at another agent` | Telegram triggers need a text agent. |
+
+A rollback refuses the same states, naming the version: `… and version 2 is text - roll back to a voice version, or unassign the number`.
+
+## Tools, hooks and MCP servers
+
+| Cause | Error | Fix |
+| --- | --- | --- |
+| An attached or hook tool id that is not a valid UUID | `tool 'abc' is not a valid id` | Send the tool's real id. |
+| A tool that does not exist in this workspace | `tool 6f2a… not found` | Check the id, and the region — tools are regional. |
+| An unpublished tool attached | `tool 'check_order' has no published version - publish it before attaching` | Publish the tool first. See [versions](/agents/versions). |
+| A tool named like one of the model's built-in tools | `an attached tool is named 'web_search', which is what the model's own built-in tool is called - rename it, or switch the built-in one off` | The model would see two things with one meaning. |
+| Two tools on the agent sharing a name | `two tools on this agent are named 'lookup' (an attached tool and the on_enter hook) - the model would have no way to tell them apart` | Rename one. Attached tools, hook tools and generated handoff tools share one namespace. |
+| An inline tool using a reserved name | `'stop_recording' is reserved by the platform` | `stop_recording`, `submit_result`, `get_faq_answers` and four more belong to us. See the [reserved names](/tools/schema-and-description#name). |
+| An inline tool with no operations | `add at least one operation` | Give it a tree. See [operation tree](/tools/operation-tree). |
+| A lifecycle hook whose tool contains a `transfer` | `the 'on_enter' hook cannot use tool 'escalate': it contains a transfer, and a hook runs outside a turn, so the agent cannot finish speaking before the handover. Attach it as a normal tool the model can call instead.` | Attach it as an ordinary tool. |
+| An integration id that does not exist | `integration 6f2a… not found` | Check the id. |
+| An integration that is not MCP-capable | `integration 'Resend' is not MCP-capable and cannot be attached as a tool` | Only MCP providers can be attached to an agent. |
+| The same integration attached twice | `integration 6f2a… is attached twice` | Remove the duplicate. |
+| An FAQ that does not exist in this workspace | `FAQ 6f2a… not found` | Check the id, and the region — FAQs are regional. Deleting an FAQ is refused while a draft or the published version attaches it, so this is usually a wrong id. See [FAQs](/agents/faqs). |
+| The same FAQ attached twice | `FAQ 'Store FAQ' is attached twice` | Remove the duplicate. |
+| Two MCP servers under one namespace | `'Google Calendar' and 'Calendar (ops)' both present their tools under 'google_calendar' - every tool name they share would reach the model twice. Give one of them a different tool namespace.` | Set a distinct `tools_namespace` on one. Two connections to the same hosted provider collide by default. |
+| An inline MCP server with a bad URL, or a `{{secrets.NAME}}` that does not exist | `MCP server 'Ops': secret 'OPS_TOKEN' does not exist` | Create the secret, or fix the URL. |
+
+At publish, the operation trees of every attached and hook tool are validated
+too, so a tool whose tree breaks against *this* agent's variables fails the
+agent's publish. Those messages are documented under
+[templating and data](/tools/templating-and-data).
+
+## Handoffs
+
+| Cause | Error | Fix |
+| --- | --- | --- |
+| Two destinations with the same name | `two handoff destinations are named 'Billing' - names must be unique within an agent` | Rename one. |
+| A destination name with no letters or digits | `handoff destination '—' has no letters or digits in its name, so there is no tool name to give the model - rename it` | Each destination becomes a `handoff_to_<name>` tool. |
+| A target agent that does not exist | `the handoff to 'Billing': agent 6f2a… not found` | Check the id. |
+| A target agent that is unpublished | `the handoff to 'Billing': agent 'Billing desk' has no published version - publish it before handing calls to it` | Publish the target first. |
+| A target on a different channel | `the handoff to 'Billing': handoff target channel 'text' does not match source channel 'voice'` | Both ends must be the same channel. |
+| A target on the other pipeline | `the handoff to 'Billing': a handoff target must use the same pipeline as its source — the source uses a realtime speech-to-speech model and the other uses an STT-LLM-TTS cascade` | Both ends must be realtime, or both cascade. |
+| A video target with a different face | `the handoff to 'Billing': video handoffs require the same avatar provider, catalog model, avatar and display name - the Anam session is opened once, for the call, and cannot be swapped for another face part-way through` | Use the same avatar on every agent in the graph. |
+| An expressive agent handing off to a different voice | `a handoff out of an agent with expressive delivery must keep the same voice, or the target inherits a transcript full of delivery tags and reads them out to the caller` | Same provider, same model, `expressive: true` on both. Handing off *into* an expressive agent is fine. |
+| A destination with no `agent_id` that names nothing on the call | `the handoff to 'Billing' is neither a team member nor a published agent` | Only reachable on an [agent team](/teams/agent-teams-on-a-call), where the name must match a member. |
+
+See [handoffs](/teams/handoffs) for how to write the `description` the model
+routes on.
+
+## Recording, analysis and conversation memory
+
+| Cause | Error | Fix |
+| --- | --- | --- |
+| Recording consent on with an empty notice | `recording consent is on but the consent notice is empty` | Write the sentence the caller hears. |
+| Recording consent on a realtime agent | `recording consent needs a cascade pipeline (STT + LLM + TTS): a realtime model rephrases what it is asked to say, and a recording notice has to be spoken word for word` | Use the cascade. |
+| Recording consent with no greeting | `recording consent needs a greeting to speak the notice in - add a greeting containing {{consent.notice}}` | Add a greeting. |
+| A greeting that does not carry the token | `recording consent is on, so the greeting must contain {{consent.notice}} to say where the notice is spoken` | Put `{{consent.notice}}` in the greeting. See [recording](/telephony/recording). |
+| Call analysis on with nothing switched on | `call analysis is on but nothing is switched on to produce - turn on the summary, define what a successful call is, or add a field to extract` | Ask it for something, or turn analysis off. |
+| An analysis model the catalog does not have | `unknown analysis model 'openai/gpt-4.9'` | Use a catalog pair. |
+| Analysis on an agent with no model to inherit from | `call analysis has no model to run on - this agent has no language model to inherit one from, so pick one for analysis or turn analysis off` | Name `analysis.model`. See [call analysis](/observability/call-analysis). |
+| `conversation.context: "summary"` with analysis summaries off | `'include summaries of past conversations' needs call analysis to be writing summaries - turn on analysis and its summary, or choose a different conversation context` | Turn on `analysis.enabled` and `analysis.summary`, or pick `none` / `transcript`. See [conversation memory](/agents/conversation-memory). |
+
+## Vision
+
+| Cause | Error | Fix |
+| --- | --- | --- |
+| Screen share on a model that cannot read images | `'provider/model' cannot read images, so it cannot see a screen share - pick a model that can, or turn screen share off` | Pick a model whose catalog entry sets `vision`. |
+| Screen share where the LLM fallback cannot read images | `the LLM fallback 'provider/model' cannot read images, so a failover would leave the agent blind to the screen mid-call - pick a fallback that can, or turn screen share off` | Both sides need vision. See [vision and images](/agents/vision-and-images). |
+
+Screen share on a **realtime** agent is refused earlier, when the config is
+parsed — see [Refusals that arrive as a 422](#refusals-that-arrive-as-a-422).
+
+## Provider keys
+
+Talqing is strictly bring-your-own-key: agents run on your provider accounts and
+we have none of our own to fall back on. At publish, every provider the config
+names must have a key.
+
+| Cause | Error | Fix |
+| --- | --- | --- |
+| A provider with no key in this workspace | `no Deepgram API key for this workspace - add one under BYOK` | Add the key. This counts the LLM, STT, TTS, realtime, avatar and noise-cancellation providers, every fallback, the analysis model where it names its own, and the model of every attached task. See [provider keys](/get-started/provider-keys). |
+
+Turning call analysis on never demands a key the agent did not already need —
+left unset, analysis runs on the agent's own language model.
+
+Provider keys are regional, like everything else a workspace owns. An agent that
+publishes in one region can fail to publish in another for this reason alone.
+
+## Warnings
+
+Warnings are things worth knowing that do not stop a publish.
+
+| Warning | What it means |
+| --- | --- |
+| `'xai/grok-voice-think-fast-2.0' cannot read images, so nobody on this agent can attach one - pick a model that can if that matters` | Image input is a model capability, not an agent setting. There is nothing to turn off. |
+| `'openai/gpt-5.6-luna' reads images but the fallback 'provider/model' cannot - a failover would stop the agent seeing images mid-conversation, including ones already sent` | The agent reads images until the day the primary fails over. |
+| `the system prompt reads {{vars.tier}}, which this agent does not declare - it will be empty unless the request that starts the session supplies it. This agent declares: …` | The `vars` key space is open by design, so this is a warning rather than an error. |
+| `the greeting reads {{system_vars.human_phone_number}}, but a text agent never takes a phone call - this will always be empty` | The three call variables are only filled on a phone call. |
+| `the greeting reads {{system_vars.now}}, which is a machine timestamp a text-to-speech voice cannot say - use {{system_vars.time}} or {{system_vars.date}} in a spoken line` | `now` is `2026-08-19T19:26:59+05:30`. Do not read it aloud. |
+| `word-count interruption needs interim transcripts, which batch speech-to-text models do not produce - the agent will only notice the interruption once the caller stops speaking` | `turn_handling.interruption.min_words` above zero on a batch STT model. |
+| `the handoff to 'Billing' resolves only when this agent runs in a team that defines 'Billing'` | A destination with no `agent_id`. A stored agent's team is unknowable at publish. |
+| `'Payments' has recording on but 'Support' has it off — recording cannot start part-way through a call, so nothing will be recorded if 'Support' is the agent that answers` | Whether this bites depends on which agent answers, which no per-agent check can know. |
+| `nothing hands off to 'Escalations', so it will never take a turn on this call` | Only on an agent team. A member reachable in two hops is legitimate; a typo is not. |
+| `FAQ 'Store FAQ' has no questions yet` | An attached FAQ with no entries adds nothing to the prompt, and the agent runs without it. Add entries — they are live from the next session, with no republish. |
+| `integration 'Slack' needs reconnecting - its tools are left out until you reconnect it` | Also `is disabled`. A call only loads an `active` integration. See [connecting](/integrations/connecting). |
+
+## Refusals that arrive as a 422
+
+A few states are refused when the config is parsed, before validation runs at
+all. They come back as `422` with the field named, not as a `400` with an errors
+list — and because such a config can never be stored, `validate` never reports
+them.
+
+| Cause | Message |
+| --- | --- |
+| Screen share on a realtime agent | `config: a realtime agent cannot watch a screen share - a speech-to-speech model detects turns itself, so there is no moment to hand it the newest frame. Switch to the speech-to-text -> LLM -> text-to-speech cascade.` |
+| A value outside a field's declared range, an unknown field, a bad IANA timezone | One `field: problem` line per failure |
+
+Switching `channel` normalizes rather than refuses: a text agent drops `stt`,
+`tts`, `realtime`, `greeting`, `language`, turn handling, background audio,
+noise cancellation, vision input, recording, analysis and the avatar. See
+[channels](/agents/channels).
+
+## The same validator guards a call
+
+There is one agent validator, and per-call configuration runs it too. An inline
+`agent`, an `agent_override` merged onto a published version, and every member
+of an `agent_team` are all checked by `validate_agent_draft` at publish
+strictness before the call starts — so a bad override is a `400` at create,
+naming the problem, rather than a call that connects and then fails. See
+[per-call configuration](/agents/per-call-configuration).
+
+<CardGroup cols={2}>
+  <Card title="Versions" href="/agents/versions">
+    Draft, publish, rollback, and how tool versions get pinned.
+  </Card>
+  <Card title="Provider keys" href="/get-started/provider-keys">
+    Which providers need a key, and what fails without one.
+  </Card>
+  <Card title="Errors" href="/api-reference/errors">
+    The error envelope, status codes and what to retry.
+  </Card>
+</CardGroup>

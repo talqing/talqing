@@ -1,0 +1,228 @@
+---
+title: "Recordings"
+description: "Read a call's recording state, play or download the audio, and delete it — plus the separate screen recording."
+---
+
+Every voice and video call can leave two artifacts: one stereo audio file, and —
+on a web call where the agent watched a shared screen — one video of that
+screen. Both live in object storage, both are reachable by a short-lived signed
+link, and both are erased by the same retention policy.
+
+Audio recording is **on by default**. The agent-side settings, including consent
+disclosure, are in [recording](/telephony/recording); this page is about reading
+what a call produced.
+
+## Start with `state`
+
+Never read the raw status. `recording.state` is the one field that answers "is
+there anything to play", and it is served on both the calls list and the call
+detail.
+
+| `state` | What it means | What to do |
+| --- | --- | --- |
+| `available` | The file is stored and playable. | Play it, or ask for a download link. |
+| `none` | Recording was off for this agent, or the session has no audio. | Nothing is missing. Turn recording on in the agent's config if you wanted one. |
+| `pending` | The call is still running, or finalize is still uploading. | Wait. The call's row is written before the upload finishes, so there is a legitimate window of up to **five minutes** after the call ends. |
+| `failed` | Recording was on and produced nothing. **A recording still `pending` more than five minutes past the end of the call also reads as `failed`** — the process that was uploading it died. | The audio is not coming. The call, its transcript and its cost are unaffected. |
+| `not_shared` | Screen recording only. It was switched on and nobody ever shared a screen. | Nothing. This is the normal outcome of a call where the screen never came up, as opposed to `none`, which means it was switched off. |
+| `consent_withdrawn` | The caller asked not to be recorded, and the file was discarded before upload. | Nothing, ever. There is no partial recording to recover — a withdrawal discards what was captured rather than keeping the first half. |
+| `deleted` | A person deleted it through the API or the dashboard. | Nothing. It is gone. |
+| `expired` | Your workspace's retention policy deleted it. | Nothing. Kept distinct from `deleted` so you can tell your own policy apart from somebody's click. |
+
+`available` is the only playable state, and it is the only one for which a
+signed link is ever minted.
+
+Beside `state`, both `recording` and `screen_recording` carry `started_at`,
+`duration_s` (the container's own duration, so it matches the scrub bar) and
+`bytes`. `expires_at` says when retention will erase this call's content, and is
+`null` while retention is unlimited — which is the default.
+
+## Playing and downloading
+
+`GET /v1/calls/{session_id}/recording` responds `302` with a redirect to object
+storage. Every HTTP client follows it by default, so what you actually receive
+is the audio.
+
+The link **expires in one hour**. It supports `Range`, which is what lets a
+player seek without pulling the whole call first — and why a browser re-requests
+the same URL on every seek.
+
+<Warning>
+**Do not store a signed link.** Ask for a fresh one whenever you need it. A URL
+copied out of a webhook payload or a log is dead within the hour, and treating
+it as a lasting credential is exactly what the short expiry exists to prevent.
+</Warning>
+
+Pass `download=true` for a link the bucket serves as an attachment named
+`call-{session_id}.ogg`. It has to be a separate link because the content
+disposition is signed into the URL, and an `<a download>` cannot rename a
+cross-origin file.
+
+<CodeGroup>
+```bash cURL
+# -L follows the redirect; -o writes the file.
+curl -L -o call.ogg \
+  https://api.in.talqing.com/v1/calls/9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1/recording \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+const call = await talqing.calls.get({
+  session_id: "9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1",
+});
+
+if (call.session.recording.state === "available") {
+  // Minted on the detail view, valid until `url_expires_at`.
+  audioElement.src = call.session.recording.url!;
+}
+```
+
+```python Python
+call = talqing.calls.get("9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1")
+
+recording = call["session"]["recording"]
+if recording["state"] == "available":
+    print(recording["url"], recording["url_expires_at"])
+```
+</CodeGroup>
+
+The call detail response already carries ready-made links, so a player normally
+needs no second request:
+
+| Field | Meaning |
+| --- | --- |
+| `recording.url` | Plays inline, `Range`-capable. |
+| `recording.download_url` | The same object, served as a named download. |
+| `recording.url_expires_at` | When both stop working. The recording itself is untouched — ask again for fresh ones. |
+
+Both are minted on the **call detail only**, and only while the state is
+`available`. A list of 200 calls does not carry 200 signed URLs that all die in
+an hour, so `url`, `download_url` and `expires_at` read `null` in a list row.
+
+### What is in the file
+
+One stereo Ogg/Opus file per call: **the caller is the left channel and the agent
+is the right**. Splitting the channels gives you either side alone — one
+`ffmpeg -map_channel` away — which is what makes the file useful both for
+listening and for building training data.
+
+It is what the agent heard *after* noise cancellation, not a tap on the phone
+line. It does not include background audio, which the agent publishes as its own
+track.
+
+A call parked on hold during a transfer is silent for that stretch, and that
+silence is inside the duration, inside the file and inside the bill. The
+recording measures **our** part of the call: after a transfer connects, our
+agent has left, and whatever the caller and the person said next is not here.
+
+## Screen recordings
+
+A second, separate artifact — never muxed into the audio, whose file means one
+thing.
+
+| Fact | Value |
+| --- | --- |
+| Endpoint | `GET /v1/calls/{session_id}/screen-recording`, same `302`, same one-hour link, same `Range` support, same `download=true`. |
+| Filename | `call-{session_id}-screen.mp4`. |
+| Format | 1 fps H.264, which is why an hour of it is single-digit megabytes. |
+| Produced by | Only agents with `vision_input.screenshare.record` on. See [vision and images](/agents/vision-and-images). |
+| Coverage | The **whole call**, not only the shared stretches. The parts where nobody was sharing are black, so its timeline lines up with the audio and the transcript second for second. |
+| Field | `session.screen_recording`, with exactly the same shape as `session.recording`. |
+
+There is no screen recording on a phone call — a phone has no screen to share.
+
+## Deleting
+
+`DELETE /v1/calls/{session_id}/recording` destroys the media and keeps
+everything else. The transcript, the tool calls, the cost and the analysis stay
+exactly as they are.
+
+<Warning>
+This is **immediate and cannot be undone**. Unlike deleting a whole call, which
+schedules a purge, this destroys one or two objects and returns `204`.
+</Warning>
+
+It deletes both artifacts together — the audio and, where there is one, the
+screen video. They are one thing to the person clicking Delete.
+
+It is quiet on anything that is not `available`, which is more than "already
+deleted": there is no object behind `none`, `not_shared`, `failed` or
+`consent_withdrawn`, and each of those already says something truer than
+`deleted` would. Overwriting `consent_withdrawn` in particular would destroy a
+compliance record — that the caller asked — and replace it with somebody's
+click. `expired` is the same case for your own retention policy.
+
+The one gap is `pending`: nothing is stored to delete yet. Ask again once the
+call has settled.
+
+<CodeGroup>
+```bash cURL
+curl -X DELETE \
+  https://api.in.talqing.com/v1/calls/9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1/recording \
+  -H "Authorization: Bearer $TALQING_API_KEY"
+```
+
+```typescript TypeScript
+await talqing.calls.recording.delete({
+  session_id: "9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1",
+});
+```
+
+```python Python
+talqing.calls.recording.delete("9c1f6ad2-3b47-4e58-9a2c-7f0d51e8c4b1")
+```
+</CodeGroup>
+
+To erase the transcript and everything else with it, delete the whole call
+instead — `DELETE /v1/calls/{session_id}`, covered in
+[calls](/observability/calls).
+
+### Retention deletes them for you
+
+Your workspace's retention policy purges recordings on a schedule, without
+anybody pressing anything, and the state becomes `expired`. The default is
+unlimited — a recording is kept until something deletes it. Nothing ages a file
+out behind the database's back, so `state` and reality cannot disagree.
+
+`recording.expires_at` tells you the deadline for a given call. It is computed
+once, when the call ends, from the policy as it stood then: changing
+`retention_days` never moves a purge that is already scheduled. See
+[data retention and privacy](/platform/data-retention-and-privacy).
+
+## When a link 404s
+
+Asking for a recording that is not `available` returns `404` with a message
+saying which state it is in — five different reasons for "no recording" is the
+difference between understanding your own settings and filing a ticket.
+
+| State | Message |
+| --- | --- |
+| `none` | `this call was not recorded — recording is off for this agent` |
+| `not_shared` | `nobody shared their screen on this call` |
+| `pending` | `the call is still in progress; its recording is not ready yet` |
+| `expired` | `this recording was deleted under your organization's data retention policy` |
+| `consent_withdrawn` | `the caller asked not to be recorded` |
+| `deleted` | `this recording was deleted` |
+| `failed` | `this call's recording could not be saved` |
+
+Reading `recording.state` off the call first answers the same question without
+the round trip.
+
+## The `recording.ready` webhook
+
+Audio reaching storage fires a `recording.ready` event carrying a signed `url`,
+its `url_expires_at`, the duration and the size — so a consumer that wants its
+own copy can take one without calling back. It fires for the **audio only**; a
+screen recording produces no event of its own.
+
+The link in that payload expires in an hour like every other. See
+[webhooks](/observability/webhooks).
+
+<CardGroup cols={2}>
+  <Card title="Recording settings" href="/telephony/recording">
+    Turning recording on and off, consent disclosure, and the stop-recording tool.
+  </Card>
+  <Card title="Data retention" href="/platform/data-retention-and-privacy">
+    What is stored, for how long, and what a purge destroys.
+  </Card>
+</CardGroup>

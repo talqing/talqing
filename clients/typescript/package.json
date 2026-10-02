@@ -1,0 +1,20 @@
+{
+  "name": "@talqing/clients",
+  "private": true,
+  "description": "Workspace root for the three published TypeScript packages. Not published itself.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build -w @talqing/sdk && npm run build -w @talqing/client && npm run build -w @talqing/react",
+    "typecheck": "npm run typecheck --workspaces",
+    "generate": "npm run generate -w @talqing/sdk",
+    "generate:check": "npm run generate:check -w @talqing/sdk"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3"
+  }
+}

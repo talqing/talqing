@@ -1,0 +1,272 @@
+---
+title: "Conditionals"
+description: "The if operation: the six comparison operators, how values are coerced, the guard pattern, and why clock comparisons fail."
+---
+
+`if` is the only branching operation. It compares two values and runs its `then`
+chain or its `else` chain — and because a branch never rejoins, the branch it
+takes is where the tool ends.
+
+```json
+{
+  "kind": "if",
+  "config": { "left": "{{tooldata.status}}", "op": "eq", "right": "delivered" },
+  "then": [{ "kind": "say", "config": { "text": "That one is already with you." } }],
+  "else": [{ "kind": "say", "config": { "text": "That one is still on its way." } }]
+}
+```
+
+## Config
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `left` | any | yes | Usually a template token. A literal `null` is a meaningful thing to compare against, which is why it cannot be left out |
+| `op` | one of the six below | yes | |
+| `right` | any | no, defaults to `null` | Ignored by `exists` |
+
+`then` and `else` sit on the operation, not in `config`, and they are the only
+place either word is legal — sending a `then` on any other kind is rejected.
+Both are optional: an `if` with no `else` does nothing on the false path.
+
+## The operators
+
+| `op` | True when |
+| --- | --- |
+| `eq` | The two values are equal, or their string forms are equal |
+| `neq` | They are not — the exact negation of `eq` |
+| `gt` | `left` is strictly greater than `right`, both read as numbers |
+| `lt` | `left` is strictly less than `right`, both read as numbers |
+| `exists` | `left` is not null, not an empty string, not an empty array and not an empty object. `right` is ignored |
+| `in` | `left` is one of the values in `right` |
+
+There is no `gte` or `lte`, and no substring, prefix or regex operator. For
+`>=`, use `lt` and swap the two branches; for anything richer, compute the
+answer in a [`code` operation](/tools/code) and branch on what it published.
+
+## How values are compared
+
+**`eq` and `neq` try the values as they are, then as strings.** So `"5"` equals
+`5`, which is what makes a number that came back from an API as a string
+comparable. It is case-sensitive: `"Gold"` does not equal `"gold"`. If your API
+is inconsistent about case, normalize it in a `code` operation rather than
+writing three branches.
+
+**Compare a boolean against a JSON boolean** — `"right": true`, not
+`"right": "true"`. `right` accepts any JSON value, and a boolean's string form is
+not `"true"`, so the string version never matches.
+
+<Note>
+In the dashboard both sides of an `if` are plain text boxes, so a JSON boolean
+cannot be typed there. If you will edit the tool in the dashboard, have the
+`code` operation publish a string — `"status": "open"` — and compare against
+`open`, rather than publishing `true` and depending on how a boolean renders as
+text.
+</Note>
+
+**`gt` and `lt` need two numbers.** Both sides are converted; a side that will
+not convert **fails the operation** rather than quietly taking the `else`
+branch, with `` `gt` needs two numbers, and cannot compare '7:26 PM' with '09:00' ``.
+That is deliberate: a comparison that cannot be made has no true side and no
+false side, and silently choosing one sent every caller down the wrong path with
+nothing to show for it.
+
+**`exists` is about presence, not truth.** A missing key, `null`, `""`, `[]` and
+`{}` are absent; `0` and `false` are present. To test whether a value came back
+at all, use `exists` — comparing a missing value against an empty string does
+not match it.
+
+**`in` is membership, not substring.** `right` may be an array, or a
+comma-separated string that is split for you: `["shipped", "delivered"]` and
+`"shipped, delivered"` mean the same thing. Each choice is trimmed and compared
+as a string.
+
+## Branches do not rejoin
+
+`if` is terminal in its chain: nothing may follow it, in the top-level list or
+inside a `then` or `else`. There is no operation both paths flow back into.
+
+- Work needed on both paths is written into both.
+- Work needed after the decision means the branch should come later.
+- A third path is a second `if` inside the first one's `else`.
+
+`on_error: "continue"` on an `if` therefore means something specific: the
+condition failed, **neither branch runs**, and the tree ends there. It is the
+only thing `continue` can mean on an operation nothing follows, and it is a
+reasonable thing to want — a comparison you would rather skip than apologise
+for.
+
+## The guard pattern
+
+For an early exit, put the exit in `then` and **the whole rest of the flow in
+`else`**. This is the shape to reach for whenever a tool has a precondition.
+
+```json
+[
+  {
+    "kind": "http",
+    "config": {
+      "method": "GET",
+      "url": "https://api.example.com/v1/accounts/{{args.account_number}}",
+      "headers": { "Authorization": "Bearer {{secrets.CRM_API_KEY}}" }
+    },
+    "silent": true,
+    "publish_fields": [{ "path": "account.status", "key": "status", "store": "tooldata" }]
+  },
+  {
+    "kind": "if",
+    "config": { "left": "{{tooldata.status}}", "op": "eq", "right": "suspended" },
+    "then": [
+      {
+        "kind": "say",
+        "config": { "text": "That account is suspended, so I am not able to make changes to it today." }
+      },
+      { "kind": "end_call" }
+    ],
+    "else": [
+      {
+        "kind": "http",
+        "config": {
+          "method": "POST",
+          "url": "https://api.example.com/v1/accounts/{{args.account_number}}/address",
+          "headers": { "Authorization": "Bearer {{secrets.CRM_API_KEY}}" },
+          "body": { "line1": "{{args.line1}}", "postcode": "{{args.postcode}}" }
+        },
+        "silent": true
+      },
+      { "kind": "say", "config": { "text": "Done — the address on the account is updated." } }
+    ]
+  }
+]
+```
+
+Note the `end_call` with no `config`: it is the one kind whose config may be
+omitted, because there is nothing to put in it. Anything the tool must do before
+hanging up goes before it — see [ending a call](/tools/end-call).
+
+## Why time and date comparisons fail
+
+`{{system_vars.time}}` resolves to `"7:26 PM"` and `{{system_vars.date}}` to
+`"Wednesday, 19 August 2026"`. They are written to be spoken, not compared.
+Neither converts to a number, so `gt` and `lt` fail the operation on them, and
+`eq` against `"09:00"` is never true.
+
+There is no date arithmetic in an `if`. Business-hours logic — "are we open?",
+"is this within thirty days?", "is it a weekend?" — belongs in a
+[`code` operation](/tools/code) over `new Date(input.system_vars.now)`, which
+carries the agent's own offset:
+
+```ts
+export default async function handler(input) {
+  const hour = Number(
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: input.vars.timezone,
+      hour: "numeric",
+      hour12: false,
+    }).format(new Date(input.system_vars.now)),
+  );
+  return { open: hour >= 9 && hour < 18 };
+}
+```
+
+Publish `open` into `tooldata`, then branch on
+`{"left": "{{tooldata.open}}", "op": "eq", "right": true}`.
+
+## A worked example
+
+Refund eligibility: a status the order must be in, and a window it must be
+inside.
+
+```json
+[
+  {
+    "kind": "http",
+    "config": {
+      "method": "GET",
+      "url": "https://api.example.com/v1/orders/{{args.order_id}}",
+      "headers": { "Authorization": "Bearer {{secrets.SHOP_API_KEY}}" },
+      "timeout": 8
+    },
+    "silent": true,
+    "publish_fields": [
+      { "path": "order.status", "key": "status", "store": "tooldata" },
+      { "path": "order.days_since_delivery", "key": "days", "store": "tooldata" }
+    ]
+  },
+  {
+    "kind": "if",
+    "config": { "left": "{{tooldata.status}}", "op": "in", "right": ["delivered", "collected"] },
+    "then": [
+      {
+        "kind": "if",
+        "config": { "left": "{{tooldata.days}}", "op": "lt", "right": 30 },
+        "then": [
+          {
+            "kind": "http",
+            "config": {
+              "method": "POST",
+              "url": "https://api.example.com/v1/orders/{{args.order_id}}/refunds",
+              "headers": { "Authorization": "Bearer {{secrets.SHOP_API_KEY}}" },
+              "body": { "reason": "{{args.reason}}" },
+              "timeout": 15
+            },
+            "silent": true,
+            "publish_fields": [
+              { "path": "refund.reference", "key": "refund_reference", "store": "userdata" }
+            ]
+          },
+          {
+            "kind": "say",
+            "config": {
+              "text": "That refund is approved. Your reference is {{userdata.refund_reference}}, and the money is back with you in three to five working days."
+            }
+          }
+        ],
+        "else": [
+          {
+            "kind": "say",
+            "config": {
+              "text": "That order was delivered {{tooldata.days}} days ago, which is outside our thirty-day refund window."
+            }
+          }
+        ]
+      }
+    ],
+    "else": [
+      {
+        "kind": "generate_reply",
+        "config": {
+          "instructions": "Explain that the order has not been delivered yet, so there is nothing to refund, and offer to cancel it instead."
+        }
+      }
+    ]
+  }
+]
+```
+
+Three things that make it work:
+
+- The outer `if` is the last operation in the top-level chain, and the inner one
+  is the only operation in its `then`. That is the only way to write three
+  paths.
+- `days` is compared with `lt` against the JSON number `30`. If your API returns
+  it as `"30"`, that still works — `gt` and `lt` read both sides as numbers.
+- Every operation that could return a result is `silent`, so the tool is silent
+  and each branch speaks for itself. Drop the `silent` on the refund `POST` and
+  the agent would narrate the refund JSON on top of the sentence you wrote.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="The code operation" href="/tools/code">
+    Where anything richer than one comparison belongs.
+  </Card>
+  <Card title="The operation tree" href="/tools/operation-tree">
+    Terminal operations, `on_error` and derived silence.
+  </Card>
+  <Card title="Conditional handoffs" href="/teams/conditional-handoffs">
+    Routing decided by a tree rather than by the model.
+  </Card>
+  <Card title="Patterns" href="/tools/patterns">
+    Guard-and-continue and the other recipes.
+  </Card>
+</CardGroup>
